@@ -1,0 +1,52 @@
+/**
+ * Integration registry — the closed set of OAuth/credentialed external
+ * services a Zibby skill can declare a dependency on.
+ *
+ * Why this exists:
+ *   Skills hand-off authentication to the backend's resolveIntegrationToken()
+ *   (see packages/skills/src/jira.js, sentry.js, etc.). At deploy time we
+ *   want to know "does THIS workflow need Slack connected before it can
+ *   run?" without re-grepping handler source. Skills declare it explicitly
+ *   via `requiresIntegration: INTEGRATIONS.<NAME>` and the backend
+ *   workflow-bundler derives `workflow.requiredIntegrations` from the
+ *   union of every node's skill list. Same pattern as npm peer-deps,
+ *   Helm `requires`, Terraform `required_providers`.
+ *
+ * Source of truth for IDs lives here (Object.freeze) — both backend
+ * (`backend/src/services/skill-integrations.js`) and frontend (settings
+ * UI) reference these string constants. Backend mirrors the skill→
+ * integration mapping locally because @zibby/skills is NOT bundled into
+ * the Lambda layer (per CLAUDE.md: lambda-layer/nodejs/package.json must
+ * stay under 262MB and only carries production runtime deps).
+ */
+
+export const INTEGRATIONS = Object.freeze({
+  SENTRY: 'sentry',
+  JIRA:   'jira',
+  GITHUB: 'github',
+  GITLAB: 'gitlab',
+  SLACK:  'slack',
+  LARK:   'lark',
+});
+
+/**
+ * Display metadata. Surface this to humans (modal copy, missing-list
+ * rendering) — backend joins this with the user's connected list and
+ * returns it from GET /workflows/{uuid}/integrations/status.
+ *
+ * `connectPath` points to the existing frontend Integrations page —
+ * verified against frontend/src/App.js (route `/integrations`) and
+ * frontend/src/pages/IntegrationsPage/IntegrationsPage.js (single page
+ * handles all six providers). We pass the provider name as a query
+ * param so the UI can highlight / scroll the relevant card; the page
+ * gracefully ignores the param if not handled yet. NO per-provider
+ * sub-routes exist (`/integrations/jira` etc. would 404 today).
+ */
+export const INTEGRATION_REGISTRY = Object.freeze({
+  sentry: { id: 'sentry', name: 'Sentry', connectPath: '/integrations?provider=sentry' },
+  jira:   { id: 'jira',   name: 'Jira',   connectPath: '/integrations?provider=jira'   },
+  github: { id: 'github', name: 'GitHub', connectPath: '/integrations?provider=github' },
+  gitlab: { id: 'gitlab', name: 'GitLab', connectPath: '/integrations?provider=gitlab' },
+  slack:  { id: 'slack',  name: 'Slack',  connectPath: '/integrations?provider=slack'  },
+  lark:   { id: 'lark',   name: 'Lark',   connectPath: '/integrations?provider=lark'   },
+});

@@ -1,0 +1,68 @@
+{
+  "name": "@zibby/skills",
+  "version": "0.1.25",
+  "description": "Built-in skill definitions for Zibby test automation framework",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./bin/mcp-sentry.mjs": "./bin/mcp-sentry.mjs",
+    "./bin/mcp-lark.mjs": "./bin/mcp-lark.mjs",
+    "./browser": "./dist/browser.js",
+    "./jira": "./dist/jira.js",
+    "./github": "./dist/github.js",
+    "./slack": "./dist/slack.js",
+    "./lark": "./dist/lark.js",
+    "./memory": "./dist/memory.js",
+    "./function": "./dist/function-skill.js",
+    "./integrations": "./dist/integrations.js"
+  },
+  "scripts": {
+    "build": "node ../scripts/build.mjs",
+    "prepack": "node scripts/copy-docs.mjs",
+    "lint": "eslint .",
+    "lint:fix": "eslint --fix ."
+  },
+  "keywords": [
+    "zibby",
+    "skills",
+    "mcp",
+    "automation",
+    "testing"
+  ],
+  "author": "Zibby",
+  "license": "MIT",
+  "homepage": "https://zibby.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZibbyHQ/zibby-agent"
+  },
+  "bugs": {
+    "url": "https://github.com/ZibbyHQ/zibby-agent/issues"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@zibby/agent-workflow": "^0.3.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.0 || ^4.0.0"
+  },
+  "peerDependencies": {
+    "@zibby/core": ">=0.1.44"
+  },
+  "optionalDependencies": {
+    "@zibby/mcp-browser": "^0.1.8",
+    "@zibby/mcp-memory": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}

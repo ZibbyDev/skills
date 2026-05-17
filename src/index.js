@@ -1,0 +1,60 @@
+/**
+ * @zibby/skills — Built-in skill catalog
+ *
+ * Importing this module registers all built-in skills with the core
+ * skill registry.  Users and community packages can register additional
+ * skills via registerSkill().
+ */
+
+import { registerSkill } from '@zibby/agent-workflow';
+import { browserSkill } from './browser.js';
+import { jiraSkill } from './jira.js';
+import { githubSkill } from './github.js';
+import { slackSkill } from './slack.js';
+import { larkSkill } from './lark.js';
+import { memorySkill } from './memory.js';
+import { skillInstallerSkill } from './skill-installer.js';
+import { coreToolsSkill } from './core-tools.js';
+import { sentrySkill } from './sentry.js';
+import { testRunnerSkill } from './test-runner.js';
+import { gitSkill } from './git.js';
+import { chatMemorySkill } from './chat-memory.js';
+import { workflowBuilderSkill } from './workflow-builder.js';
+
+registerSkill(browserSkill);
+registerSkill(jiraSkill);
+registerSkill(githubSkill);
+registerSkill(slackSkill);
+registerSkill(larkSkill);
+registerSkill(sentrySkill);
+registerSkill(memorySkill);
+registerSkill(testRunnerSkill);
+registerSkill(gitSkill);
+registerSkill(skillInstallerSkill);
+registerSkill(coreToolsSkill);
+registerSkill(chatMemorySkill);
+registerSkill(workflowBuilderSkill);
+
+// Backward-compat alias: MCP_SERVER_REGISTRY used 'slack_notify' as the key
+registerSkill({ ...slackSkill, id: 'slack_notify' });
+
+export const SKILLS = {
+  BROWSER: 'browser',
+  JIRA: 'jira',
+  GITHUB: 'github',
+  GIT: 'git',
+  SLACK: 'slack',
+  LARK: 'lark',
+  SENTRY: 'sentry',
+  MEMORY: 'memory',
+  RUNNER: 'runner',
+  SKILL_INSTALLER: 'skill-installer',
+  CORE_TOOLS: 'core-tools',
+  CHAT_MEMORY: 'chat-memory',
+  WORKFLOW_BUILDER: 'workflow-builder',
+};
+
+export { browserSkill, jiraSkill, githubSkill, gitSkill, slackSkill, larkSkill, sentrySkill, memorySkill, chatMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { skill, functionSkill } from './function-skill.js';
+export { registerSkill, getSkill, hasSkill, getAllSkills, listSkillIds } from '@zibby/agent-workflow';
+export { INTEGRATIONS, INTEGRATION_REGISTRY } from './integrations.js';

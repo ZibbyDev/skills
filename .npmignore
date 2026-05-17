@@ -1,0 +1,28 @@
+# Source maps (never publish)
+*.map
+*.js.map
+*.ts.map
+
+# Source code (published as minified dist/ only)
+src/
+
+# Test files
+test/
+**/__tests__/
+*.test.js
+*.spec.js
+coverage/
+
+# Development files
+.env
+.env.*
+*.log
+vitest.config.js
+
+# Build artifacts
+node_modules/
+.DS_Store
+
+# Git
+.git/
+.gitignore

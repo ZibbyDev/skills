@@ -1,0 +1,22 @@
+{
+  "GHSA-p7fg-763f-g4gf": {
+    "active": true,
+    "notes": "Insecure default file permissions in @anthropic-ai/sdk's local-filesystem memory tool. We do not enable that tool — claude-strategy only inspects tool names for logging (packages/core/src/strategies/claude-strategy.js:151), it never configures or invokes the memory_* tool. Re-evaluate when @anthropic-ai/claude-agent-sdk ships with @anthropic-ai/sdk >= 0.92.0 and drop this exception.",
+    "expiry": "2026-08-01"
+  },
+  "GHSA-v2v4-37r5-5v8g": {
+    "active": true,
+    "notes": "XSS in ip-address Address6 HTML-emitting methods. Reaches us via @modelcontextprotocol/sdk > express-rate-limit@8.4.1, which pins ip-address@10.1.0 exactly (patched in 10.1.1). express-rate-limit uses Address6 only for IPv6 parsing of client IPs to enforce rate limits — it never emits HTML, so the vulnerable code path is unreachable from our usage. npm overrides break the install (express-rate-limit's exact pin makes the override resolve to nothing), so the practical fix is upstream. Re-evaluate when @modelcontextprotocol/sdk bumps express-rate-limit past 8.4.1; drop this exception then.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-qp7p-654g-cw7p": {
+    "active": true,
+    "notes": "CSS Declaration Injection via Style Object Values in Hono JSX SSR. Reaches us via @modelcontextprotocol/sdk > hono@4.12.17. We never use Hono's JSX renderer — MCP only uses Hono as a thin HTTP transport for stdio/SSE channels (no HTML/CSS rendering surface, no user-controlled style props). The vulnerable jsx-runtime code path is unreachable from our usage. Re-evaluate when @modelcontextprotocol/sdk bumps to a Hono release with this patch; drop this exception then.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-p77w-8qqv-26rm": {
+    "active": true,
+    "notes": "Hono Cache Middleware ignores Vary: Authorization / Vary: Cookie, leading to cross-user cache leakage. Reaches us via @modelcontextprotocol/sdk > hono@4.12.17. We never instantiate hono/cache — MCP uses Hono only as an HTTP transport (no caching middleware on any route). Vulnerable code path unreachable from our usage. Re-evaluate when @modelcontextprotocol/sdk ships with the fixed Hono release; drop this exception then.",
+    "expiry": "2026-09-01"
+  }
+}
