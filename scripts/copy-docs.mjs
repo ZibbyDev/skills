@@ -3,7 +3,7 @@
  * so they ship with the npm package. Only runs before npm publish.
  * The docs/ folder is .gitignored (never committed).
  */
-/* eslint-disable no-undef */
+ 
 import { cpSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';

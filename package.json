@@ -35,10 +35,10 @@
   "homepage": "https://zibby.dev",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ZibbyHQ/zibby-agent"
+    "url": "https://github.com/ZibbyHQ/skills"
   },
   "bugs": {
-    "url": "https://github.com/ZibbyHQ/zibby-agent/issues"
+    "url": "https://github.com/ZibbyHQ/skills/issues"
   },
   "files": [
     "dist/",
@@ -63,6 +63,9 @@
     "@zibby/mcp-memory": "*"
   },
   "devDependencies": {
-    "esbuild": "^0.28.0"
+    "@eslint/js": "^10.0.1",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.0.2",
+    "globals": "^17.4.0"
   }
 }
