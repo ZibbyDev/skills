@@ -62,12 +62,12 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   lark:   { id: 'lark',   name: 'Lark',   connectPath: '/integrations?provider=lark'   },
   openai_billing: {
     id: 'openai_billing',
-    name: 'OpenAI Billing',
+    name: 'OpenAI Admin',
     connectPath: '/integrations?provider=openai_billing',
   },
   anthropic_billing: {
     id: 'anthropic_billing',
-    name: 'Anthropic Billing',
+    name: 'Anthropic Admin',
     connectPath: '/integrations?provider=anthropic_billing',
   },
   cursor_admin: {
