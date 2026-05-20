@@ -15,7 +15,9 @@
     "./lark": "./dist/lark.js",
     "./memory": "./dist/memory.js",
     "./function": "./dist/function-skill.js",
-    "./integrations": "./dist/integrations.js"
+    "./integrations": "./dist/integrations.js",
+    "./report": "./dist/report.js",
+    "./llm-billing": "./dist/llm-billing.js"
   },
   "scripts": {
     "build": "node ../scripts/build.mjs",

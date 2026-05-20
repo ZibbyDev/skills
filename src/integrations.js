@@ -27,6 +27,17 @@ export const INTEGRATIONS = Object.freeze({
   GITLAB: 'gitlab',
   SLACK:  'slack',
   LARK:   'lark',
+  // LLM-provider admin/billing keys. Distinct from a hypothetical
+  // `OPENAI` (request-time chat API key) — these are org-admin scoped,
+  // read-only for cost+usage reporting, and gated separately at the UI
+  // because the consent surface is different (only an org-admin can
+  // mint them). Cursor's Team/Enterprise Admin API follows the same
+  // shape (single paste-able admin token, no OAuth).
+  OPENAI_BILLING:    'openai_billing',
+  ANTHROPIC_BILLING: 'anthropic_billing',
+  CURSOR_ADMIN:      'cursor_admin',
+  // Notion OAuth — multi-workspace integration. See handlers/notion.js.
+  NOTION:            'notion',
 });
 
 /**
@@ -49,4 +60,20 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   gitlab: { id: 'gitlab', name: 'GitLab', connectPath: '/integrations?provider=gitlab' },
   slack:  { id: 'slack',  name: 'Slack',  connectPath: '/integrations?provider=slack'  },
   lark:   { id: 'lark',   name: 'Lark',   connectPath: '/integrations?provider=lark'   },
+  openai_billing: {
+    id: 'openai_billing',
+    name: 'OpenAI Billing',
+    connectPath: '/integrations?provider=openai_billing',
+  },
+  anthropic_billing: {
+    id: 'anthropic_billing',
+    name: 'Anthropic Billing',
+    connectPath: '/integrations?provider=anthropic_billing',
+  },
+  cursor_admin: {
+    id: 'cursor_admin',
+    name: 'Cursor Admin',
+    connectPath: '/integrations?provider=cursor_admin',
+  },
+  notion: { id: 'notion', name: 'Notion', connectPath: '/integrations?provider=notion' },
 });

@@ -20,6 +20,11 @@ import { testRunnerSkill } from './test-runner.js';
 import { gitSkill } from './git.js';
 import { chatMemorySkill } from './chat-memory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
+import {
+  openaiBillingSkill,
+  anthropicBillingSkill,
+  cursorAdminSkill,
+} from './llm-billing.js';
 
 registerSkill(browserSkill);
 registerSkill(jiraSkill);
@@ -34,6 +39,9 @@ registerSkill(skillInstallerSkill);
 registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
 registerSkill(workflowBuilderSkill);
+registerSkill(openaiBillingSkill);
+registerSkill(anthropicBillingSkill);
+registerSkill(cursorAdminSkill);
 
 // Backward-compat alias: MCP_SERVER_REGISTRY used 'slack_notify' as the key
 registerSkill({ ...slackSkill, id: 'slack_notify' });
@@ -52,9 +60,31 @@ export const SKILLS = {
   CORE_TOOLS: 'core-tools',
   CHAT_MEMORY: 'chat-memory',
   WORKFLOW_BUILDER: 'workflow-builder',
+  OPENAI_BILLING: 'openai_billing',
+  ANTHROPIC_BILLING: 'anthropic_billing',
+  CURSOR_ADMIN: 'cursor_admin',
 };
 
 export { browserSkill, jiraSkill, githubSkill, gitSkill, slackSkill, larkSkill, sentrySkill, memorySkill, chatMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export {
+  openaiBillingSkill,
+  anthropicBillingSkill,
+  cursorAdminSkill,
+  fetchOpenAICosts,
+  fetchOpenAIProjects,
+  fetchAnthropicCosts,
+  fetchAnthropicWorkspaces,
+  fetchCursorSpend,
+  fetchAllProviders,
+  groupByKey,
+  meanStddev,
+} from './llm-billing.js';
+export {
+  reportObjectSchema,
+  reportToBlockKit,
+  reportToLarkCard,
+  SEVERITIES as REPORT_SEVERITIES,
+} from './report.js';
 export { skill, functionSkill } from './function-skill.js';
 export { registerSkill, getSkill, hasSkill, getAllSkills, listSkillIds } from '@zibby/agent-workflow';
 export { INTEGRATIONS, INTEGRATION_REGISTRY } from './integrations.js';

@@ -18,6 +18,11 @@ const { memorySkill } = await import('../src/memory.js');
 const { chatMemorySkill } = await import('../src/chat-memory.js');
 const { coreToolsSkill } = await import('../src/core-tools.js');
 const { browserSkill } = await import('../src/browser.js');
+const {
+  openaiBillingSkill,
+  anthropicBillingSkill,
+  cursorAdminSkill,
+} = await import('../src/llm-billing.js');
 
 describe('INTEGRATIONS constant', () => {
   it('is frozen (single source of truth)', () => {
@@ -30,9 +35,22 @@ describe('INTEGRATIONS constant', () => {
   it('exposes the closed set of providers backend handlers support', () => {
     // If you add a provider handler under backend/src/handlers/*.js with
     // OAuth/credentials, add it here too. Order doesn't matter; the set
-    // is what we verify.
+    // is what we verify. Adding to this set is intentional and must be
+    // mirrored in backend/src/services/skill-integrations.js — the
+    // backend keeps its own copy because @zibby/skills isn't bundled
+    // into the Lambda layer.
     expect(new Set(Object.values(INTEGRATIONS))).toEqual(
-      new Set(['sentry', 'jira', 'github', 'gitlab', 'slack', 'lark'])
+      new Set([
+        'sentry', 'jira', 'github', 'gitlab', 'slack', 'lark',
+        // LLM-provider admin/billing keys (paste-token, no OAuth — see
+        // INTEGRATIONS comment above)
+        'openai_billing', 'anthropic_billing', 'cursor_admin',
+        // Notion OAuth — multi-workspace integration. See
+        // backend/src/handlers/notion.js. Surfaced for notify-notion +
+        // any future report-producing template that targets Notion as
+        // a destination.
+        'notion',
+      ])
     );
   });
 });
@@ -85,5 +103,15 @@ describe('skill.requiresIntegration declarations', () => {
     expect(chatMemorySkill.requiresIntegration).toBeUndefined();
     expect(coreToolsSkill.requiresIntegration).toBeUndefined();
     expect(browserSkill.requiresIntegration).toBeUndefined();
+  });
+
+  it('openaiBillingSkill declares openai_billing', () => {
+    expect(openaiBillingSkill.requiresIntegration).toBe(INTEGRATIONS.OPENAI_BILLING);
+  });
+  it('anthropicBillingSkill declares anthropic_billing', () => {
+    expect(anthropicBillingSkill.requiresIntegration).toBe(INTEGRATIONS.ANTHROPIC_BILLING);
+  });
+  it('cursorAdminSkill declares cursor_admin', () => {
+    expect(cursorAdminSkill.requiresIntegration).toBe(INTEGRATIONS.CURSOR_ADMIN);
   });
 });
