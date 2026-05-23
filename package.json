@@ -17,7 +17,8 @@
     "./function": "./dist/function-skill.js",
     "./integrations": "./dist/integrations.js",
     "./report": "./dist/report.js",
-    "./llm-billing": "./dist/llm-billing.js"
+    "./llm-billing": "./dist/llm-billing.js",
+    "./sentry": "./dist/sentry.js"
   },
   "scripts": {
     "build": "node ../scripts/build.mjs",

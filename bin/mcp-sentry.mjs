@@ -25,21 +25,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
-
-async function sentryFetch(path, opts = {}) {
-  const { token, organizationSlug } = await resolveIntegrationToken('sentry');
-  const url = `https://sentry.io/api/0/organizations/${organizationSlug}${path}`;
-  const res = await fetch(url, {
-    method: opts.method || 'GET',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => '');
-    throw new Error(`Sentry API ${res.status}: ${err.slice(0, 300)}`);
-  }
-  return res.json();
-}
+// Single source of truth for Sentry calls: the @zibby/skills package
+// exports typed client functions. Both this MCP server and the
+// assistant-strategy in-process path delegate to them, so adding a new
+// Sentry endpoint = one edit in src/sentry.js, not three. Deterministic
+// workflow nodes import the same functions for cost-optimized fetches
+// that skip the LLM entirely.
+import { sentryListProjects, sentryListIssues, sentryGetIssue } from '../dist/sentry.js';
 
 const server = new McpServer(
   { name: 'zibby-sentry', version: '1.0.0' },
@@ -56,7 +48,7 @@ server.registerTool(
   },
   async () => {
     try {
-      const data = await sentryFetch('/projects/?per_page=50');
+      const data = await sentryListProjects();
       const text = JSON.stringify({
         projects: data.map((p) => ({ slug: p.slug, name: p.name, platform: p.platform })),
       });
@@ -82,12 +74,12 @@ server.registerTool(
   },
   async (args = {}) => {
     try {
-      const project = args.project || '';
-      const query = args.query || 'is:unresolved';
-      const sort = args.sort || 'date';
-      let path = `/issues/?query=${encodeURIComponent(query)}&sort=${sort}&per_page=${args.limit || 25}`;
-      if (project) path += `&project=${encodeURIComponent(project)}`;
-      const data = await sentryFetch(path);
+      const data = await sentryListIssues({
+        query: args.query,
+        sort: args.sort,
+        project: args.project,
+        limit: args.limit,
+      });
       const text = JSON.stringify({
         issues: data.map((i) => ({
           id: i.id, title: i.title, culprit: i.culprit,
@@ -114,20 +106,7 @@ server.registerTool(
   },
   async (args = {}) => {
     try {
-      const { issueId } = args;
-      if (!issueId) {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: 'issueId is required' }) }], isError: true };
-      }
-      // Issue details hit /issues/<id>/ (NOT under /organizations/), so
-      // we resolve just the token and build the URL directly.
-      const { token } = await resolveIntegrationToken('sentry');
-      const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        throw new Error(`Sentry API ${res.status}`);
-      }
-      const data = await res.json();
+      const data = await sentryGetIssue(args.issueId);
       const text = JSON.stringify({
         id: data.id, title: data.title, culprit: data.culprit,
         metadata: data.metadata, count: data.count, userCount: data.userCount,

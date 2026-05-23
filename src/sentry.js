@@ -48,12 +48,65 @@ function resolveSentryBin() {
   return existsSync(candidate) ? candidate : null;
 }
 
-async function sentryFetch(path, opts = {}) {
+/**
+ * Low-level Sentry REST helper, scoped to the user's connected org.
+ * All endpoints under `/api/0/organizations/<slug>/…` route through
+ * this — auth header + base URL + non-2xx → throw are handled once.
+ *
+ * Exported so deterministic workflow nodes can talk to Sentry without
+ * going through the LLM tool layer. `sentryListIssues / Projects /
+ * GetIssue` below are thin wrappers — prefer those over raw `sentryFetch`.
+ */
+export async function sentryFetch(path, opts = {}) {
   const { token, organizationSlug } = await resolveIntegrationToken('sentry');
   const url = `https://sentry.io/api/0/organizations/${organizationSlug}${path}`;
   const res = await fetch(url, {
     method: opts.method || 'GET',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Sentry API ${res.status}: ${err.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+/**
+ * List Sentry projects in the connected organization. Returns raw
+ * Sentry-shape objects ({ slug, name, platform, id, … }).
+ *
+ * Single source of truth for the `sentry_list_projects` tool (MCP +
+ * assistant), and for deterministic workflow nodes.
+ */
+export async function sentryListProjects() {
+  return sentryFetch('/projects/?per_page=50');
+}
+
+/**
+ * List Sentry issues. Returns the raw Sentry array. Wrappers above
+ * (MCP / assistant tool handlers) format the shape for LLM consumers;
+ * deterministic callers get the raw issue objects so their own
+ * outputSchema can validate / reshape.
+ *
+ * @param {{ query?: string, sort?: string, project?: string, limit?: number }} opts
+ */
+export async function sentryListIssues({ query = 'is:unresolved', sort = 'date', project, limit = 25 } = {}) {
+  let path = `/issues/?query=${encodeURIComponent(query)}&sort=${sort}&per_page=${limit}`;
+  if (project) path += `&project=${encodeURIComponent(project)}`;
+  return sentryFetch(path);
+}
+
+/**
+ * Fetch one Sentry issue's details. Uses the global `/issues/<id>/`
+ * endpoint (NOT under /organizations/<slug>/) — Sentry routes issue
+ * details by ID without an org scope. Auth still uses the connected
+ * integration's token.
+ */
+export async function sentryGetIssue(issueId) {
+  if (!issueId) throw new Error('sentryGetIssue: issueId is required');
+  const { token } = await resolveIntegrationToken('sentry');
+  const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/`, {
+    headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
@@ -112,24 +165,26 @@ You have access to the user's Sentry. Use these tools:
 
   // ── In-process path (assistant agent only) ─────────────────────────
   // The `assistant` strategy doesn't spawn MCP servers — it dispatches
-  // tool calls in-process via this method. We re-declare the 3 tools
-  // for assistant's tool-list builder, and route name → handler here.
+  // tool calls in-process via this method. Delegates to the exported
+  // sentry* helpers above; the LLM-shaped JSON envelope (and the
+  // narrowed field set per tool) lives only here so deterministic
+  // callers can use the raw helpers without inheriting it.
   async handleToolCall(name, args = {}) {
     try {
       switch (name) {
         case 'sentry_list_projects': {
-          const data = await sentryFetch('/projects/?per_page=50');
+          const data = await sentryListProjects();
           return JSON.stringify({
             projects: data.map((p) => ({ slug: p.slug, name: p.name, platform: p.platform })),
           });
         }
         case 'sentry_list_issues': {
-          const project = args.project || '';
-          const query = args.query || 'is:unresolved';
-          const sort = args.sort || 'date';
-          let path = `/issues/?query=${encodeURIComponent(query)}&sort=${sort}&per_page=${args.limit || 25}`;
-          if (project) path += `&project=${encodeURIComponent(project)}`;
-          const data = await sentryFetch(path);
+          const data = await sentryListIssues({
+            query: args.query,
+            sort: args.sort,
+            project: args.project,
+            limit: args.limit,
+          });
           return JSON.stringify({
             issues: data.map((i) => ({
               id: i.id, title: i.title, culprit: i.culprit,
@@ -139,14 +194,7 @@ You have access to the user's Sentry. Use these tools:
           });
         }
         case 'sentry_get_issue': {
-          const { issueId } = args;
-          if (!issueId) return JSON.stringify({ error: 'issueId is required' });
-          const { token } = await resolveIntegrationToken('sentry');
-          const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (!res.ok) throw new Error(`Sentry API ${res.status}`);
-          const data = await res.json();
+          const data = await sentryGetIssue(args.issueId);
           return JSON.stringify({
             id: data.id, title: data.title, culprit: data.culprit,
             metadata: data.metadata, count: data.count, userCount: data.userCount,
