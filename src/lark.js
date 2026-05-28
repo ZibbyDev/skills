@@ -105,6 +105,7 @@ You can send messages and replies on Lark. Use:
 - lark_reply: reply to an existing message (threaded)
 - lark_list_chats: list chats the bot is a member of
 - lark_get_chat_history: fetch recent messages in a chat
+- lark_lookup_user_by_email: resolve an email → open_id for direct DM (prefer this over emailing through lark_send_message when the agent has a user_id already)
 When responding to an incoming event, prefer lark_reply with the source message_id so the response threads cleanly.`,
 
   /**
@@ -187,6 +188,17 @@ When responding to an incoming event, prefer lark_reply with the source message_
         required: ['chat_id'],
       },
     },
+    {
+      name: 'lark_lookup_user_by_email',
+      description: 'Resolve an email address to a Lark user id (open_id). Returns { ok:true, user:{open_id,email,name} } on hit, { ok:false } if no Lark user has that email. Use the open_id as `receive_id` in lark_send_message to DM.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          email: { type: 'string', description: 'Email address to look up' },
+        },
+        required: ['email'],
+      },
+    },
   ],
 
   async handleToolCall(name, args) {
@@ -250,6 +262,30 @@ When responding to an incoming event, prefer lark_reply with the source message_
             create_time: m.create_time,
           }));
           return JSON.stringify({ messages });
+        }
+        case 'lark_lookup_user_by_email': {
+          // Lark's batch_get_id endpoint takes emails / mobiles arrays
+          // and returns user_list with the matched user_id objects. We
+          // request open_id as the user_id_type since that's what
+          // lark_send_message accepts via inferReceiveIdType("ou_…").
+          // On miss the API returns user_list with no user_id field
+          // (just the email) — surface that as { ok:false }.
+          if (!args.email) return JSON.stringify({ error: 'email is required' });
+          const data = await larkApi(
+            'POST',
+            '/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id',
+            { emails: [args.email] }
+          );
+          const hit = (data.user_list || []).find((u) => u.email === args.email && u.user_id);
+          if (!hit) return JSON.stringify({ ok: false, reason: 'no_lark_user_for_email' });
+          return JSON.stringify({
+            ok: true,
+            user: {
+              open_id: hit.user_id,
+              email: hit.email,
+              name: hit.name || undefined,
+            },
+          });
         }
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });

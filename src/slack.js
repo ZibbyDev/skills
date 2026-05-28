@@ -3,7 +3,16 @@ import { INTEGRATIONS } from './integrations.js';
 
 async function slackApi(method, params = {}) {
   const { token } = await resolveIntegrationToken('slack');
-  const isGet = ['conversations.list', 'users.list', 'users.profile.get', 'conversations.history', 'conversations.replies'].includes(method);
+  const isGet = [
+    'conversations.list',
+    'users.list',
+    'users.profile.get',
+    'users.lookupByEmail',
+    'usergroups.list',
+    'usergroups.users.list',
+    'conversations.history',
+    'conversations.replies',
+  ].includes(method);
   let url = `https://slack.com/api/${method}`;
   const headers = { Authorization: `Bearer ${token}` };
   let body;
@@ -34,7 +43,9 @@ export const slackSkill = {
 You have access to the user's Slack workspace. Use these tools:
 - slack_list_channels, slack_post_message, slack_reply_to_thread
 - slack_add_reaction, slack_get_channel_history, slack_get_thread_replies
-- slack_get_users, slack_get_user_profile`,
+- slack_get_users, slack_get_user_profile
+- slack_lookup_user_by_email (precise email→user_id, prefer this over scanning slack_get_users)
+- slack_list_usergroups, slack_get_usergroup_members (workspace-defined teams like @oncall, @platform)`,
 
   resolve() {
     const env = {};
@@ -85,6 +96,56 @@ You have access to the user's Slack workspace. Use these tools:
           const data = await slackApi('users.profile.get', { user: args.user_id });
           return JSON.stringify({ profile: data.profile });
         }
+        case 'slack_lookup_user_by_email': {
+          // Wraps users.lookupByEmail. Exact match — avoids the agent
+          // having to scan `users.list` to find someone by email, which
+          // is both slow (paginated) and noisy in the agent's context.
+          // Returns { user: { id, name, email } } on hit, { ok:false } on
+          // miss so the agent can branch on "not found" without an
+          // exception. Slack returns `users_not_found` as a JSON error,
+          // which our slackApi wrapper throws — catch that one case.
+          if (!args.email) return JSON.stringify({ error: 'email is required' });
+          try {
+            const data = await slackApi('users.lookupByEmail', { email: args.email });
+            return JSON.stringify({
+              ok: true,
+              user: {
+                id: data.user?.id,
+                name: data.user?.real_name || data.user?.name,
+                email: data.user?.profile?.email || args.email,
+              },
+            });
+          } catch (e) {
+            if (/users_not_found/.test(e.message)) {
+              return JSON.stringify({ ok: false, reason: 'users_not_found' });
+            }
+            throw e;
+          }
+        }
+        case 'slack_list_usergroups': {
+          // Workspace-defined groups (e.g. @oncall, @platform). Returns
+          // handle ("oncall") + id ("S012ABC") + user_count so the agent
+          // can pick by name without expanding members upfront.
+          const data = await slackApi('usergroups.list', {});
+          return JSON.stringify({
+            usergroups: (data.usergroups || []).map((g) => ({
+              id: g.id,
+              handle: g.handle,
+              name: g.name,
+              description: g.description || '',
+              user_count: Number(g.user_count || 0),
+            })),
+          });
+        }
+        case 'slack_get_usergroup_members': {
+          // Expands a usergroup id (S012ABC) into its current user IDs.
+          // Caller uses these as `channel` values for slack_post_message
+          // to DM each member individually, OR mentions the group as
+          // <!subteam^S012ABC|@handle> inside a channel message.
+          if (!args.usergroup) return JSON.stringify({ error: 'usergroup id is required' });
+          const data = await slackApi('usergroups.users.list', { usergroup: args.usergroup });
+          return JSON.stringify({ users: data.users || [] });
+        }
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -119,6 +180,21 @@ You have access to the user's Slack workspace. Use these tools:
     {
       name: 'slack_get_user_profile', description: 'Get detailed profile for a specific user',
       input_schema: { type: 'object', properties: { user_id: { type: 'string', description: 'Slack user ID' } }, required: ['user_id'] },
+    },
+    {
+      name: 'slack_lookup_user_by_email',
+      description: 'Find a Slack user by email. Returns { ok:true, user:{id,name,email} } on hit, { ok:false } when no user has that email. Prefer this over slack_get_users for email-based routing — single API call, exact match.',
+      input_schema: { type: 'object', properties: { email: { type: 'string', description: 'Email address to look up' } }, required: ['email'] },
+    },
+    {
+      name: 'slack_list_usergroups',
+      description: 'List workspace-defined user groups (e.g. @oncall, @platform). Each item has { id, handle, name, description, user_count }. Use the id with slack_get_usergroup_members to expand the membership.',
+      input_schema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'slack_get_usergroup_members',
+      description: 'List user IDs that belong to a Slack usergroup. Pair with slack_post_message to DM each member, or use the group id directly in a channel message as <!subteam^ID> to @-mention.',
+      input_schema: { type: 'object', properties: { usergroup: { type: 'string', description: 'Usergroup id, e.g. S012ABC' } }, required: ['usergroup'] },
     },
   ],
 };

@@ -32,6 +32,7 @@ describe('larkSkill structure', () => {
     expect(names).toEqual([
       'lark_get_chat_history',
       'lark_list_chats',
+      'lark_lookup_user_by_email',
       'lark_reply',
       'lark_send_message',
     ]);
