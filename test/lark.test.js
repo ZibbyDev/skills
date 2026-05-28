@@ -34,6 +34,7 @@ describe('larkSkill structure', () => {
       'lark_list_chats',
       'lark_lookup_user_by_email',
       'lark_reply',
+      'lark_search_users',
       'lark_send_message',
     ]);
   });

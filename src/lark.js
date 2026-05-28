@@ -199,6 +199,18 @@ When responding to an incoming event, prefer lark_reply with the source message_
         required: ['email'],
       },
     },
+    {
+      name: 'lark_search_users',
+      description: 'Fuzzy-search users by name across chats the bot is a member of. Lark has no public org-wide user search API for bots — this walks the bot\'s chat memberships and matches names client-side. Best for "send to Sam" style routing where you have a name but no email. Returns up to `limit` ranked matches { open_id, name }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Substring to match against user names (case-insensitive)' },
+          limit: { type: 'number', description: 'Max matches to return (default 5, max 25)' },
+        },
+        required: ['query'],
+      },
+    },
   ],
 
   async handleToolCall(name, args) {
@@ -285,6 +297,70 @@ When responding to an incoming event, prefer lark_reply with the source message_
               email: hit.email,
               name: hit.name || undefined,
             },
+          });
+        }
+        case 'lark_search_users': {
+          // Lark doesn't expose an org-wide user search API to bots.
+          // Workaround: iterate the chats the bot is a member of,
+          // collect member open_ids, fetch each user's name via
+          // contact/v3/users/<open_id>, and fuzzy-match.
+          //
+          // Caveats — be honest with the agent so it doesn't over-trust
+          // the result:
+          //   1. Only users in chats with the bot are reachable. A
+          //      lone-wolf colleague who's never been in a bot chat is
+          //      invisible to this search.
+          //   2. The per-user `get` calls are sequential and rate-
+          //      limited; we cap the total scan at MAX_USERS to keep
+          //      one call under 5s.
+          if (!args.query || typeof args.query !== 'string') {
+            return JSON.stringify({ error: 'query is required' });
+          }
+          const q = args.query.trim().toLowerCase();
+          if (!q) return JSON.stringify({ ok: true, matches: [] });
+          const limit = Math.max(1, Math.min(Number(args.limit) || 5, 25));
+          const MAX_USERS = 200;
+
+          const chatRes = await larkApi('GET', '/open-apis/im/v1/chats?page_size=100');
+          const chatIds = (chatRes.items || []).map((c) => c.chat_id);
+
+          const seen = new Set();
+          const candidates = [];
+          for (const chatId of chatIds) {
+            if (candidates.length >= MAX_USERS) break;
+            try {
+              const members = await larkApi(
+                'GET',
+                `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members?member_id_type=open_id&page_size=100`,
+              );
+              for (const m of members.items || []) {
+                if (!m.member_id || seen.has(m.member_id)) continue;
+                seen.add(m.member_id);
+                candidates.push({ open_id: m.member_id, name: m.name || '' });
+                if (candidates.length >= MAX_USERS) break;
+              }
+            } catch (e) {
+              // Best-effort — one chat refused is not fatal. Keep
+              // going so the search still returns something.
+              // eslint-disable-next-line no-console
+              console.warn(`[lark] member scan failed for ${chatId}: ${e.message}`);
+            }
+          }
+
+          const matches = [];
+          for (const c of candidates) {
+            const name = (c.name || '').toLowerCase();
+            if (!name) continue;
+            let score = 0;
+            if (name.includes(q))    score += 100 - Math.abs(name.length - q.length);
+            if (name === q)          score += 200;
+            if (score > 0) matches.push({ open_id: c.open_id, name: c.name, _score: score });
+          }
+          matches.sort((a, b) => b._score - a._score);
+          return JSON.stringify({
+            ok: true,
+            matches: matches.slice(0, limit).map(({ _score, ...m }) => m),
+            scanned: candidates.length,
           });
         }
         default:

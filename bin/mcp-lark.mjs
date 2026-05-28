@@ -203,7 +203,118 @@ server.registerTool(
   },
 );
 
+// ── lark_lookup_user_by_email ──────────────────────────────────────
+server.registerTool(
+  'lark_lookup_user_by_email',
+  {
+    title: 'Find Lark User by Email',
+    description: 'Resolve a Lark user from their email. Returns { ok:true, user:{open_id,email,name} } on hit, { ok:false } on miss. Use the open_id as `receive_id` in lark_send_message to DM.',
+    inputSchema: z.object({
+      email: z.string().describe('Email address to look up'),
+    }),
+  },
+  async (args = {}) => {
+    try {
+      if (!args.email) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: 'email is required' }) }], isError: true };
+      }
+      const data = await larkApi(
+        'POST',
+        '/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id',
+        { emails: [args.email] },
+      );
+      const hit = (data.user_list || []).find((u) => u.email === args.email && u.user_id);
+      if (!hit) {
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'no_lark_user_for_email' }) }] };
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            ok: true,
+            user: { open_id: hit.user_id, email: hit.email, name: hit.name || undefined },
+          }),
+        }],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+    }
+  },
+);
+
+// ── lark_search_users ──────────────────────────────────────────────
+server.registerTool(
+  'lark_search_users',
+  {
+    title: 'Search Lark Users by Name',
+    description: 'Fuzzy-search users by name across chats the bot is a member of. Lark has no public org-wide user search API for bots — this walks chat memberships and matches names client-side. Best for "send to Sam" style routing where you have a name but no email. Only users in chats with the bot are reachable.',
+    inputSchema: z.object({
+      query: z.string().describe('Substring to match against user names (case-insensitive)'),
+      limit: z.number().optional().describe('Max matches to return (default 5, max 25)'),
+    }),
+  },
+  async (args = {}) => {
+    try {
+      if (!args.query || typeof args.query !== 'string') {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: 'query is required' }) }], isError: true };
+      }
+      const q = args.query.trim().toLowerCase();
+      if (!q) {
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, matches: [] }) }] };
+      }
+      const limit = Math.max(1, Math.min(Number(args.limit) || 5, 25));
+      const MAX_USERS = 200;
+
+      const chatRes = await larkApi('GET', '/open-apis/im/v1/chats?page_size=100');
+      const chatIds = (chatRes.items || []).map((c) => c.chat_id);
+
+      const seen = new Set();
+      const candidates = [];
+      for (const chatId of chatIds) {
+        if (candidates.length >= MAX_USERS) break;
+        try {
+          const members = await larkApi(
+            'GET',
+            `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members?member_id_type=open_id&page_size=100`,
+          );
+          for (const m of members.items || []) {
+            if (!m.member_id || seen.has(m.member_id)) continue;
+            seen.add(m.member_id);
+            candidates.push({ open_id: m.member_id, name: m.name || '' });
+            if (candidates.length >= MAX_USERS) break;
+          }
+        } catch (e) {
+          console.error(`[mcp-lark] member scan failed for ${chatId}: ${e.message}`);
+        }
+      }
+
+      const matches = [];
+      for (const c of candidates) {
+        const name = (c.name || '').toLowerCase();
+        if (!name) continue;
+        let score = 0;
+        if (name.includes(q))    score += 100 - Math.abs(name.length - q.length);
+        if (name === q)          score += 200;
+        if (score > 0) matches.push({ open_id: c.open_id, name: c.name, _score: score });
+      }
+      matches.sort((a, b) => b._score - a._score);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            ok: true,
+            matches: matches.slice(0, limit).map(({ _score, ...m }) => m),
+            scanned: candidates.length,
+          }),
+        }],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+    }
+  },
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-console.error('[mcp-lark] connected (4 tools: lark_send_message, lark_reply, lark_list_chats, lark_get_chat_history)');
+console.error('[mcp-lark] connected (6 tools: lark_send_message, lark_reply, lark_list_chats, lark_get_chat_history, lark_lookup_user_by_email, lark_search_users)');
