@@ -38,6 +38,41 @@ export const chatNotifySkill = {
   // them through to whichever MCP server resolve() selects.
   envKeys: [...(slackSkill.envKeys || []), ...(larkSkill.envKeys || [])],
 
+  // ── serverName + allowedTools: dynamic, must match resolve()'s pick ──
+  //
+  // The MCP agent strategy (claude-strategy._resolveSkills) does:
+  //     if (skill.allowedTools) allowedTools.push(...skill.allowedTools);
+  //     mcpServers[skill.serverName] = skill.resolve(...);
+  //
+  // Without a `serverName`, `mcpServers[undefined]` registers the server
+  // under the literal key `undefined`, so its tools surface to the model
+  // as `mcp__undefined__slack_post_message`. The permission allowlist is
+  // built from `allowedTools` (`mcp__slack__*`), which never matches the
+  // `mcp__undefined__*` names — so EVERY tool call is silently denied at
+  // the Agent SDK permission gate. That's a hard break: any workflow
+  // using SKILLS.CHAT_NOTIFY (e.g. sentry-triage dispatch) could fetch +
+  // classify but never actually post to Slack/Lark.
+  //
+  // Both are getters because the active provider is only known at runtime
+  // (which env var is set). They evaluate during _resolveSkills, after
+  // the workflow's env is loaded, and stay in lockstep with resolve():
+  //   SLACK_CHANNEL set  → 'slack' + slack's allowedTools
+  //   LARK_RECEIVE_ID set → 'lark' + lark's allowedTools
+  // The agent only ever sees ONE provider's server, so its serverName +
+  // allowedTools + resolve() all agree.
+  get serverName() {
+    if (process.env.SLACK_CHANNEL) return slackSkill.serverName;
+    if (process.env.LARK_RECEIVE_ID) return larkSkill.serverName;
+    // Neither configured → resolve() returns null too, so no server is
+    // registered; the undefined here is never used as a map key.
+    return undefined;
+  },
+  get allowedTools() {
+    if (process.env.SLACK_CHANNEL) return slackSkill.allowedTools || [];
+    if (process.env.LARK_RECEIVE_ID) return larkSkill.allowedTools || [];
+    return [];
+  },
+
   promptFragment: `## Chat notifications (Slack OR Lark — at least one connected)
 You can post chat messages via either:
 - slack_post_message (channel, text)      — Slack, when SLACK_CHANNEL is set
