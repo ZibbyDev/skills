@@ -119,7 +119,13 @@ You have access to the user's Slack workspace. Use these tools:
         }
         case 'slack_post_message': {
           if (!args.channel || !args.text) return JSON.stringify({ error: 'channel and text are required' });
-          const data = await slackApi('chat.postMessage', { channel: args.channel, text: args.text });
+          // text is required as the notification/fallback string; blocks (Block
+          // Kit) is optional and renders the rich card when present.
+          const data = await slackApi('chat.postMessage', {
+            channel: args.channel,
+            text: args.text,
+            ...(args.blocks ? { blocks: args.blocks } : {}),
+          });
           return JSON.stringify({ ok: true, ts: data.ts, channel: data.channel });
         }
         case 'slack_reply_to_thread': {
@@ -266,8 +272,8 @@ You have access to the user's Slack workspace. Use these tools:
   tools: [
     { name: 'slack_list_channels', description: 'List public channels in the workspace', input_schema: { type: 'object', properties: {} } },
     {
-      name: 'slack_post_message', description: 'Post a message to a Slack channel or DM',
-      input_schema: { type: 'object', properties: { channel: { type: 'string', description: 'Channel ID or name' }, text: { type: 'string', description: 'Message text' } }, required: ['channel', 'text'] },
+      name: 'slack_post_message', description: 'Post a message to a Slack channel or DM. Pass `blocks` (Block Kit) for a rich card; `text` is the required notification fallback.',
+      input_schema: { type: 'object', properties: { channel: { type: 'string', description: 'Channel ID or name' }, text: { type: 'string', description: 'Notification/fallback text (required)' }, blocks: { type: 'array', description: 'Block Kit blocks for rich formatting (optional). Each block is a Slack Block Kit object (header/section/divider/context). section blocks may carry a button accessory with a url.' } }, required: ['channel', 'text'] },
     },
     {
       name: 'slack_reply_to_thread', description: 'Reply to a specific message thread',

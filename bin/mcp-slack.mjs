@@ -118,16 +118,21 @@ server.registerTool(
   'slack_post_message',
   {
     title: 'Post Slack Message',
-    description: 'Post a text message to a Slack channel OR direct-message a user. `channel` accepts a channel id (C…), a channel name with `#` prefix, OR a user id (U…) for DMs.',
+    description: 'Post a message to a Slack channel OR direct-message a user. `channel` accepts a channel id (C…), a channel name with `#` prefix, OR a user id (U…) for DMs. Pass `blocks` (Block Kit) for a rich card; `text` is the required notification fallback.',
     inputSchema: z.object({
       channel: z.string().describe('Channel id, channel name (#…), or user id (U…) for DMs'),
-      text: z.string().describe('Message text'),
+      text: z.string().describe('Notification/fallback text (required even when blocks are sent)'),
+      blocks: z.array(z.any()).optional().describe('Block Kit blocks for a rich card (optional). header / section / divider / context; a section may carry a button accessory with a url.'),
     }),
   },
   async (args = {}) => {
     try {
       if (!args.channel || !args.text) return err('channel and text are required');
-      const data = await slackApi('chat.postMessage', { channel: args.channel, text: args.text });
+      const data = await slackApi('chat.postMessage', {
+        channel: args.channel,
+        text: args.text,
+        ...(args.blocks ? { blocks: args.blocks } : {}),
+      });
       return ok({ ok: true, ts: data.ts, channel: data.channel });
     } catch (e) { return err(e.message); }
   },
