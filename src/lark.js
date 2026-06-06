@@ -126,7 +126,11 @@ When responding to an incoming event, prefer lark_reply with the source message_
     // backend's resolveIntegrationToken endpoint. Explicit allow-list
     // (same approach as browserSkill / sentrySkill) — keeps secrets
     // scoped, no leakage of unrelated process env into the bridge.
-    for (const k of ['PROJECT_API_TOKEN', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE']) {
+    // See sentry.js for the full rationale: ZIBBY_ACCOUNT_API_URL + ZIBBY_ENV
+    // let the MCP stdio child resolve integration tokens through the same
+    // endpoint the in-process path uses. Without them a local/dev task falls
+    // back to api-prod and every integration call 401s.
+    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_USER_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE']) {
       if (process.env[k]) env[k] = process.env[k];
     }
     return {

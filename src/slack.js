@@ -85,7 +85,11 @@ You have access to the user's Slack workspace. Use these tools:
     // Pass through env the MCP server needs to call the backend's
     // resolveIntegrationToken endpoint. Explicit allow-list (mirrors
     // larkSkill / sentrySkill) — keeps secrets scoped.
-    for (const k of ['PROJECT_API_TOKEN', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE']) {
+    // See sentry.js for the full rationale: ZIBBY_ACCOUNT_API_URL + ZIBBY_ENV
+    // let the MCP stdio child resolve integration tokens through the same
+    // endpoint the in-process path uses. Without them a local/dev task falls
+    // back to api-prod and every slack_* call 401s — so dispatch can't post.
+    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_USER_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE']) {
       if (process.env[k]) env[k] = process.env[k];
     }
     // Legacy env vars that may still get injected by older infra —

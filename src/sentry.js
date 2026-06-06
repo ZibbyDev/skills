@@ -142,7 +142,15 @@ You have access to the user's Sentry. Use these tools:
     // backend's resolveIntegrationToken endpoint. Same approach as
     // browserSkill — explicit allow-list to keep secrets scoped.
     const env = {};
-    for (const k of ['PROJECT_API_TOKEN', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE']) {
+    // ZIBBY_ACCOUNT_API_URL + ZIBBY_ENV are what resolveIntegrationToken()
+    // (backend-client.js getAccountApiUrl) reads to pick the token-resolution
+    // endpoint. The in-process path inherits the full process.env and reads
+    // them fine; the MCP stdio child only gets this allow-list, so WITHOUT
+    // them the child falls back to api-prod.zibby.app and a local/dev task
+    // 401s ("project not found") on every sentry_* call — returning 0 issues
+    // that the LLM faithfully transcribes as []. ZIBBY_USER_TOKEN is the
+    // session-token fallback when PROJECT_API_TOKEN isn't set.
+    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_USER_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE']) {
       if (process.env[k]) env[k] = process.env[k];
     }
     return {
