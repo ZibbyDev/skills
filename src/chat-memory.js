@@ -114,6 +114,19 @@ export function _resetInitCache() {
   _initializedPaths.clear();
 }
 
+// Test/introspection exports. `_mem0DbPaths` and `_resolveMem0Config` let tests
+// assert the SQLite files resolve under <cwd>/.zibby/memory/mem0/.
+// `_resolveMemoryAdapter` lets tests assert backend dispatch.
+export function _mem0DbPaths(cwd) {
+  return mem0DbPaths(cwd);
+}
+export function _resolveMem0Config(cwd) {
+  return resolveMem0Config(cwd);
+}
+export function _resolveMemoryAdapter(cwd, context) {
+  return resolveMemoryAdapter(cwd, context);
+}
+
 function doltAvailable() {
   try {
     execFileSync(DOLT_BIN, ['version'], { ...EXEC_OPTS, timeout: 5_000 });
@@ -269,7 +282,32 @@ function resolveMem0UserId(cwd) {
   return `workspace:${basename(cwd || process.cwd())}`;
 }
 
-function resolveMem0Config() {
+// Subdir (under DB_DIR) where mem0's SQLite files live. Kept inside the
+// tarball-synced .zibby/memory/ tree so cloud runs persist mem0 state
+// across tasks via the existing tenant-scoped memory-sync. See
+// packages/egress-tunnel/entrypoint.sh (`tar cz -C /workspace/.zibby memory`).
+const MEM0_SUBDIR = 'mem0';
+
+// Absolute paths for mem0's two SQLite files, rooted at the workspace cwd so
+// they are stable regardless of process.cwd() and land inside the synced dir.
+//
+// CRITICAL for tenancy: mem0's `memory` vector store defaults its dbPath to
+// `~/.mem0/vector_store.db` and its sqlite history store to `memory.db`
+// (relative to process.cwd()). Both are process/instance-global and would be
+// SHARED across tenants on the same warm instance. We override BOTH to an
+// absolute path under <cwd>/.zibby/memory/mem0/ so each project's mem0 state
+// is isolated to that project's already tenant-scoped (accountId/projectId)
+// directory and tarball.
+function mem0DbPaths(cwd) {
+  const base = join(cwd, DB_DIR, MEM0_SUBDIR);
+  return {
+    dir: base,
+    vectorDbPath: join(base, 'vectors.db'),
+    historyDbPath: join(base, 'history.db'),
+  };
+}
+
+function resolveMem0Config(cwd) {
   const configuredBaseUrl = String(process.env.ZIBBY_MEM0_OPENAI_BASE_URL || '').trim();
   if (!configuredBaseUrl) return null;
 
@@ -282,6 +320,8 @@ function resolveMem0Config() {
   const llmModel = String(process.env.ZIBBY_MEM0_LLM_MODEL || 'gpt-4.1-mini').trim();
   const embedModel = String(process.env.ZIBBY_MEM0_EMBEDDER_MODEL || 'text-embedding-3-small').trim();
   const embeddingDims = Number(process.env.ZIBBY_MEM0_EMBEDDING_DIMS || 1536);
+
+  const { vectorDbPath, historyDbPath } = mem0DbPaths(cwd || process.cwd());
 
   return {
     llm: {
@@ -303,8 +343,13 @@ function resolveMem0Config() {
     },
     vectorStore: {
       provider: 'memory',
-      config: { dimension: embeddingDims },
+      // dbPath → mem0 MemoryVectorStore (better-sqlite3) persists vectors here
+      // instead of ~/.mem0/vector_store.db.
+      config: { dimension: embeddingDims, dbPath: vectorDbPath },
     },
+    // Top-level historyDbPath → mem0's sqlite history store persists here
+    // instead of ./memory.db (relative to process.cwd()).
+    historyDbPath,
   };
 }
 
@@ -326,7 +371,15 @@ async function getMem0Client(cwd) {
   }
   const MemoryClass = mod?.Memory;
   if (!MemoryClass) throw new Error('mem0ai/oss does not export Memory');
-  const config = resolveMem0Config();
+  const config = resolveMem0Config(key);
+  // Ensure the synced mem0/ subdir exists before mem0 opens its SQLite
+  // files. mem0's ensureSQLiteDirectory mkdir's the dirname too, but we
+  // create it explicitly so the dir is present regardless of which store
+  // (vector vs history) initializes first or whether a custom config path
+  // is used.
+  if (config) {
+    try { mkdirSync(mem0DbPaths(key).dir, { recursive: true }); } catch { /* non-critical */ }
+  }
   const client = config ? new MemoryClass(config) : new MemoryClass();
   _mem0Clients.set(key, client);
   return client;
@@ -351,6 +404,59 @@ function mapMem0ResultsToRows(raw, fallbackTier = 'mid') {
     relevance: Number(item?.score ?? item?.metadata?.relevance ?? 0.8),
     created_at: item?.created_at || item?.metadata?.created_at || now(),
   })).filter(r => String(r.content || '').trim().length > 0);
+}
+
+// ─── Memory adapters ─────────────────────────────────────────────────────────
+// A MemoryAdapter encapsulates one storage backend behind a uniform shape so
+// callers (buildPromptContext / handleToolCall) never branch on the backend.
+// This is a pure refactor of the existing `backend === 'mem0' ? ... : ...`
+// dispatch — behavior is identical. New backends (e.g. a future
+// sessionAdapter / qdrantAdapter) can be added by returning a new adapter
+// from resolveMemoryAdapter without touching any caller.
+//
+// Interface (all methods take (args, dbPath, cwd) and return the same JSON
+// strings the legacy handlers returned):
+//   id            — backend name ('dolt' | 'mem0')
+//   store(args)   — memory_store
+//   recall(args)  — memory_recall
+//   brief(args)   — memory_brief
+//   endSession(args) — memory_end_session  (session layer)
+//   logTask(args)    — task_log
+//   taskHistory(args)— task_history
+//
+// Session/task ops (endSession/logTask/taskHistory) are Dolt-only today — the
+// mem0 adapter delegates them to the Dolt impl, preserving the existing
+// behavior where these tools always hit Dolt regardless of the memory backend
+// (see the legacy `needsDolt` gate). When a dedicated sessionAdapter lands it
+// can override just these three.
+
+const doltAdapter = {
+  id: 'dolt',
+  store: (args, dbPath) => handleStore(args, dbPath),
+  recall: (args, dbPath) => handleRecall(args, dbPath),
+  brief: (args, dbPath) => handleBrief(args, dbPath),
+  endSession: (args, dbPath) => handleEndSession(args, dbPath),
+  logTask: (args, dbPath) => handleTaskLog(args, dbPath),
+  taskHistory: (args, dbPath) => handleTaskHistory(args, dbPath),
+};
+
+const mem0Adapter = {
+  id: 'mem0',
+  store: (args, dbPath, cwd) => handleStoreMem0(args, dbPath, cwd),
+  recall: (args, dbPath, cwd) => handleRecallMem0(args, dbPath, cwd),
+  brief: (args, dbPath, cwd) => handleBriefMem0(args, dbPath, cwd),
+  // Session/task history have no mem0 equivalent — delegate to Dolt so these
+  // tools behave exactly as before when the backend is mem0.
+  endSession: (args, dbPath) => handleEndSession(args, dbPath),
+  logTask: (args, dbPath) => handleTaskLog(args, dbPath),
+  taskHistory: (args, dbPath) => handleTaskHistory(args, dbPath),
+};
+
+const MEMORY_ADAPTERS = { dolt: doltAdapter, mem0: mem0Adapter };
+
+async function resolveMemoryAdapter(cwd, context) {
+  const backend = await resolveMemoryBackend(cwd, context);
+  return MEMORY_ADAPTERS[backend] || doltAdapter;
 }
 
 export const chatMemorySkill = {
@@ -383,7 +489,8 @@ fact, decision, context, insight, credential, url, error, workaround`,
   async buildPromptContext(context, args = {}) {
     const cwd = context?.options?.workspace || process.cwd();
     const dbPath = join(cwd, DB_DIR);
-    const backend = await resolveMemoryBackend(cwd, context);
+    const adapter = await resolveMemoryAdapter(cwd, context);
+    const backend = adapter.id;
 
     if (backend === 'dolt' && !ensureTables(dbPath)) {
       const error = 'Dolt not available. Install: brew install dolt (macOS) or see https://docs.dolthub.com/introduction/installation';
@@ -397,9 +504,7 @@ fact, decision, context, insight, credential, url, error, workaround`,
     }
 
     try {
-      const briefRaw = backend === 'mem0'
-        ? await handleBriefMem0(args, dbPath, cwd)
-        : handleBrief(args, dbPath);
+      const briefRaw = await adapter.brief(args, dbPath, cwd);
       const parsed = JSON.parse(briefRaw || '{}');
       const brief = normalizeBriefByBackend({ ...parsed, backend }, backend);
       return {
@@ -425,7 +530,10 @@ fact, decision, context, insight, credential, url, error, workaround`,
   async handleToolCall(name, args, context) {
     const cwd = context?.options?.workspace || process.cwd();
     const dbPath = join(cwd, DB_DIR);
-    const backend = await resolveMemoryBackend(cwd, context);
+    const adapter = await resolveMemoryAdapter(cwd, context);
+    const backend = adapter.id;
+    // Session/task tools (end_session, task_log, task_history) are Dolt-backed
+    // on every adapter, so they need the Dolt tables regardless of backend.
     const needsDolt = backend === 'dolt' || ['memory_end_session', 'task_log', 'task_history'].includes(name);
     if (needsDolt && !ensureTables(dbPath)) {
       return JSON.stringify({
@@ -435,21 +543,12 @@ fact, decision, context, insight, credential, url, error, workaround`,
 
     try {
       switch (name) {
-        case 'memory_store':
-          return backend === 'mem0'
-            ? await handleStoreMem0(args, dbPath, cwd)
-            : handleStore(args, dbPath);
-        case 'memory_recall':
-          return backend === 'mem0'
-            ? await handleRecallMem0(args, dbPath, cwd)
-            : handleRecall(args, dbPath);
-        case 'memory_brief':
-          return backend === 'mem0'
-            ? await handleBriefMem0(args, dbPath, cwd)
-            : handleBrief(args, dbPath);
-        case 'memory_end_session': return handleEndSession(args, dbPath);
-        case 'task_log': return handleTaskLog(args, dbPath);
-        case 'task_history': return handleTaskHistory(args, dbPath);
+        case 'memory_store': return await adapter.store(args, dbPath, cwd);
+        case 'memory_recall': return await adapter.recall(args, dbPath, cwd);
+        case 'memory_brief': return await adapter.brief(args, dbPath, cwd);
+        case 'memory_end_session': return await adapter.endSession(args, dbPath, cwd);
+        case 'task_log': return await adapter.logTask(args, dbPath, cwd);
+        case 'task_history': return await adapter.taskHistory(args, dbPath, cwd);
         default: return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
     } catch (e) {

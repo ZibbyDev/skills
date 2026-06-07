@@ -1,8 +1,14 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { join } from 'path';
 import { mkdirSync, rmSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { chatMemorySkill, _resetInitCache } from '../src/chat-memory.js';
+import {
+  chatMemorySkill,
+  _resetInitCache,
+  _mem0DbPaths,
+  _resolveMem0Config,
+  _resolveMemoryAdapter,
+} from '../src/chat-memory.js';
 
 const DOLT_BIN = 'dolt';
 
@@ -445,5 +451,118 @@ describeWithDolt('chat-memory integration', () => {
       const decayedMem = allMems.memories.find(m => m.content.includes('Next.js'));
       expect(Number(decayedMem.relevance)).toBeLessThan(1.0);
     });
+  });
+});
+
+// ─── mem0 SQLite paths land in the synced .zibby/memory/mem0/ dir ────────────
+// These are pure (no Dolt, no mem0ai install needed) — they assert the config
+// shape that points mem0's better-sqlite3 vector + history stores at the
+// tenant-scoped, tarball-synced directory.
+
+describe('mem0 cloud-persistent SQLite paths', () => {
+  const CWD = '/workspace';
+
+  it('_mem0DbPaths roots both DBs under <cwd>/.zibby/memory/mem0/', () => {
+    const p = _mem0DbPaths(CWD);
+    expect(p.dir).toBe(join(CWD, '.zibby/memory/mem0'));
+    expect(p.vectorDbPath).toBe(join(CWD, '.zibby/memory/mem0/vectors.db'));
+    expect(p.historyDbPath).toBe(join(CWD, '.zibby/memory/mem0/history.db'));
+  });
+
+  it('paths are absolute and stable regardless of process.cwd()', () => {
+    const p = _mem0DbPaths(CWD);
+    expect(p.vectorDbPath.startsWith('/')).toBe(true);
+    expect(p.historyDbPath.startsWith('/')).toBe(true);
+    // Not relative to process.cwd / homedir — i.e. NOT the leaky defaults.
+    expect(p.vectorDbPath).not.toContain('.mem0/vector_store.db');
+    expect(p.historyDbPath).not.toBe('memory.db');
+  });
+
+  it('returns null when no mem0 base URL is configured', () => {
+    const prev = process.env.ZIBBY_MEM0_OPENAI_BASE_URL;
+    delete process.env.ZIBBY_MEM0_OPENAI_BASE_URL;
+    try {
+      expect(_resolveMem0Config(CWD)).toBeNull();
+    } finally {
+      if (prev !== undefined) process.env.ZIBBY_MEM0_OPENAI_BASE_URL = prev;
+    }
+  });
+
+  it('config points vectorStore.dbPath + top-level historyDbPath into the synced dir', () => {
+    const prevUrl = process.env.ZIBBY_MEM0_OPENAI_BASE_URL;
+    process.env.ZIBBY_MEM0_OPENAI_BASE_URL = 'https://example.invalid/v1';
+    try {
+      const cfg = _resolveMem0Config(CWD);
+      expect(cfg).toBeTruthy();
+      // Vector store: 'memory' provider (better-sqlite3-backed) with explicit dbPath.
+      expect(cfg.vectorStore.provider).toBe('memory');
+      expect(cfg.vectorStore.config.dbPath).toBe(join(CWD, '.zibby/memory/mem0/vectors.db'));
+      // History store: top-level historyDbPath override.
+      expect(cfg.historyDbPath).toBe(join(CWD, '.zibby/memory/mem0/history.db'));
+      // Tenancy: neither DB uses the global ~/.mem0 or cwd-relative defaults.
+      expect(cfg.vectorStore.config.dbPath).not.toContain('/.mem0/');
+      expect(cfg.historyDbPath).not.toContain('/.mem0/');
+    } finally {
+      if (prevUrl === undefined) delete process.env.ZIBBY_MEM0_OPENAI_BASE_URL;
+      else process.env.ZIBBY_MEM0_OPENAI_BASE_URL = prevUrl;
+    }
+  });
+
+  it('two different workspaces get isolated, non-overlapping DB paths', () => {
+    const a = _mem0DbPaths('/workspace/tenantA/proj1');
+    const b = _mem0DbPaths('/workspace/tenantB/proj2');
+    expect(a.vectorDbPath).not.toBe(b.vectorDbPath);
+    expect(a.historyDbPath).not.toBe(b.historyDbPath);
+    expect(a.dir).not.toBe(b.dir);
+  });
+});
+
+// ─── Adapter interface dispatches dolt vs mem0 ───────────────────────────────
+
+describe('memory adapter dispatch', () => {
+  const restore = [];
+  function setEnv(key, val) {
+    restore.push([key, process.env[key]]);
+    if (val === undefined) delete process.env[key];
+    else process.env[key] = val;
+  }
+  afterEach(() => {
+    while (restore.length) {
+      const [k, v] = restore.pop();
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it('defaults to the dolt adapter', async () => {
+    setEnv('ZIBBY_MEMORY_BACKEND', undefined);
+    const adapter = await _resolveMemoryAdapter('/tmp/no-such-project', {});
+    expect(adapter.id).toBe('dolt');
+  });
+
+  it('env ZIBBY_MEMORY_BACKEND=mem0 selects the mem0 adapter', async () => {
+    setEnv('ZIBBY_MEMORY_BACKEND', 'mem0');
+    const adapter = await _resolveMemoryAdapter('/tmp/no-such-project', {});
+    expect(adapter.id).toBe('mem0');
+  });
+
+  it('context option memoryBackend=mem0 selects the mem0 adapter', async () => {
+    setEnv('ZIBBY_MEMORY_BACKEND', undefined);
+    const adapter = await _resolveMemoryAdapter('/tmp/no-such-project', {
+      options: { memoryBackend: 'mem0' },
+    });
+    expect(adapter.id).toBe('mem0');
+  });
+
+  it('adapters expose the full memory + session/task interface', async () => {
+    setEnv('ZIBBY_MEMORY_BACKEND', 'mem0');
+    const mem0 = await _resolveMemoryAdapter('/tmp/x', {});
+    setEnv('ZIBBY_MEMORY_BACKEND', 'dolt');
+    const dolt = await _resolveMemoryAdapter('/tmp/y', {});
+    for (const a of [mem0, dolt]) {
+      for (const m of ['store', 'recall', 'brief', 'endSession', 'logTask', 'taskHistory']) {
+        expect(typeof a[m]).toBe('function');
+      }
+    }
   });
 });
