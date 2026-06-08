@@ -779,11 +779,18 @@ async function handleRecallMem0(args, _dbPath, cwd) {
     const client = await getMem0Client(cwd);
     const userId = resolveMem0UserId(cwd);
     let rows = [];
+    // @zibby/mem0ai@3.x rejects a top-level `userId` on search()/getAll() —
+    // it requires `{ filters: { user_id } }`. (add() still takes top-level
+    // userId, so store worked but recall always threw.)
+    // @zibby/mem0ai@3.x search()/getAll() take `{ filters: { user_id }, topK }`.
+    // A top-level `userId` throws (rejectTopLevelEntityParams) and `limit` is
+    // ignored by the API (it reads `topK`), so we pass topK and still slice
+    // below as a belt-and-suspenders bound. add() keeps top-level userId.
     if (query && String(query).trim()) {
-      const result = await client.search(String(query), { userId, limit });
+      const result = await client.search(String(query), { filters: { user_id: userId }, topK: limit });
       rows = mapMem0ResultsToRows(result);
     } else {
-      const all = await client.getAll({ userId, limit: Math.max(limit, 50) });
+      const all = await client.getAll({ filters: { user_id: userId }, topK: Math.max(limit, 50) });
       rows = mapMem0ResultsToRows(all);
     }
 
