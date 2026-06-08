@@ -310,7 +310,22 @@ async function moveIssueToSprint({ issueKey, projectKey, sprintId, sprintName, t
   };
 }
 
-async function jiraFetch(path, opts = {}) {
+/**
+ * Low-level Jira REST helper. Resolves the OAuth bearer + cloudId via
+ * resolveIntegrationToken('jira'), retries once on transient auth errors,
+ * and returns parsed JSON (or `{ raw }` for non-JSON bodies).
+ *
+ * Exported so other templates (e.g. tracker-writeback) can issue Jira
+ * REST calls the JIRA skill's MCP tools don't cover — currently the only
+ * gap is attaching a PR remote-link; everything else (transition, comment)
+ * has a first-class tool. Keep this the single auth/cloudId chokepoint;
+ * don't re-implement token resolution at call sites.
+ *
+ * @param {string} path  Jira REST path, e.g. `/rest/api/3/issue/PROJ-1`
+ * @param {{ method?: string, body?: any, headers?: object }} [opts]
+ * @returns {Promise<any>} parsed JSON response body
+ */
+export async function jiraFetch(path, opts = {}) {
   const makeRequest = async () => {
     const { token, cloudId } = await resolveIntegrationToken('jira');
     if (typeof token !== 'string' || !token) {

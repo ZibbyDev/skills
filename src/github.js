@@ -54,6 +54,12 @@ You have access to the user's GitHub repositories. Available tools:
 - github_list_pr_files: List PR changed files
 - github_list_pr_comments: Get PR comments
 - github_create_issue: Create new issue
+- github_list_issues: List issues in a repo (filter by state/labels/since cursor) — excludes PRs
+- github_get_issue: Get a single issue's full detail (title, body, state, labels, assignee, url)
+- github_get_issue_comments: Get the comment thread on an issue
+- github_add_issue_comment: Add a comment to an issue (also used to record a PR link)
+- github_close_issue / github_reopen_issue: Close (optionally completed/not_planned) or reopen an issue
+- github_label_issue: Add / set / remove labels on an issue
 
 ### Important: "Check out" / "Clone"
 When user says "check out repo-name" or "clone repo-name":
@@ -495,6 +501,151 @@ When user just wants to "look at" or "read" files (not clone):
           return JSON.stringify({ number: data.number, url: data.html_url, title: data.title });
         }
 
+        // ---- Issue tracker tools (back the neutral tracker adapter) ----
+        // These reuse ghFetch (the GitHub OAuth/installation-token auth path)
+        // and the REST Issues API: https://docs.github.com/en/rest/issues
+        case 'github_list_issues': {
+          // listCandidates: poll a repo for issues by state/labels/since cursor.
+          // NOTE: GitHub's /issues endpoint returns PRs too (a PR IS an issue);
+          // we filter out anything carrying pull_request so callers only see
+          // real issues.
+          const { owner, repo, state, labels, since, assignee, sort, direction, limit } = args || {};
+          if (!owner || !repo) return JSON.stringify({ error: 'owner and repo are required' });
+          const params = new URLSearchParams();
+          params.set('state', state || 'open'); // open | closed | all
+          params.set('per_page', String(limit || 30));
+          params.set('sort', sort || 'updated'); // created | updated | comments
+          params.set('direction', direction || 'desc');
+          if (labels) params.set('labels', Array.isArray(labels) ? labels.join(',') : labels);
+          if (since) params.set('since', since); // ISO-8601; only issues updated at/after this
+          if (assignee) params.set('assignee', assignee);
+          const data = await ghFetch(`/repos/${owner}/${repo}/issues?${params.toString()}`);
+          const issues = (Array.isArray(data) ? data : [])
+            .filter(i => !i.pull_request)
+            .map(i => ({
+              number: i.number,
+              title: i.title,
+              state: i.state,
+              labels: (i.labels || []).map(l => (typeof l === 'string' ? l : l.name)),
+              assignee: i.assignee?.login || null,
+              assignees: (i.assignees || []).map(a => a.login),
+              user: i.user?.login,
+              comments: i.comments,
+              url: i.html_url,
+              createdAt: i.created_at,
+              updatedAt: i.updated_at,
+            }));
+          return JSON.stringify({ count: issues.length, issues });
+        }
+
+        case 'github_get_issue': {
+          // getTicket: full single-issue detail.
+          const { owner, repo, number } = args || {};
+          if (!owner || !repo || !number) return JSON.stringify({ error: 'owner, repo, and number are required' });
+          const i = await ghFetch(`/repos/${owner}/${repo}/issues/${number}`);
+          if (i.pull_request) {
+            return JSON.stringify({ error: `#${number} is a pull request, not an issue`, isPR: true });
+          }
+          return JSON.stringify({
+            number: i.number,
+            title: i.title,
+            body: i.body || '',
+            state: i.state,
+            stateReason: i.state_reason || null,
+            labels: (i.labels || []).map(l => (typeof l === 'string' ? l : l.name)),
+            assignee: i.assignee?.login || null,
+            assignees: (i.assignees || []).map(a => a.login),
+            user: i.user?.login,
+            milestone: i.milestone?.title || null,
+            comments: i.comments,
+            url: i.html_url,
+            createdAt: i.created_at,
+            updatedAt: i.updated_at,
+            closedAt: i.closed_at,
+          });
+        }
+
+        case 'github_get_issue_comments': {
+          // getComments: chronological comment thread on an issue.
+          const { owner, repo, number, limit } = args || {};
+          if (!owner || !repo || !number) return JSON.stringify({ error: 'owner, repo, and number are required' });
+          const data = await ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments?per_page=${limit || 100}`);
+          const comments = (Array.isArray(data) ? data : []).map(c => ({
+            id: c.id,
+            user: c.user?.login,
+            body: c.body || '',
+            createdAt: c.created_at,
+            updatedAt: c.updated_at,
+            url: c.html_url,
+          }));
+          return JSON.stringify({ count: comments.length, comments });
+        }
+
+        case 'github_add_issue_comment': {
+          // addComment (also the fallback path for linkPullRequest — drop a
+          // markdown PR link into the thread; see linkPullRequest mapping).
+          const { owner, repo, number, body } = args || {};
+          if (!owner || !repo || !number || !body) return JSON.stringify({ error: 'owner, repo, number, and body are required' });
+          const c = await ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments`, {
+            method: 'POST',
+            body: { body },
+          });
+          return JSON.stringify({ ok: true, id: c.id, url: c.html_url });
+        }
+
+        case 'github_close_issue': {
+          // transition: GitHub issues have only open|closed. Optional
+          // stateReason ('completed' | 'not_planned') for the close kind.
+          const { owner, repo, number, stateReason } = args || {};
+          if (!owner || !repo || !number) return JSON.stringify({ error: 'owner, repo, and number are required' });
+          const body = { state: 'closed' };
+          if (stateReason) body.state_reason = stateReason; // completed | not_planned
+          const i = await ghFetch(`/repos/${owner}/${repo}/issues/${number}`, { method: 'PATCH', body });
+          return JSON.stringify({ ok: true, number: i.number, state: i.state, stateReason: i.state_reason || null, url: i.html_url });
+        }
+
+        case 'github_reopen_issue': {
+          // transition (the other direction): closed -> open.
+          const { owner, repo, number } = args || {};
+          if (!owner || !repo || !number) return JSON.stringify({ error: 'owner, repo, and number are required' });
+          const i = await ghFetch(`/repos/${owner}/${repo}/issues/${number}`, {
+            method: 'PATCH',
+            body: { state: 'open' },
+          });
+          return JSON.stringify({ ok: true, number: i.number, state: i.state, url: i.html_url });
+        }
+
+        case 'github_label_issue': {
+          // labelling — back transition/state-modelling done via labels
+          // (e.g. an "in progress" or "needs-triage" label). mode controls
+          // whether we add to, replace, or remove from the existing set.
+          const { owner, repo, number, labels, mode } = args || {};
+          if (!owner || !repo || !number) return JSON.stringify({ error: 'owner, repo, and number are required' });
+          const list = Array.isArray(labels) ? labels : (labels ? [labels] : []);
+          if (!list.length) return JSON.stringify({ error: 'labels (string or array) is required' });
+          const op = mode || 'add'; // add | set | remove
+          if (op === 'set') {
+            const i = await ghFetch(`/repos/${owner}/${repo}/issues/${number}`, {
+              method: 'PATCH',
+              body: { labels: list },
+            });
+            return JSON.stringify({ ok: true, number: i.number, labels: (i.labels || []).map(l => (typeof l === 'string' ? l : l.name)) });
+          }
+          if (op === 'remove') {
+            for (const label of list) {
+              await ghFetch(`/repos/${owner}/${repo}/issues/${number}/labels/${encodeURIComponent(label)}`, { method: 'DELETE' });
+            }
+            const i = await ghFetch(`/repos/${owner}/${repo}/issues/${number}`);
+            return JSON.stringify({ ok: true, number: i.number, labels: (i.labels || []).map(l => (typeof l === 'string' ? l : l.name)) });
+          }
+          // default: add (POST appends, preserving existing labels)
+          const data = await ghFetch(`/repos/${owner}/${repo}/issues/${number}/labels`, {
+            method: 'POST',
+            body: { labels: list },
+          });
+          return JSON.stringify({ ok: true, number, labels: (Array.isArray(data) ? data : []).map(l => (typeof l === 'string' ? l : l.name)) });
+        }
+
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -685,6 +836,108 @@ When user just wants to "look at" or "read" files (not clone):
           body: { type: 'string', description: 'Issue body (markdown)' },
         },
         required: ['owner', 'repo', 'title'],
+      },
+    },
+    {
+      name: 'github_list_issues',
+      description: 'List issues in a repo (excludes pull requests). Filter by state, labels, and an updated-since cursor for polling.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          state: { type: 'string', enum: ['open', 'closed', 'all'], description: 'Filter by state (default: open)' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'Only issues carrying ALL of these labels' },
+          since: { type: 'string', description: 'ISO-8601 timestamp; only issues updated at/after this (polling cursor)' },
+          assignee: { type: 'string', description: 'Filter by assignee login, "none", or "*"' },
+          sort: { type: 'string', enum: ['created', 'updated', 'comments'], description: 'Sort field (default: updated)' },
+          direction: { type: 'string', enum: ['asc', 'desc'], description: 'Sort direction (default: desc)' },
+          limit: { type: 'number', description: 'Max issues (default: 30, max 100 per page)' },
+        },
+        required: ['owner', 'repo'],
+      },
+    },
+    {
+      name: 'github_get_issue',
+      description: 'Get a single GitHub issue with full detail (title, body, state, labels, assignee, url)',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'Issue number' },
+        },
+        required: ['owner', 'repo', 'number'],
+      },
+    },
+    {
+      name: 'github_get_issue_comments',
+      description: 'Get the comment thread on a GitHub issue (chronological)',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'Issue number' },
+          limit: { type: 'number', description: 'Max comments (default: 100)' },
+        },
+        required: ['owner', 'repo', 'number'],
+      },
+    },
+    {
+      name: 'github_add_issue_comment',
+      description: 'Add a comment to a GitHub issue. Also the way to record a PR link on an issue (post a markdown link).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'Issue number' },
+          body: { type: 'string', description: 'Comment body (markdown)' },
+        },
+        required: ['owner', 'repo', 'number', 'body'],
+      },
+    },
+    {
+      name: 'github_close_issue',
+      description: 'Close a GitHub issue. Optionally set the close reason (completed or not_planned).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'Issue number' },
+          stateReason: { type: 'string', enum: ['completed', 'not_planned'], description: 'Why the issue was closed (optional)' },
+        },
+        required: ['owner', 'repo', 'number'],
+      },
+    },
+    {
+      name: 'github_reopen_issue',
+      description: 'Reopen a closed GitHub issue',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'Issue number' },
+        },
+        required: ['owner', 'repo', 'number'],
+      },
+    },
+    {
+      name: 'github_label_issue',
+      description: 'Add, set (replace all), or remove labels on a GitHub issue. Labels back state-like transitions on GitHub.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'Issue number' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'Label name(s)' },
+          mode: { type: 'string', enum: ['add', 'set', 'remove'], description: 'add appends, set replaces all, remove deletes (default: add)' },
+        },
+        required: ['owner', 'repo', 'number', 'labels'],
       },
     },
   ],
