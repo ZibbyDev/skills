@@ -12,6 +12,7 @@ const { INTEGRATIONS, INTEGRATION_REGISTRY } = await import('../src/integrations
 const { sentrySkill } = await import('../src/sentry.js');
 const { jiraSkill } = await import('../src/jira.js');
 const { githubSkill } = await import('../src/github.js');
+const { planeSkill } = await import('../src/plane.js');
 const { slackSkill } = await import('../src/slack.js');
 const { larkSkill } = await import('../src/lark.js');
 const { memorySkill } = await import('../src/memory.js');
@@ -50,6 +51,11 @@ describe('INTEGRATIONS constant', () => {
         // any future report-producing template that targets Notion as
         // a destination.
         'notion',
+        // Plane — api-key style (static API key + workspace slug +
+        // overridable base URL), backed by the official Plane MCP server.
+        // See plane.js. Supports Plane Cloud, self-hosted, and Zibby-hosted
+        // via the configurable PLANE_BASE_URL.
+        'plane',
       ])
     );
   });
@@ -86,6 +92,9 @@ describe('skill.requiresIntegration declarations', () => {
   });
   it('githubSkill declares github', () => {
     expect(githubSkill.requiresIntegration).toBe(INTEGRATIONS.GITHUB);
+  });
+  it('planeSkill declares plane', () => {
+    expect(planeSkill.requiresIntegration).toBe(INTEGRATIONS.PLANE);
   });
   it('slackSkill declares slack', () => {
     expect(slackSkill.requiresIntegration).toBe(INTEGRATIONS.SLACK);

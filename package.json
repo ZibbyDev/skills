@@ -1,6 +1,6 @@
 {
   "name": "@zibby/skills",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "description": "Built-in skill definitions for Zibby test automation framework",
   "type": "module",
   "main": "dist/index.js",
@@ -12,6 +12,7 @@
     "./browser": "./dist/browser.js",
     "./jira": "./dist/jira.js",
     "./github": "./dist/github.js",
+    "./plane": "./dist/plane.js",
     "./slack": "./dist/slack.js",
     "./lark": "./dist/lark.js",
     "./memory": "./dist/memory.js",

@@ -38,6 +38,11 @@ export const INTEGRATIONS = Object.freeze({
   CURSOR_ADMIN:      'cursor_admin',
   // Notion OAuth — multi-workspace integration. See handlers/notion.js.
   NOTION:            'notion',
+  // Plane — api-key style (static API key + workspace slug + base URL),
+  // NOT OAuth. Same paste-token shape as github/sentry. Backed by the
+  // official Plane MCP server (see plane.js). baseUrl is user-overridable
+  // so one integration covers Plane Cloud, self-hosted, and Zibby-hosted.
+  PLANE:             'plane',
 });
 
 /**
@@ -76,4 +81,5 @@ export const INTEGRATION_REGISTRY = Object.freeze({
     connectPath: '/integrations?provider=cursor_admin',
   },
   notion: { id: 'notion', name: 'Notion', connectPath: '/integrations?provider=notion' },
+  plane:  { id: 'plane',  name: 'Plane',  connectPath: '/integrations?provider=plane'  },
 });
