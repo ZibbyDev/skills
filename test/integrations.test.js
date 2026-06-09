@@ -13,6 +13,7 @@ const { sentrySkill } = await import('../src/sentry.js');
 const { jiraSkill } = await import('../src/jira.js');
 const { githubSkill } = await import('../src/github.js');
 const { planeSkill } = await import('../src/plane.js');
+const { linearSkill } = await import('../src/linear.js');
 const { slackSkill } = await import('../src/slack.js');
 const { larkSkill } = await import('../src/lark.js');
 const { memorySkill } = await import('../src/memory.js');
@@ -56,6 +57,10 @@ describe('INTEGRATIONS constant', () => {
         // See plane.js. Supports Plane Cloud, self-hosted, and Zibby-hosted
         // via the configurable PLANE_BASE_URL.
         'plane',
+        // Linear — api-key style (single static personal API key, no
+        // workspace slug / base URL). See linear.js + handlers/linear.js.
+        // The skill talks to the Linear GraphQL API directly (no MCP server).
+        'linear',
       ])
     );
   });
@@ -95,6 +100,9 @@ describe('skill.requiresIntegration declarations', () => {
   });
   it('planeSkill declares plane', () => {
     expect(planeSkill.requiresIntegration).toBe(INTEGRATIONS.PLANE);
+  });
+  it('linearSkill declares linear', () => {
+    expect(linearSkill.requiresIntegration).toBe(INTEGRATIONS.LINEAR);
   });
   it('slackSkill declares slack', () => {
     expect(slackSkill.requiresIntegration).toBe(INTEGRATIONS.SLACK);

@@ -33,6 +33,8 @@
  *     prefer it and fall back to linear_add_comment.
  */
 
+import { INTEGRATIONS } from './integrations.js';
+
 const LINEAR_GRAPHQL_URL = process.env.LINEAR_API_URL || 'https://api.linear.app/graphql';
 
 /** Resolve the Linear auth header value from env. */
@@ -170,11 +172,12 @@ export const linearSkill = {
   id: 'linear',
   serverName: 'linear',
   allowedTools: ['mcp__linear__*'],
-  // No `requiresIntegration` yet: Linear has no backend OAuth handler and is
-  // NOT in the frozen INTEGRATIONS set. Auth is the LINEAR_API_KEY env var.
-  // Add `requiresIntegration: INTEGRATIONS.LINEAR` once a backend handler +
-  // the INTEGRATIONS.LINEAR constant exist (and are mirrored in
-  // backend/src/services/skill-integrations.js).
+  // Linear is an api-key (paste-token) integration. The backend connect
+  // handler (backend/src/handlers/linear.js) stores the LINEAR_API_KEY and
+  // the workflow-executor injects it into the run. Declaring this gates
+  // deploy on a connected Linear integration (mirrored in
+  // backend/src/services/skill-integrations.js → INTEGRATIONS.LINEAR).
+  requiresIntegration: INTEGRATIONS.LINEAR,
   envKeys: ['LINEAR_API_KEY', 'LINEAR_OAUTH_TOKEN'],
   description: 'Linear — issues, comments, workflow states (GraphQL API key)',
 

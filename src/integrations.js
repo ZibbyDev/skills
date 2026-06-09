@@ -43,6 +43,11 @@ export const INTEGRATIONS = Object.freeze({
   // official Plane MCP server (see plane.js). baseUrl is user-overridable
   // so one integration covers Plane Cloud, self-hosted, and Zibby-hosted.
   PLANE:             'plane',
+  // Linear — api-key style (static personal API key), NOT OAuth. Same
+  // paste-token shape as github/sentry/plane but a SINGLE value (no
+  // workspace slug / base URL). The linearSkill talks to the Linear
+  // GraphQL API directly (no MCP server). See linear.js + handlers/linear.js.
+  LINEAR:            'linear',
 });
 
 /**
@@ -82,4 +87,5 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   },
   notion: { id: 'notion', name: 'Notion', connectPath: '/integrations?provider=notion' },
   plane:  { id: 'plane',  name: 'Plane',  connectPath: '/integrations?provider=plane'  },
+  linear: { id: 'linear', name: 'Linear', connectPath: '/integrations?provider=linear' },
 });
