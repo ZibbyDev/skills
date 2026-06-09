@@ -8,6 +8,7 @@ import {
   _mem0DbPaths,
   _resolveMem0Config,
   _resolveMemoryAdapter,
+  _resolveMem0Infer,
 } from '../src/chat-memory.js';
 
 const DOLT_BIN = 'dolt';
@@ -65,6 +66,13 @@ describe('chatMemorySkill structure', () => {
     expect(store.input_schema.required).toEqual(['content', 'category']);
   });
 
+  it('memory_store exposes an infer boolean defaulting to false', () => {
+    const store = chatMemorySkill.tools.find(t => t.name === 'memory_store');
+    expect(store.input_schema.properties.infer).toBeDefined();
+    expect(store.input_schema.properties.infer.type).toBe('boolean');
+    expect(store.input_schema.properties.infer.default).toBe(false);
+  });
+
   it('memory_end_session requires summary', () => {
     const end = chatMemorySkill.tools.find(t => t.name === 'memory_end_session');
     expect(end.input_schema.required).toEqual(['summary']);
@@ -117,6 +125,35 @@ describeWithDolt('chat-memory integration', () => {
     if (existsSync(TMP_ROOT)) {
       rmSync(TMP_ROOT, { recursive: true, force: true });
     }
+  });
+
+  // ── mem0 graceful degradation ─────────────────────────────────────────────
+  // With backend=mem0 but mem0ai unresolvable in the workspace (no embedding
+  // path), memory ops must degrade to Dolt and return a normal result instead
+  // of throwing — so a missing/down embedding proxy never breaks the run.
+  describe('mem0 → dolt graceful degradation', () => {
+    let degradeWs;
+    beforeAll(() => {
+      degradeWs = join(TMP_ROOT, `degrade-${Date.now()}`);
+      mkdirSync(degradeWs, { recursive: true });
+      _resetInitCache();
+    });
+    it('memory_store degrades to dolt and returns ok (no throw)', async () => {
+      const prev = process.env.ZIBBY_MEMORY_BACKEND;
+      process.env.ZIBBY_MEMORY_BACKEND = 'mem0';
+      try {
+        const res = parse(await call('memory_store', {
+          content: 'Degradation path keeps memory writable',
+          category: 'fact',
+          source: 'test',
+        }, degradeWs));
+        expect(res.ok).toBe(true);
+        expect(res.error).toBeFalsy();
+      } finally {
+        if (prev === undefined) delete process.env.ZIBBY_MEMORY_BACKEND;
+        else process.env.ZIBBY_MEMORY_BACKEND = prev;
+      }
+    });
   });
 
   // ── memory_store + memory_recall ──────────────────────────────────────────
@@ -517,6 +554,46 @@ describe('mem0 cloud-persistent SQLite paths', () => {
   });
 });
 
+// ─── mem0 `infer` toggle (default FALSE = embed-only, no LLM call) ────────────
+
+describe('resolveMem0Infer', () => {
+  const NO_CFG = '/tmp/zibby-no-such-project-infer';
+  const prevEnv = {};
+  beforeAll(() => { prevEnv.v = process.env.ZIBBY_MEM0_INFER; });
+  afterEach(() => {
+    if (prevEnv.v === undefined) delete process.env.ZIBBY_MEM0_INFER;
+    else process.env.ZIBBY_MEM0_INFER = prevEnv.v;
+  });
+
+  it('defaults to false when no arg, no env, no config', async () => {
+    delete process.env.ZIBBY_MEM0_INFER;
+    expect(await _resolveMem0Infer(undefined, NO_CFG)).toBe(false);
+  });
+
+  it('explicit boolean arg wins over everything', async () => {
+    process.env.ZIBBY_MEM0_INFER = 'true';
+    expect(await _resolveMem0Infer(false, NO_CFG)).toBe(false);
+    expect(await _resolveMem0Infer(true, NO_CFG)).toBe(true);
+  });
+
+  it('env ZIBBY_MEM0_INFER=true enables when no arg given', async () => {
+    process.env.ZIBBY_MEM0_INFER = 'true';
+    expect(await _resolveMem0Infer(undefined, NO_CFG)).toBe(true);
+  });
+
+  it('env truthy variants (1/yes/on) enable; everything else stays false', async () => {
+    for (const v of ['1', 'yes', 'on', 'TRUE']) {
+      process.env.ZIBBY_MEM0_INFER = v;
+      expect(await _resolveMem0Infer(undefined, NO_CFG)).toBe(true);
+    }
+    for (const v of ['0', 'false', 'no', '']) {
+      process.env.ZIBBY_MEM0_INFER = v;
+      // empty string falls through to config (none) → false
+      expect(await _resolveMem0Infer(undefined, NO_CFG)).toBe(false);
+    }
+  });
+});
+
 // ─── Adapter interface dispatches dolt vs mem0 ───────────────────────────────
 
 describe('memory adapter dispatch', () => {
@@ -534,8 +611,14 @@ describe('memory adapter dispatch', () => {
     }
   });
 
-  it('defaults to the dolt adapter', async () => {
+  it('defaults to the mem0 adapter', async () => {
     setEnv('ZIBBY_MEMORY_BACKEND', undefined);
+    const adapter = await _resolveMemoryAdapter('/tmp/no-such-project', {});
+    expect(adapter.id).toBe('mem0');
+  });
+
+  it('env ZIBBY_MEMORY_BACKEND=dolt overrides the mem0 default', async () => {
+    setEnv('ZIBBY_MEMORY_BACKEND', 'dolt');
     const adapter = await _resolveMemoryAdapter('/tmp/no-such-project', {});
     expect(adapter.id).toBe('dolt');
   });

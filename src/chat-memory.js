@@ -31,6 +31,9 @@ const EXEC_OPTS = { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout:
 const DEFAULT_MEMORY_BACKEND = 'mem0';
 const _mem0Clients = new Map();
 const _projectBackendCache = new Map();
+// One-shot guard so the mem0→dolt degradation notice is emitted at most once
+// per process instead of on every memory op while the embedding proxy is down.
+let _mem0FallbackWarned = false;
 const _moduleRequire = createRequire(import.meta.url);
 
 const genId = () => randomBytes(8).toString('hex');
@@ -522,6 +525,28 @@ fact, decision, context, insight, credential, url, error, workaround`,
         error: brief.error || null,
       };
     } catch (e) {
+      // Same degradation path as handleToolCall: if mem0 can't produce a brief,
+      // fall back to Dolt so the conversation still loads any local memory
+      // context instead of starting blind.
+      if (backend === 'mem0' && adapter !== doltAdapter && ensureTables(dbPath)) {
+        if (!_mem0FallbackWarned) {
+          _mem0FallbackWarned = true;
+          try { process.stderr.write(`[chat-memory] mem0 backend unavailable (${e?.message || e}); degrading to dolt for this run\n`); } catch { /* non-critical */ }
+        }
+        try {
+          const briefRaw = await doltAdapter.brief(args, dbPath, cwd);
+          const parsed = JSON.parse(briefRaw || '{}');
+          const brief = normalizeBriefByBackend({ ...parsed, backend: 'dolt' }, 'dolt');
+          return {
+            backend: 'dolt',
+            brief,
+            promptContext: buildPromptContextFromBrief(brief),
+            debugPreview: buildBriefDebugPreview(brief),
+            error: brief.error || null,
+            degradedFrom: 'mem0',
+          };
+        } catch { /* fall through to the soft-error shape below */ }
+      }
       const error = String(e?.message || e);
       const brief = normalizeBriefByBackend({ backend, error }, backend);
       return {
@@ -548,19 +573,39 @@ fact, decision, context, insight, credential, url, error, workaround`,
       });
     }
 
-    try {
+    const dispatch = (a) => {
       switch (name) {
-        case 'memory_store': return await adapter.store(args, dbPath, cwd);
-        case 'memory_recall': return await adapter.recall(args, dbPath, cwd);
-        case 'memory_brief': return await adapter.brief(args, dbPath, cwd);
-        case 'memory_end_session': return await adapter.endSession(args, dbPath, cwd);
-        case 'task_log': return await adapter.logTask(args, dbPath, cwd);
-        case 'task_history': return await adapter.taskHistory(args, dbPath, cwd);
+        case 'memory_store': return a.store(args, dbPath, cwd);
+        case 'memory_recall': return a.recall(args, dbPath, cwd);
+        case 'memory_brief': return a.brief(args, dbPath, cwd);
+        case 'memory_end_session': return a.endSession(args, dbPath, cwd);
+        case 'task_log': return a.logTask(args, dbPath, cwd);
+        case 'task_history': return a.taskHistory(args, dbPath, cwd);
         default: return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
+    };
+
+    try {
+      return await dispatch(adapter);
     } catch (e) {
-      if (backend === 'mem0') {
-        throw new Error(`mem0 throw: ${e.message}`, { cause: e });
+      // Graceful degradation: when the mem0 backend can't serve an op (embedding
+      // proxy down, no OpenAI key locally, mem0ai not installed, network), fall
+      // back to the self-contained Dolt backend for THIS op so memory degrades
+      // instead of breaking the run. If Dolt is also unavailable, return a soft
+      // error rather than throwing.
+      if (backend === 'mem0' && adapter !== doltAdapter) {
+        if (ensureTables(dbPath)) {
+          if (!_mem0FallbackWarned) {
+            _mem0FallbackWarned = true;
+            try { process.stderr.write(`[chat-memory] mem0 backend unavailable (${e.message}); degrading to dolt for this run\n`); } catch { /* non-critical */ }
+          }
+          try {
+            return await dispatch(doltAdapter);
+          } catch (e2) {
+            return JSON.stringify({ error: e2.message, backend: 'dolt', degradedFrom: 'mem0' });
+          }
+        }
+        return JSON.stringify({ error: `mem0 unavailable (${e.message}); dolt fallback also unavailable`, backend: 'mem0' });
       }
       return JSON.stringify({ error: e.message });
     }
