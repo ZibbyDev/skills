@@ -126,6 +126,9 @@ export function _resolveMem0Config(cwd) {
 export function _resolveMemoryAdapter(cwd, context) {
   return resolveMemoryAdapter(cwd, context);
 }
+export function _resolveMem0Infer(arg, cwd) {
+  return resolveMem0Infer(arg, cwd);
+}
 
 function doltAvailable() {
   try {
@@ -572,6 +575,7 @@ fact, decision, context, insight, credential, url, error, workaround`,
           tier: { type: 'string', enum: ['short', 'mid', 'long'], description: 'Memory tier: short (session/24h), mid (days/weeks), long (permanent)' },
           source: { type: 'string', description: 'Where this info came from (e.g. "jira", "github", "user", "test_run")' },
           ticketKey: { type: 'string', description: 'Related ticket key (optional)' },
+          infer: { type: 'boolean', description: 'true = LLM distills/dedupes facts (costs tokens); false = store raw, embed-only, free', default: false },
         },
         required: ['content', 'category'],
       },
@@ -719,17 +723,53 @@ function handleStore(args, dbPath) {
   return JSON.stringify({ ok: true, id, category, tier: memTier, memoryKey: key || null, stored: content.slice(0, 100) });
 }
 
+function envBool(raw) {
+  const v = String(raw || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+const _projectInferCache = new Map();
+
+// Resolve mem0's `infer` flag for add(). DEFAULT FALSE = embed-only, no LLM
+// fact-extraction call (free). Precedence:
+//   1. explicit per-call tool arg (boolean)
+//   2. per-deploy env toggle ZIBBY_MEM0_INFER
+//   3. project config `.zibby.config.mjs` → memory.infer
+//   4. false
+//   infer:false → mem0 short-circuits to embed+store, never calls the LLM.
+//   infer:true  → mem0 runs the ~7.7k-token fact-extraction LLM (costs tokens).
+async function resolveMem0Infer(arg, cwd) {
+  if (typeof arg === 'boolean') return arg;
+  if (process.env.ZIBBY_MEM0_INFER != null && String(process.env.ZIBBY_MEM0_INFER).trim() !== '') {
+    return envBool(process.env.ZIBBY_MEM0_INFER);
+  }
+  const key = cwd || process.cwd();
+  if (_projectInferCache.has(key)) return _projectInferCache.get(key);
+  let resolved = false;
+  try {
+    const configPath = join(key, '.zibby.config.mjs');
+    if (existsSync(configPath)) {
+      const mod = await import(pathToFileURL(configPath).href);
+      resolved = mod?.default?.memory?.infer === true;
+    }
+  } catch { /* fallback to default false */ }
+  _projectInferCache.set(key, resolved);
+  return resolved;
+}
+
 async function handleStoreMem0(args, _dbPath, cwd) {
-  const { content, category, source, ticketKey, tier, memoryKey } = args;
+  const { content, category, source, ticketKey, tier, memoryKey, infer } = args;
   if (!content || !category) return JSON.stringify({ error: 'content and category are required' });
   try {
     const client = await getMem0Client(cwd);
     const userId = resolveMem0UserId(cwd);
     const memTier = normalizeTierForCategory(tier, category);
+    const inferFacts = await resolveMem0Infer(infer, cwd);
     await client.add(
       [{ role: 'user', content: String(content) }],
       {
         userId,
+        infer: inferFacts,
         metadata: {
           memoryKey: memoryKey || null,
           category,
@@ -746,6 +786,7 @@ async function handleStoreMem0(args, _dbPath, cwd) {
       userId,
       category,
       tier: memTier,
+      infer: inferFacts,
       memoryKey: memoryKey || null,
       stored: String(content).slice(0, 100),
     });
