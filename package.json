@@ -58,6 +58,8 @@
   "dependencies": {
     "@zibby/agent-workflow": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.6.2",
+    "mem0ai": "npm:@zibby/mem0ai@^3.0.5",
     "zod": "^3.23.0 || ^4.0.0"
   },
   "peerDependencies": {
