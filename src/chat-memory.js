@@ -24,7 +24,11 @@ import { createRequire } from 'module';
 const DB_DIR = '.zibby/memory';
 const DOLT_BIN = 'dolt';
 const EXEC_OPTS = { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000 };
-const DEFAULT_MEMORY_BACKEND = 'dolt';
+// mem0 is the default backend (semantic vector memory, persists across
+// Fargate tasks via the tenant-scoped S3 tarball sync). Validated end-to-end
+// in prod. Override per-workflow with ZIBBY_MEMORY_BACKEND / memory.backend
+// = 'dolt' for self-contained structured memory (no embedding-proxy dep).
+const DEFAULT_MEMORY_BACKEND = 'mem0';
 const _mem0Clients = new Map();
 const _projectBackendCache = new Map();
 const _moduleRequire = createRequire(import.meta.url);
