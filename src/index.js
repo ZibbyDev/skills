@@ -10,6 +10,7 @@ import { registerSkill } from '@zibby/agent-workflow';
 import { browserSkill } from './browser.js';
 import { jiraSkill } from './jira.js';
 import { githubSkill } from './github.js';
+import { gitlabSkill } from './gitlab.js';
 import { linearSkill } from './linear.js';
 import { planeSkill } from './plane.js';
 import { slackSkill } from './slack.js';
@@ -32,6 +33,7 @@ import {
 registerSkill(browserSkill);
 registerSkill(jiraSkill);
 registerSkill(githubSkill);
+registerSkill(gitlabSkill);
 registerSkill(linearSkill);
 registerSkill(planeSkill);
 registerSkill(slackSkill);
@@ -56,6 +58,7 @@ export const SKILLS = {
   BROWSER: 'browser',
   JIRA: 'jira',
   GITHUB: 'github',
+  GITLAB: 'gitlab',
   LINEAR: 'linear',
   PLANE: 'plane',
   GIT: 'git',
@@ -74,7 +77,7 @@ export const SKILLS = {
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
