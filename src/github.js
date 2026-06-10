@@ -53,6 +53,7 @@ You have access to the user's GitHub repositories. Available tools:
 - github_get_pr_diff: Get PR diff
 - github_list_pr_files: List PR changed files
 - github_list_pr_comments: Get PR comments
+- github_create_review: Post a review on a PR — a summary body plus optional inline comments on specific file/line positions, with an event (COMMENT, APPROVE, or REQUEST_CHANGES)
 - github_create_issue: Create new issue
 - github_list_issues: List issues in a repo (filter by state/labels/since cursor) — excludes PRs
 - github_get_issue: Get a single issue's full detail (title, body, state, labels, assignee, url)
@@ -192,6 +193,57 @@ When user just wants to "look at" or "read" files (not clone):
             })),
           ].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
           return JSON.stringify({ total: all.length, comments: all });
+        }
+
+        case 'github_create_review': {
+          // Post a full PR review in one call: a summary body + optional
+          // inline comments + an event (COMMENT | APPROVE | REQUEST_CHANGES).
+          // Mirrors the GitHub "Create a review for a pull request" REST API:
+          // https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request
+          // Inline comments use the modern { path, line, side, body } shape
+          // (line = line number in the file's NEW version; side LEFT|RIGHT).
+          const { owner, repo, number, body, event, comments } = args || {};
+          if (!owner || !repo || !number) {
+            return JSON.stringify({ error: 'owner, repo, and number are required' });
+          }
+          const ev = (event || 'COMMENT').toUpperCase();
+          if (!['COMMENT', 'APPROVE', 'REQUEST_CHANGES'].includes(ev)) {
+            return JSON.stringify({ error: `event must be COMMENT, APPROVE, or REQUEST_CHANGES (got ${event})` });
+          }
+          // GitHub rejects a COMMENT/REQUEST_CHANGES review with neither a body
+          // nor inline comments. Guard so the agent gets a clear error, not a 422.
+          const inline = Array.isArray(comments)
+            ? comments
+                .filter((c) => c && c.path && c.body && (c.line != null || c.position != null))
+                .map((c) => {
+                  const out = { path: c.path, body: String(c.body) };
+                  if (c.line != null) {
+                    out.line = Number(c.line);
+                    out.side = c.side === 'LEFT' ? 'LEFT' : 'RIGHT';
+                  } else {
+                    out.position = Number(c.position);
+                  }
+                  return out;
+                })
+            : [];
+          if (ev !== 'APPROVE' && !body && inline.length === 0) {
+            return JSON.stringify({ error: 'a COMMENT or REQUEST_CHANGES review needs a body and/or inline comments' });
+          }
+          const payload = { event: ev };
+          if (body) payload.body = String(body);
+          if (inline.length > 0) payload.comments = inline;
+          const review = await ghFetch(`/repos/${owner}/${repo}/pulls/${number}/reviews`, {
+            method: 'POST',
+            body: payload,
+          });
+          return JSON.stringify({
+            ok: true,
+            id: review.id,
+            state: review.state,
+            event: ev,
+            commentsPosted: inline.length,
+            url: review.html_url,
+          });
         }
 
         case 'github_list_commits': {
@@ -778,6 +830,39 @@ When user just wants to "look at" or "read" files (not clone):
           owner: { type: 'string', description: 'Repository owner' },
           repo: { type: 'string', description: 'Repository name' },
           number: { type: 'number', description: 'PR number' },
+        },
+        required: ['owner', 'repo', 'number'],
+      },
+    },
+    {
+      name: 'github_create_review',
+      description: 'Post a review on a pull request: a summary body plus optional inline comments anchored to file/line, with an event (COMMENT, APPROVE, or REQUEST_CHANGES). Use this to deliver a code review back to the PR.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'PR number' },
+          body: { type: 'string', description: 'The review summary (markdown). Shown as the top-level review comment.' },
+          event: {
+            type: 'string',
+            enum: ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'],
+            description: 'Review verdict. Default COMMENT (no approval state). Use REQUEST_CHANGES for blocking issues.',
+          },
+          comments: {
+            type: 'array',
+            description: 'Optional inline comments, each anchored to a changed line.',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'File path as it appears in the diff' },
+                line: { type: 'number', description: 'Line number in the file\'s NEW version (the right side of the diff)' },
+                side: { type: 'string', enum: ['LEFT', 'RIGHT'], description: 'RIGHT (new) or LEFT (old). Default RIGHT.' },
+                body: { type: 'string', description: 'The inline comment text (markdown)' },
+              },
+              required: ['path', 'line', 'body'],
+            },
+          },
         },
         required: ['owner', 'repo', 'number'],
       },

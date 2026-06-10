@@ -12,6 +12,8 @@
     "./browser": "./dist/browser.js",
     "./jira": "./dist/jira.js",
     "./github": "./dist/github.js",
+    "./gitlab": "./dist/gitlab.js",
+    "./linear": "./dist/linear.js",
     "./plane": "./dist/plane.js",
     "./slack": "./dist/slack.js",
     "./lark": "./dist/lark.js",
