@@ -31,6 +31,57 @@ import { registerSkill } from '@zibby/agent-workflow';
 
 const _require = createRequire(import.meta.url);
 
+/**
+ * A tool exposed by a skill (Anthropic tool-definition shape).
+ * @typedef {Object} SkillTool
+ * @property {string} name — Tool name.
+ * @property {string} [description] — Human-readable description.
+ * @property {Object} [input_schema] — JSON Schema for the tool input.
+ */
+
+/**
+ * A registered skill object. Returned by {@link skill} and consumed by
+ * `registerSkill` / the workflow runtime.
+ * @typedef {Object} Skill
+ * @property {string} id — Unique skill identifier.
+ * @property {'function'|'mcp'} type — Skill kind.
+ * @property {string} serverName — MCP server name this skill registers under.
+ * @property {string[]} allowedTools — Glob patterns of tools this skill grants.
+ * @property {string} description — Human-readable description.
+ * @property {string[]} envKeys — Env var names the skill reads at resolve time.
+ * @property {SkillTool[]} tools — Tool definitions exposed by the skill.
+ * @property {() => ({ command: string, args: string[], env?: Record<string,string> } | null)} resolve
+ *   — Returns the MCP server launch config, or null when unavailable.
+ * @property {string} [cursorKey] — Optional Cursor MCP registry key.
+ * @property {string} [sessionEnvKey] — Optional env key carrying session info.
+ */
+
+/**
+ * Function-skill input field: either a JSON-Schema type string
+ * (e.g. `'number'`) or a partial JSON-Schema object with an optional
+ * `required` flag (defaults to required).
+ * @typedef {string | (Object & { required?: boolean })} SkillInputField
+ */
+
+/**
+ * Configuration passed to {@link skill}.
+ *
+ * Provide `handler` for a function skill (one skill = one tool), or
+ * `resolve` for an MCP skill.
+ * @typedef {Object} SkillConfig
+ * @property {string} [description] — Human-readable description.
+ * @property {Record<string, SkillInputField>} [input] — Function-skill input schema.
+ * @property {(args: any) => any} [handler] — Function-skill handler (makes it a function skill).
+ * @property {() => ({ command: string, args: string[], env?: Record<string,string> } | null)} [resolve]
+ *   — MCP-skill resolver (makes it an MCP skill).
+ * @property {string} [serverName] — MCP server name (defaults to `id`).
+ * @property {string[]} [allowedTools] — Allowed tool globs.
+ * @property {string[]} [envKeys] — Env var names the skill reads.
+ * @property {SkillTool[]} [tools] — Tool definitions (MCP skills).
+ * @property {string} [cursorKey] — Optional Cursor MCP registry key.
+ * @property {string} [sessionEnvKey] — Optional session env key.
+ */
+
 function resolveBridgePath() {
   try {
     return _require.resolve('@zibby/core/function-bridge.js');
@@ -130,8 +181,8 @@ function buildMcpSkill(id, config) {
  * MCP skill:       skill(id, { resolve(), serverName?, ... })
  *
  * @param {string} id — Unique skill identifier
- * @param {Object} config — Skill definition
- * @returns {Object} A registered skill object
+ * @param {SkillConfig} config — Skill definition
+ * @returns {Skill} A registered skill object
  */
 export function skill(id, config) {
   let skillObj;

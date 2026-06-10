@@ -1,31 +1,78 @@
 {
   "name": "@zibby/skills",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "description": "Built-in skill definitions for Zibby test automation framework",
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./bin/mcp-sentry.mjs": "./bin/mcp-sentry.mjs",
     "./bin/mcp-lark.mjs": "./bin/mcp-lark.mjs",
     "./bin/mcp-slack.mjs": "./bin/mcp-slack.mjs",
-    "./browser": "./dist/browser.js",
-    "./jira": "./dist/jira.js",
-    "./github": "./dist/github.js",
-    "./gitlab": "./dist/gitlab.js",
-    "./linear": "./dist/linear.js",
-    "./plane": "./dist/plane.js",
-    "./slack": "./dist/slack.js",
-    "./lark": "./dist/lark.js",
-    "./memory": "./dist/memory.js",
-    "./function": "./dist/function-skill.js",
-    "./integrations": "./dist/integrations.js",
-    "./report": "./dist/report.js",
-    "./llm-billing": "./dist/llm-billing.js",
-    "./sentry": "./dist/sentry.js"
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "default": "./dist/browser.js"
+    },
+    "./jira": {
+      "types": "./dist/jira.d.ts",
+      "default": "./dist/jira.js"
+    },
+    "./github": {
+      "types": "./dist/github.d.ts",
+      "default": "./dist/github.js"
+    },
+    "./gitlab": {
+      "types": "./dist/gitlab.d.ts",
+      "default": "./dist/gitlab.js"
+    },
+    "./linear": {
+      "types": "./dist/linear.d.ts",
+      "default": "./dist/linear.js"
+    },
+    "./plane": {
+      "types": "./dist/plane.d.ts",
+      "default": "./dist/plane.js"
+    },
+    "./slack": {
+      "types": "./dist/slack.d.ts",
+      "default": "./dist/slack.js"
+    },
+    "./lark": {
+      "types": "./dist/lark.d.ts",
+      "default": "./dist/lark.js"
+    },
+    "./memory": {
+      "types": "./dist/memory.d.ts",
+      "default": "./dist/memory.js"
+    },
+    "./function": {
+      "types": "./dist/function-skill.d.ts",
+      "default": "./dist/function-skill.js"
+    },
+    "./integrations": {
+      "types": "./dist/integrations.d.ts",
+      "default": "./dist/integrations.js"
+    },
+    "./report": {
+      "types": "./dist/report.d.ts",
+      "default": "./dist/report.js"
+    },
+    "./llm-billing": {
+      "types": "./dist/llm-billing.d.ts",
+      "default": "./dist/llm-billing.js"
+    },
+    "./sentry": {
+      "types": "./dist/sentry.d.ts",
+      "default": "./dist/sentry.js"
+    }
   },
   "scripts": {
-    "build": "node ../scripts/build.mjs",
+    "build": "node ../scripts/build.mjs && npm run build:types",
+    "build:types": "tsc -p tsconfig.types.json",
     "prepack": "node scripts/copy-docs.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint --fix ."
@@ -58,8 +105,8 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@zibby/agent-workflow": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@zibby/agent-workflow": "^0.3.0",
     "better-sqlite3": "^12.6.2",
     "mem0ai": "npm:@zibby/mem0ai@^3.0.5",
     "zod": "^3.23.0 || ^4.0.0"
@@ -75,6 +122,7 @@
     "@eslint/js": "^10.0.1",
     "esbuild": "^0.28.0",
     "eslint": "^10.0.2",
-    "globals": "^17.4.0"
+    "globals": "^17.4.0",
+    "typescript": "^5.9.3"
   }
 }

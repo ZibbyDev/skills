@@ -57,8 +57,6 @@ const trendSectionSchema = z.object({
   highlight: z.enum(['last', 'max', 'min', 'none']).default('last').optional()
     .describe('Which bucket to visually highlight in the rendered card.'),
   severity: z.enum(SEVERITIES).optional(),
-}).refine((s) => s.labels.length === s.values.length, {
-  message: 'labels.length must equal values.length',
 });
 
 const tableSectionSchema = z.object({
@@ -70,8 +68,6 @@ const tableSectionSchema = z.object({
       .min(1).max(8)
   ).max(40)
     .describe('2D matrix. Each inner array must have headers.length entries.'),
-}).refine((s) => s.rows.every((r) => r.length === s.headers.length), {
-  message: 'every row must have headers.length entries',
 });
 
 const calloutsSectionSchema = z.object({
@@ -113,7 +109,24 @@ export const reportObjectSchema = z.object({
   subtitle: z.string().max(200).optional()
     .describe('Date range or smaller header (e.g. "May 13 — May 20").'),
   headline: headlineSchema,
-  sections: z.array(sectionSchema).max(20).default([]),
+  sections: z.array(sectionSchema).max(20).default([])
+    // Cross-field checks that USED to live on the trend/table section
+    // schemas as `.refine()`. They had to move here: `.refine()` wraps a
+    // ZodObject in a ZodEffects, and z.discriminatedUnion() requires raw
+    // ZodObjects (it reads each option's `.shape[discriminator]`). A
+    // ZodEffects member made discriminatedUnion throw "Cannot read
+    // properties of undefined (reading 'kind')" at import time, crashing
+    // the whole @zibby/skills package for every workflow that loads it.
+    .superRefine((arr, ctx) => {
+      arr.forEach((s, i) => {
+        if (s.kind === 'trend' && s.labels.length !== s.values.length) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'values'], message: 'labels.length must equal values.length' });
+        }
+        if (s.kind === 'table' && !s.rows.every((r) => r.length === s.headers.length)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'rows'], message: 'every row must have headers.length entries' });
+        }
+      });
+    }),
   footer: z.object({
     viewUrl: z.string().url().optional()
       .describe('Optional "View in Zibby" button URL.'),

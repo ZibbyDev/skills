@@ -1,0 +1,27 @@
+{
+  "_comment": "Declaration-only emit: generates .d.ts from the existing .js (+ JSDoc) without converting source to TS or changing runtime behavior. Output lands beside the built .js in dist/ so each package.json subpath export resolves its types automatically. Chained after the esbuild build (see scripts.build) which clears dist/ first.",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": false,
+    "noEmitOnError": false,
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/**/*.js"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "**/__tests__/**",
+    "**/*.test.js",
+    "**/*.spec.js"
+  ]
+}
