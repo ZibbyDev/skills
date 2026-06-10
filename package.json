@@ -29,6 +29,10 @@
       "types": "./dist/gitlab.d.ts",
       "default": "./dist/gitlab.js"
     },
+    "./grafana": {
+      "types": "./dist/grafana.d.ts",
+      "default": "./dist/grafana.js"
+    },
     "./linear": {
       "types": "./dist/linear.d.ts",
       "default": "./dist/linear.js"

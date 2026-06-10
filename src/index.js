@@ -11,6 +11,7 @@ import { browserSkill } from './browser.js';
 import { jiraSkill } from './jira.js';
 import { githubSkill } from './github.js';
 import { gitlabSkill } from './gitlab.js';
+import { grafanaSkill } from './grafana.js';
 import { linearSkill } from './linear.js';
 import { planeSkill } from './plane.js';
 import { slackSkill } from './slack.js';
@@ -34,6 +35,7 @@ registerSkill(browserSkill);
 registerSkill(jiraSkill);
 registerSkill(githubSkill);
 registerSkill(gitlabSkill);
+registerSkill(grafanaSkill);
 registerSkill(linearSkill);
 registerSkill(planeSkill);
 registerSkill(slackSkill);
@@ -59,6 +61,7 @@ export const SKILLS = {
   JIRA: 'jira',
   GITHUB: 'github',
   GITLAB: 'gitlab',
+  GRAFANA: 'grafana',
   LINEAR: 'linear',
   PLANE: 'plane',
   GIT: 'git',
@@ -77,7 +80,7 @@ export const SKILLS = {
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, grafanaSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
