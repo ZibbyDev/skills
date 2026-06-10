@@ -1,5 +1,24 @@
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+
+/**
+ * Resolve the path to the generic skill MCP server binary. Derived from
+ * `import.meta.url` (NOT a package self-reference) so it works in src/
+ * during dev, dist/ after bundling, and node_modules/@zibby/skills/ in a
+ * published install — bin/ is always a sibling of this module's dir. See
+ * sentry.js resolveSentryBin() for the full rationale on why we avoid
+ * require.resolve('@zibby/skills/bin/...') (the dist/package.json self-ref
+ * trap that made the MCP server silently never spawn).
+ */
+function resolveSkillBin() {
+  if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidate = resolvePath(here, '..', 'bin', 'mcp-skill.mjs');
+  return existsSync(candidate) ? candidate : null;
+}
 
 async function ghFetch(path, opts = {}) {
   const { token } = await resolveIntegrationToken('github');
@@ -72,19 +91,38 @@ When user just wants to "look at" or "read" files (not clone):
 - Use github_get_file to read individual files via API`,
 
   resolve() {
-    // No server process — the github_* tools below are served DIRECTLY via
-    // handleToolCall, exactly like the gitlab/sentry/linear skills. This used
-    // to launch the official @modelcontextprotocol/server-github MCP server,
-    // which DUPLICATED the github_* function tools, intermittently failed at
-    // runtime, and lured the model into the failing mcp__github__* tools
-    // instead of the working skill tools (burning turns retrying them before
-    // falling back — and sometimes never finishing). allowedTools still
-    // namespaces the function tools; resolve just surfaces the env.
+    // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it
+    // at this module's githubSkill export. That binary registers every
+    // entry in `tools[]` as an MCP tool and dispatches each call straight
+    // through handleToolCall — so the model gets real mcp__github__* tools.
+    //
+    // Returning `{ command: null }` here (the previous behaviour) handed the
+    // claude SDK an unspawnnable server → "SDK init returned no mcp_servers"
+    // → the model had ZERO github tools. We do NOT launch the official
+    // @modelcontextprotocol/server-github (removed on purpose): we want the
+    // skill's own hand-written tool surface, not a duplicate that lured the
+    // model into intermittently-failing tools.
+    //
+    // The module arg is resolved RELATIVE TO bin/ at runtime, so
+    // `../dist/github.js` → node_modules/@zibby/skills/dist/github.js in a
+    // published install (mirrors how mcp-sentry.mjs imports ../dist/sentry.js).
+    const bin = resolveSkillBin();
+    if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env = {};
     for (const key of this.envKeys) {
       if (process.env[key]) env[key] = process.env[key];
     }
-    return { command: null, args: [], env, description: this.description };
+    return {
+      type: 'stdio',
+      command: 'node',
+      args: [bin, '../dist/github.js', 'githubSkill'],
+      env,
+      description: this.description,
+      // Force tools into the system prompt instead of deferring behind the
+      // SDK's ToolSearch (see sentry.js resolve() for why MCP-served tools
+      // are otherwise invisible to the model).
+      alwaysLoad: true,
+    };
   },
 
   async handleToolCall(name, args) {

@@ -1,6 +1,6 @@
 {
   "name": "@zibby/skills",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "Built-in skill definitions for Zibby test automation framework",
   "type": "module",
   "main": "dist/index.js",
@@ -10,6 +10,7 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./bin/mcp-skill.mjs": "./bin/mcp-skill.mjs",
     "./bin/mcp-sentry.mjs": "./bin/mcp-sentry.mjs",
     "./bin/mcp-lark.mjs": "./bin/mcp-lark.mjs",
     "./bin/mcp-slack.mjs": "./bin/mcp-slack.mjs",
