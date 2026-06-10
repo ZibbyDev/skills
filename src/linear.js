@@ -33,7 +33,26 @@
  *     prefer it and fall back to linear_add_comment.
  */
 
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
+
+/**
+ * Resolve the path to the generic skill MCP server binary. Derived from
+ * `import.meta.url` (NOT a package self-reference) so it works in src/
+ * during dev, dist/ after bundling, and node_modules/@zibby/skills/ in a
+ * published install — bin/ is always a sibling of this module's dir. See
+ * github.js / sentry.js for the full rationale on avoiding
+ * require.resolve('@zibby/skills/bin/...') (the dist self-ref trap that
+ * made the MCP server silently never spawn).
+ */
+function resolveSkillBin() {
+  if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidate = resolvePath(here, '..', 'bin', 'mcp-skill.mjs');
+  return existsSync(candidate) ? candidate : null;
+}
 
 const LINEAR_GRAPHQL_URL = process.env.LINEAR_API_URL || 'https://api.linear.app/graphql';
 
@@ -202,14 +221,33 @@ You have direct access to the user's Linear workspace (GraphQL API). Tools:
 - Issue identifier (ENG-123) and internal id (uuid) are both accepted by get/update tools.`,
 
   resolve() {
+    // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it at
+    // this module's linearSkill export. It registers every entry in tools[]
+    // as an MCP tool and dispatches each call through handleToolCall — so the
+    // model gets real mcp__linear__* tools. Returning `{ command: null }`
+    // (the previous behaviour) handed the claude SDK an unspawnnable server →
+    // "SDK init returned no mcp_servers" → the model had ZERO linear tools.
+    // The module arg is resolved RELATIVE TO bin/ at runtime →
+    // node_modules/@zibby/skills/dist/linear.js in a published install
+    // (mirrors mcp-sentry.mjs importing ../dist/sentry.js). The skill reads
+    // LINEAR_API_KEY / LINEAR_OAUTH_TOKEN / LINEAR_API_URL straight from env,
+    // so we pass those through to the child.
     const env = {};
     for (const key of this.envKeys) {
       if (process.env[key]) env[key] = process.env[key];
     }
     if (process.env.LINEAR_API_URL) env.LINEAR_API_URL = process.env.LINEAR_API_URL;
-    // No bundled MCP server for Linear; tools are served via handleToolCall.
-    // Returning the env lets a future MCP server pick the key up unchanged.
-    return { command: null, args: [], env, description: this.description };
+    const bin = resolveSkillBin();
+    if (!bin) return { command: null, args: [], env, description: this.description };
+    return {
+      type: 'stdio',
+      command: 'node',
+      args: [bin, '../dist/linear.js', 'linearSkill'],
+      env,
+      description: this.description,
+      // Force tools into the system prompt (see sentry.js resolve()).
+      alwaysLoad: true,
+    };
   },
 
   async handleToolCall(name, args) {
