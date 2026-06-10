@@ -72,11 +72,19 @@ When user just wants to "look at" or "read" files (not clone):
 - Use github_get_file to read individual files via API`,
 
   resolve() {
+    // No server process — the github_* tools below are served DIRECTLY via
+    // handleToolCall, exactly like the gitlab/sentry/linear skills. This used
+    // to launch the official @modelcontextprotocol/server-github MCP server,
+    // which DUPLICATED the github_* function tools, intermittently failed at
+    // runtime, and lured the model into the failing mcp__github__* tools
+    // instead of the working skill tools (burning turns retrying them before
+    // falling back — and sometimes never finishing). allowedTools still
+    // namespaces the function tools; resolve just surfaces the env.
     const env = {};
     for (const key of this.envKeys) {
       if (process.env[key]) env[key] = process.env[key];
     }
-    return { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github@latest'], env };
+    return { command: null, args: [], env, description: this.description };
   },
 
   async handleToolCall(name, args) {
