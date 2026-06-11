@@ -45,6 +45,24 @@
  * data frames Grafana hands back, lightly summarized.
  */
 
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, resolve as resolvePath } from 'path';
+
+/**
+ * Resolve the path to the generic skill MCP server binary. Derived from
+ * `import.meta.url` (NOT a package self-reference) so it works in src/
+ * during dev, dist/ after bundling, and node_modules/@zibby/skills/ in a
+ * published install — bin/ is always a sibling of this module's dir. Mirrors
+ * github.js / gitlab.js resolveSkillBin().
+ */
+function resolveSkillBin() {
+  if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidate = resolvePath(here, '..', 'bin', 'mcp-skill.mjs');
+  return existsSync(candidate) ? candidate : null;
+}
+
 /**
  * Base API url. Resolution order:
  *   1. GRAFANA_API_URL    — explicit /api base, used verbatim
@@ -144,13 +162,32 @@ You have access to the user's Grafana via the REST API (Grafana Cloud OR self-ho
 - Incident flow: grafana_list_firing_alerts (what's firing) → grafana_search_dashboards / grafana_get_dashboard (the relevant board) → grafana_list_datasources + grafana_query (pull the offending metric).`,
 
   resolve() {
-    // No server process — direct handleToolCall. Mirror gitlab/sentry:
-    // surface the configured env so the runtime can inject it.
+    // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it at
+    // this module's grafanaSkill export. That binary registers every entry in
+    // `tools[]` as an MCP tool and dispatches each call through handleToolCall
+    // — so the model gets real mcp__grafana__* tools.
+    //
+    // Returning `{ command: null }` here (the previous behaviour) handed the
+    // claude SDK an unspawnnable server → the model had ZERO grafana tools.
+    // Mirrors the fixed github.js / gitlab.js resolve(). The module arg is
+    // resolved RELATIVE TO bin/ at runtime, so `../dist/grafana.js` →
+    // node_modules/@zibby/skills/dist/grafana.js in a published install.
+    const bin = resolveSkillBin();
+    if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env = {};
     for (const key of this.envKeys) {
       if (process.env[key]) env[key] = process.env[key];
     }
-    return { command: null, args: [], env, description: this.description };
+    return {
+      type: 'stdio',
+      command: 'node',
+      args: [bin, '../dist/grafana.js', 'grafanaSkill'],
+      env,
+      description: this.description,
+      // Force tools into the system prompt instead of deferring behind the
+      // SDK's ToolSearch (see sentry.js resolve()).
+      alwaysLoad: true,
+    };
   },
 
   async handleToolCall(name, args) {
