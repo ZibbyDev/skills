@@ -12,3 +12,7 @@ coverage/
 
 # Auto-copied from docsite on npm publish (prepack script)
 docs/
+
+# reviewMemory sqlite test artifacts
+*.db
+memory.db

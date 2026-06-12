@@ -152,11 +152,16 @@ export const gitlabSkill = {
   promptFragment: `## GitLab (connected)
 You have access to the user's GitLab projects via the REST API (cloud gitlab.com OR self-hosted). A "merge request" (MR) is GitLab's pull request. An MR is addressed by a PROJECT (numeric id OR full path like "group/repo") and an \`iid\` (the per-project MR number shown in the URL). For projects, prefer the full path form ("group/subgroup/repo") — it's what users have. Available tools:
 
+### Discovery
+- gitlab_list_projects: List the projects this token can access (the ones you're a member of), optionally filtered by a search query. Use to find a RELATED project worth cloning for cross-repo context.
+
 ### Merge requests
 - gitlab_get_mr: Get an MR's details (title, description, author, source/target branch, state, web url, diff_refs)
 - gitlab_get_mr_changes: Get the MR's changed files with per-file diffs — THIS is the code to review
 - gitlab_list_mrs: List a project's merge requests (filter by state: opened|closed|merged|all)
 - gitlab_list_mr_notes: Get the discussion/notes thread on an MR
+- gitlab_get_discussion: Read a single MR discussion (thread) by id — all its notes + the file/line it is anchored to
+- gitlab_reply_discussion: Reply IN-THREAD to an existing MR discussion (conversational reply, not a new review)
 - gitlab_post_mr_note: Post a general (non-inline) comment on an MR
 - gitlab_post_mr_discussion: Post an INLINE review comment anchored to a file + line in the MR diff. Needs diff_refs (pass them from gitlab_get_mr / gitlab_get_mr_changes, or omit and the tool fetches them). Provide newLine for added/changed lines (or oldLine for removed/context lines).
 
@@ -425,6 +430,95 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           });
         }
 
+        case 'gitlab_get_discussion': {
+          // Read a single MR DISCUSSION (the GitLab analog of a GitHub review
+          // thread): all its notes plus the diff position the discussion is
+          // anchored to (file + line). Used by the conversational
+          // comment-response flow to answer a human's reply to the bot's review
+          // discussion IN CONTEXT.
+          //
+          // GET /projects/{id}/merge_requests/{iid}/discussions/{discussion_id}
+          // returns { id, notes: [...] }; the FIRST note carries the `position`
+          // (new_path / new_line / old_line / diff SHAs) when it's an inline
+          // diff discussion. We surface that anchor + every note in order.
+          const { projectId, iid, discussionId } = args || {};
+          if (!projectId || !iid || !discussionId) {
+            return JSON.stringify({ error: 'projectId, iid, and discussionId are required' });
+          }
+          const disc = await glFetch(
+            `/projects/${encodeProject(projectId)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}`,
+          );
+          const notes = Array.isArray(disc.notes) ? disc.notes : [];
+          const anchor = notes.find((n) => n.position) || null;
+          const pos = anchor ? anchor.position : null;
+          return JSON.stringify({
+            discussionId: disc.id,
+            individualNote: !!disc.individual_note,
+            path: pos ? (pos.new_path || pos.old_path || null) : null,
+            newLine: pos ? (pos.new_line ?? null) : null,
+            oldLine: pos ? (pos.old_line ?? null) : null,
+            diffRefs: pos
+              ? { base_sha: pos.base_sha, start_sha: pos.start_sha, head_sha: pos.head_sha }
+              : null,
+            notes: notes.map((n) => ({
+              id: n.id,
+              author: n.author?.username,
+              body: (n.body || '').slice(0, 4000),
+              system: !!n.system,
+              createdAt: n.created_at,
+            })),
+          });
+        }
+
+        case 'gitlab_reply_discussion': {
+          // Reply IN-THREAD to an existing MR discussion (the conversational
+          // reply — a new note appended to the SAME discussion, NOT a fresh
+          // review). Mirrors:
+          // POST /projects/{id}/merge_requests/{iid}/discussions/{discussion_id}/notes
+          const { projectId, iid, discussionId, body } = args || {};
+          if (!projectId || !iid || !discussionId || !body) {
+            return JSON.stringify({ error: 'projectId, iid, discussionId, and body are required' });
+          }
+          const note = await glFetch(
+            `/projects/${encodeProject(projectId)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}/notes`,
+            { method: 'POST', body: { body: String(body) } },
+          );
+          return JSON.stringify({ ok: true, id: note.id, createdAt: note.created_at });
+        }
+
+        // ---- Discovery (the provider-agnostic "list accessible repos/projects"
+        // capability — the GitLab side of github_list_repos). Lets a cross-repo
+        // review agent enumerate the projects this token can see so it can clone
+        // a RELATED project when a change's correctness depends on it. Same
+        // input ({ query?, limit? }) and same normalized output shape as
+        // github_list_repos: an array of { fullPath, name, webUrl, defaultBranch,
+        // visibility } plus a `truncated` flag. Accessible set = whatever the
+        // token/bot can see (membership=true scopes to the caller's projects). ----
+        case 'gitlab_list_projects': {
+          const { query, limit } = args || {};
+          // Cap results: default 50, hard max 200 (mirrors github_list_repos).
+          const cap = Math.min(Number(limit) > 0 ? Number(limit) : 50, 200);
+          const params = new URLSearchParams();
+          params.set('membership', 'true'); // only projects the token is a member of
+          params.set('simple', 'true'); // lighter payload (still carries the fields we map)
+          params.set('order_by', 'last_activity_at');
+          params.set('sort', 'desc');
+          // Fetch one extra so we can tell the caller the list was truncated.
+          params.set('per_page', String(Math.min(cap + 1, 100)));
+          if (query) params.set('search', String(query));
+          const data = await glFetch(`/projects?${params.toString()}`);
+          const all = Array.isArray(data) ? data : [];
+          const truncated = all.length > cap;
+          const projects = all.slice(0, cap).map((p) => ({
+            fullPath: p.path_with_namespace, // "group/subgroup/repo"
+            name: p.name,
+            webUrl: p.web_url,
+            defaultBranch: p.default_branch || null,
+            visibility: p.visibility || null, // private | internal | public
+          }));
+          return JSON.stringify({ count: projects.length, truncated, projects });
+        }
+
         // ---- Issues (ticket context for a tracker/review agent) ----
         case 'gitlab_list_issues': {
           const { projectId, state, labels, assigneeUsername, authorUsername, updatedAfter, search, sort, orderBy, limit } = args || {};
@@ -496,6 +590,17 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
   },
 
   tools: [
+    {
+      name: 'gitlab_list_projects',
+      description: 'List the GitLab projects this token can access (the projects you are a member of), optionally filtered by a search query. Use this to discover a RELATED project worth cloning when a change\'s correctness depends on another accessible repo. Returns a normalized list of { fullPath, name, webUrl, defaultBranch, visibility } and a truncated flag.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Optional search term matched against project name/path' },
+          limit: { type: 'number', description: 'Max projects (default 50, hard max 200)' },
+        },
+      },
+    },
     {
       name: 'gitlab_get_mr',
       description: 'Get a GitLab merge request — title, description, branches, state, author, web url, and diff_refs (needed to anchor inline review comments).',
@@ -617,6 +722,33 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           },
         },
         required: ['projectId', 'iid'],
+      },
+    },
+    {
+      name: 'gitlab_get_discussion',
+      description: 'Read a single GitLab merge-request DISCUSSION (thread) by its discussion id: all notes in order plus the diff position (file + line) it is anchored to. Use this to understand a human\'s reply to a previous review discussion before replying in-thread.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string', description: 'Project numeric id OR full path' },
+          iid: { type: 'number', description: 'Merge request iid' },
+          discussionId: { type: 'string', description: 'The discussion id (from the Note Hook payload or gitlab_list_mr_notes)' },
+        },
+        required: ['projectId', 'iid', 'discussionId'],
+      },
+    },
+    {
+      name: 'gitlab_reply_discussion',
+      description: 'Reply IN-THREAD to an existing GitLab merge-request discussion (a conversational reply appended to the SAME thread — NOT a fresh review). Use after gitlab_get_discussion to answer a human\'s reply to a review comment.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string', description: 'Project numeric id OR full path' },
+          iid: { type: 'number', description: 'Merge request iid' },
+          discussionId: { type: 'string', description: 'The discussion id to reply to' },
+          body: { type: 'string', description: 'The reply text (markdown)' },
+        },
+        required: ['projectId', 'iid', 'discussionId', 'body'],
       },
     },
     {

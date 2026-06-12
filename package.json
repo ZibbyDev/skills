@@ -1,6 +1,6 @@
 {
   "name": "@zibby/skills",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "description": "Built-in skill definitions for Zibby test automation framework",
   "type": "module",
   "main": "dist/index.js",
@@ -108,7 +108,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@zibby/agent-workflow": "^0.3.0",
-    "better-sqlite3": "^12.6.2",
     "mem0ai": "npm:@zibby/mem0ai@^3.0.5",
     "zod": "^3.23.0 || ^4.0.0"
   },
@@ -117,7 +116,8 @@
   },
   "optionalDependencies": {
     "@zibby/mcp-browser": "^0.1.8",
-    "@zibby/mcp-memory": "*"
+    "@zibby/mcp-memory": "*",
+    "better-sqlite3": "^12.6.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

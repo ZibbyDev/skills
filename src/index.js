@@ -23,6 +23,7 @@ import { sentrySkill } from './sentry.js';
 import { testRunnerSkill } from './test-runner.js';
 import { gitSkill } from './git.js';
 import { chatMemorySkill } from './chat-memory.js';
+import { reviewMemorySkill } from './reviewMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
 import {
   openaiBillingSkill,
@@ -46,6 +47,7 @@ registerSkill(gitSkill);
 registerSkill(skillInstallerSkill);
 registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
+registerSkill(reviewMemorySkill);
 registerSkill(workflowBuilderSkill);
 registerSkill(openaiBillingSkill);
 registerSkill(anthropicBillingSkill);
@@ -71,13 +73,14 @@ export const SKILLS = {
   SKILL_INSTALLER: 'skill-installer',
   CORE_TOOLS: 'core-tools',
   CHAT_MEMORY: 'chat-memory',
+  REVIEW_MEMORY: 'review-memory',
   WORKFLOW_BUILDER: 'workflow-builder',
   OPENAI_BILLING: 'openai_billing',
   ANTHROPIC_BILLING: 'anthropic_billing',
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, reviewMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,

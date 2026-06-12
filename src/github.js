@@ -54,7 +54,7 @@ export const githubSkill = {
 You have access to the user's GitHub repositories. Available tools:
 
 ### Discovery
-- github_list_repos: Lists ALL accessible repos (personal + orgs, private + public, up to 200 repos)
+- github_list_repos: Lists ALL accessible repos (personal + orgs, private + public, up to 200 repos). Use to find a RELATED repo worth cloning for cross-repo context.
 - github_search_repos: Search for a specific repo by name (e.g., "electron", "my-app")
 - github_get_user: Get authenticated user's profile
 - github_list_orgs: List organizations with accessible repos
@@ -72,6 +72,9 @@ You have access to the user's GitHub repositories. Available tools:
 - github_get_pr_diff: Get PR diff
 - github_list_pr_files: List PR changed files
 - github_list_pr_comments: Get PR comments
+- github_get_review_thread: Read a review-comment THREAD (root + replies) with its diff context, given any comment id in it
+- github_reply_review_thread: Reply IN-THREAD to an existing review-comment thread (conversational reply, not a new review)
+- github_reply_issue_comment: Reply on the PR's top-level conversation (for non-inline/summary comments)
 - github_create_review: Post a review on a PR — a summary body plus optional inline comments on specific file/line positions, with an event (COMMENT, APPROVE, or REQUEST_CHANGES)
 - github_create_issue: Create new issue
 - github_list_issues: List issues in a repo (filter by state/labels/since cursor) — excludes PRs
@@ -174,6 +177,7 @@ When user just wants to "look at" or "read" files (not clone):
             body: pr.body?.slice(0, 5000),
             user: pr.user?.login,
             branch: pr.head?.ref,
+            headSha: pr.head?.sha,
             base: pr.base?.ref,
             changedFiles: pr.changed_files,
             additions: pr.additions,
@@ -239,6 +243,99 @@ When user just wants to "look at" or "read" files (not clone):
             })),
           ].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
           return JSON.stringify({ total: all.length, comments: all });
+        }
+
+        case 'github_get_review_thread': {
+          // Read a PR review-comment THREAD: the root review comment plus all
+          // its replies, with the diff context (file / line / the original
+          // anchored code) the thread is attached to. Used by the conversational
+          // comment-response flow to answer a human's reply to the bot's review
+          // comment IN CONTEXT.
+          //
+          // GitHub models a review-comment thread as a flat list of pull-request
+          // review comments where every reply carries `in_reply_to_id` pointing
+          // at the root comment. Given any commentId in the thread, we resolve
+          // the root (its own in_reply_to_id, or itself) and return the root +
+          // every comment whose root resolves to the same id, in chronological
+          // order. The diff_hunk / path / line on the root carry the anchored
+          // code context. Falls back gracefully to the single comment if the
+          // list can't be enumerated.
+          const { owner, repo, number, commentId } = args || {};
+          if (!owner || !repo || !number || !commentId) {
+            return JSON.stringify({ error: 'owner, repo, number, and commentId are required' });
+          }
+          // The triggering comment itself (so we always have a root anchor even
+          // if listing fails).
+          const target = await ghFetch(`/repos/${owner}/${repo}/pulls/comments/${commentId}`);
+          const rootId = target.in_reply_to_id || target.id;
+          let all = [];
+          try {
+            all = await ghFetch(`/repos/${owner}/${repo}/pulls/${number}/comments?per_page=100`);
+          } catch {
+            all = [target];
+          }
+          if (!Array.isArray(all) || all.length === 0) all = [target];
+          // Group: a comment belongs to this thread if it IS the root or replies
+          // (directly) to the root. GitHub only nests one level deep.
+          const thread = all
+            .filter((c) => c.id === rootId || c.in_reply_to_id === rootId)
+            .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+          const used = thread.length ? thread : [target];
+          const root = used.find((c) => c.id === rootId) || used[0];
+          return JSON.stringify({
+            rootCommentId: rootId,
+            path: root.path,
+            line: root.line ?? root.original_line ?? null,
+            side: root.side || 'RIGHT',
+            // The anchored code context (the diff hunk the thread hangs off).
+            diffHunk: typeof root.diff_hunk === 'string' ? root.diff_hunk.slice(0, 3000) : null,
+            commitId: root.commit_id || root.original_commit_id || null,
+            notes: used.map((c) => ({
+              id: c.id,
+              user: c.user?.login,
+              body: (c.body || '').slice(0, 4000),
+              createdAt: c.created_at,
+              isRoot: c.id === rootId,
+              url: c.html_url,
+            })),
+          });
+        }
+
+        case 'github_reply_review_thread': {
+          // Reply IN-THREAD to an existing PR review-comment thread (the
+          // CodeRabbit-style conversational reply). Posts a new review comment
+          // that nests under the thread the human replied to — NOT a fresh
+          // review. Mirrors the REST "Create a reply for a review comment":
+          // POST /repos/{o}/{r}/pulls/{n}/comments/{comment_id}/replies
+          // commentId may be ANY comment in the thread; GitHub attaches the
+          // reply to the right thread regardless.
+          const { owner, repo, number, commentId, body } = args || {};
+          if (!owner || !repo || !number || !commentId || !body) {
+            return JSON.stringify({ error: 'owner, repo, number, commentId, and body are required' });
+          }
+          const reply = await ghFetch(
+            `/repos/${owner}/${repo}/pulls/${number}/comments/${commentId}/replies`,
+            { method: 'POST', body: { body: String(body) } },
+          );
+          return JSON.stringify({ ok: true, id: reply.id, url: reply.html_url, inReplyTo: reply.in_reply_to_id });
+        }
+
+        case 'github_reply_issue_comment': {
+          // Reply to a TOP-LEVEL PR/issue conversation (a comment that is NOT an
+          // anchored review-comment thread). GitHub issue comments aren't
+          // threaded, so a "reply" is a new issue comment on the same PR; the
+          // body is expected to quote/@-mention for context. Used when the
+          // human replied to the bot's summary comment rather than an inline
+          // review thread.
+          const { owner, repo, number, body } = args || {};
+          if (!owner || !repo || !number || !body) {
+            return JSON.stringify({ error: 'owner, repo, number, and body are required' });
+          }
+          const c = await ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments`, {
+            method: 'POST',
+            body: { body: String(body) },
+          });
+          return JSON.stringify({ ok: true, id: c.id, url: c.html_url });
         }
 
         case 'github_create_review': {
@@ -505,11 +602,52 @@ When user just wants to "look at" or "read" files (not clone):
         }
 
         case 'github_list_repos': {
-          const { owner, type, sort, direction, limit } = args;
+          // Provider-agnostic "list accessible repos/projects" capability — the
+          // GitHub side of the same abstraction as gitlab_list_projects. The
+          // accessible set = whatever the token/installation can see (a scoped
+          // bot only sees its repos). PAT path uses /user/repos; an App
+          // installation token uses /installation/repositories (it can't call
+          // /user/repos). On top of the legacy fields (fullName/url/private…),
+          // EVERY repo also carries the NORMALIZED cross-provider shape
+          // { fullPath, name, webUrl, defaultBranch, visibility } — IDENTICAL to
+          // gitlab_list_projects — so the review prompt can treat both uniformly.
+          // `query` filters by name/description (mirrors gitlab's search); the
+          // result is capped and a `truncated` flag is returned.
+          const { owner, type, sort, direction, limit, query } = args;
           const perPage = 100;
           const maxResults = limit || 200; // Fetch more by default to include private repos
           let allRepos = [];
-          
+
+          // Map a raw GitHub repo into BOTH the legacy fields (kept for
+          // backward-compat with github_search_repos + existing callers) AND the
+          // normalized cross-provider fields shared with gitlab_list_projects.
+          const mapRepo = (r) => ({
+            // --- legacy fields (unchanged) ---
+            name: r.name,
+            fullName: r.full_name,
+            private: r.private,
+            description: r.description,
+            language: r.language,
+            defaultBranch: r.default_branch,
+            updatedAt: r.updated_at,
+            stars: r.stargazers_count,
+            url: r.html_url,
+            // --- normalized shape (IDENTICAL to gitlab_list_projects) ---
+            fullPath: r.full_name, // "owner/repo"
+            webUrl: r.html_url,
+            // GitHub exposes a boolean `private`; map to the same vocabulary as
+            // GitLab's `visibility` so the field means the same thing everywhere.
+            visibility: r.visibility || (r.private ? 'private' : 'public'),
+          });
+          // Optional name/description filter (mirrors gitlab_list_projects' search).
+          const matchesQuery = (m) => {
+            if (!query) return true;
+            const q = String(query).toLowerCase();
+            return (m.name && m.name.toLowerCase().includes(q))
+              || (m.fullName && m.fullName.toLowerCase().includes(q))
+              || (m.description && m.description.toLowerCase().includes(q));
+          };
+
           // If no owner specified, use GitHub App installation repositories endpoint
           if (!owner) {
             let page = 1;
@@ -527,24 +665,17 @@ When user just wants to "look at" or "read" files (not clone):
               page++;
             }
             
-            const mappedRepos = allRepos.slice(0, maxResults).map(r => ({
-              name: r.name,
-              fullName: r.full_name,
-              private: r.private,
-              description: r.description,
-              language: r.language,
-              defaultBranch: r.default_branch,
-              updatedAt: r.updated_at,
-              stars: r.stargazers_count,
-              url: r.html_url,
-            }));
-            
+            const matched = allRepos.map(mapRepo).filter(matchesQuery);
+            const mappedRepos = matched.slice(0, maxResults);
+            const truncated = matched.length > mappedRepos.length;
+
             const privateCount = mappedRepos.filter(r => r.private).length;
             const publicCount = mappedRepos.filter(r => !r.private).length;
-            
-            return JSON.stringify({ 
+
+            return JSON.stringify({
               count: mappedRepos.length,
               repos: mappedRepos,
+              truncated,
               privateCount,
               publicCount,
               message: `Found ${privateCount} private and ${publicCount} public repos`,
@@ -574,19 +705,11 @@ When user just wants to "look at" or "read" files (not clone):
             page++;
           }
           
-          const mappedRepos = allRepos.slice(0, maxResults).map(r => ({
-            name: r.name,
-            fullName: r.full_name,
-            private: r.private,
-            description: r.description,
-            language: r.language,
-            defaultBranch: r.default_branch,
-            updatedAt: r.updated_at,
-            stars: r.stargazers_count,
-            url: r.html_url,
-          }));
-          
-          return JSON.stringify({ count: mappedRepos.length, repos: mappedRepos });
+          const ownerMatched = allRepos.map(mapRepo).filter(matchesQuery);
+          const mappedRepos = ownerMatched.slice(0, maxResults);
+          const truncated = ownerMatched.length > mappedRepos.length;
+
+          return JSON.stringify({ count: mappedRepos.length, repos: mappedRepos, truncated });
         }
 
         case 'github_create_issue': {
@@ -765,15 +888,16 @@ When user just wants to "look at" or "read" files (not clone):
     },
     {
       name: 'github_list_repos',
-      description: 'List repositories for a user or org. If no owner given, lists the authenticated user\'s repos.',
+      description: 'List the repositories this token/installation can access (omit owner) — or a specific user/org\'s repos (pass owner). Use this to discover a RELATED repo worth cloning when a change\'s correctness depends on another accessible repo. Each repo carries a normalized { fullPath, name, webUrl, defaultBranch, visibility } shape (identical to gitlab_list_projects) alongside legacy fields, plus a truncated flag.',
       input_schema: {
         type: 'object',
         properties: {
-          owner: { type: 'string', description: 'Org or user login. Omit to list your own repos.' },
+          owner: { type: 'string', description: 'Org or user login. Omit to list every repo your token/installation can access.' },
+          query: { type: 'string', description: 'Optional term matched against repo name/full-name/description' },
           type: { type: 'string', enum: ['all', 'public', 'private', 'forks', 'sources', 'member'], description: 'Filter by type (default: all)' },
           sort: { type: 'string', enum: ['created', 'updated', 'pushed', 'full_name'], description: 'Sort field (default: updated)' },
           direction: { type: 'string', enum: ['asc', 'desc'], description: 'Sort direction (default: desc)' },
-          limit: { type: 'number', description: 'Max repos to return (default: 30)' },
+          limit: { type: 'number', description: 'Max repos to return (default: 200, hard-capped at the fetch ceiling)' },
         },
       },
     },
@@ -878,6 +1002,49 @@ When user just wants to "look at" or "read" files (not clone):
           number: { type: 'number', description: 'PR number' },
         },
         required: ['owner', 'repo', 'number'],
+      },
+    },
+    {
+      name: 'github_get_review_thread',
+      description: 'Read a PR review-comment THREAD given any comment id in it: the root review comment + all its replies, plus the anchored diff context (file, line, the original diff hunk). Use this to understand a human\'s reply to a previous review comment before replying in-thread.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'PR number' },
+          commentId: { type: 'number', description: 'Any review-comment id in the thread (the root or any reply)' },
+        },
+        required: ['owner', 'repo', 'number', 'commentId'],
+      },
+    },
+    {
+      name: 'github_reply_review_thread',
+      description: 'Reply IN-THREAD to an existing PR review-comment thread (a conversational reply nested under the thread the human commented on — NOT a fresh full review). Pass any comment id in the thread.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'PR number' },
+          commentId: { type: 'number', description: 'Any review-comment id in the thread to reply to' },
+          body: { type: 'string', description: 'The reply text (markdown)' },
+        },
+        required: ['owner', 'repo', 'number', 'commentId', 'body'],
+      },
+    },
+    {
+      name: 'github_reply_issue_comment',
+      description: 'Post a reply on a PR\'s top-level conversation (a new issue comment on the PR). Use when the human replied to a non-inline/summary comment rather than an inline review thread. Quote or @-mention for context since issue comments are not threaded.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'PR number' },
+          body: { type: 'string', description: 'The reply text (markdown)' },
+        },
+        required: ['owner', 'repo', 'number', 'body'],
       },
     },
     {
