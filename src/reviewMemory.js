@@ -38,9 +38,12 @@
  * We mirror backend-client.js's getSessionToken()/getAccountApiUrl() rather
  * than import a non-existent helper, so the auth model stays identical.
  *
- * Endpoint: POST {base}/memory/review  with body { op, ... }. One route,
- * body-dispatched op ('store' | 'recall' | 'recall-prefix') — the backend's
- * MainApiRoutes stack is near CFN's 500-resource cap (see review-memory.js).
+ * Endpoint: POST {base}/credits/review-memory  with body { op, ... }. One route,
+ * body-dispatched op ('store' | 'recall' | 'recall-prefix'). It's served by the
+ * CreditsApi nested stack (its own RestApi) — NOT /memory/review on MainApiRoutes,
+ * which is at CFN's 500-resource cap. The basePath '/credits' is stripped before
+ * forwarding, so the handler sees event.resource '/review-memory' (see
+ * review-memory.js / credits-api-stack.ts).
  */
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
@@ -91,7 +94,9 @@ function getAccountApiUrl() {
 }
 
 /**
- * POST {base}/memory/review with a body { op, ... }. Returns the parsed JSON.
+ * POST {base}/credits/review-memory with a body { op, ... }. Returns parsed JSON.
+ * (Served by the CreditsApi nested stack — /memory/review can't be wired in PROD
+ * because MainApiRoutes is at the CFN 500-resource cap.)
  * Throws a descriptive error on a non-2xx so handleToolCall surfaces it.
  */
 async function reviewMemoryFetch(op, payload) {
@@ -99,7 +104,7 @@ async function reviewMemoryFetch(op, payload) {
   if (!session) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). Review memory is only available inside a Zibby run.');
   }
-  const url = `${getAccountApiUrl()}/memory/review`;
+  const url = `${getAccountApiUrl()}/credits/review-memory`;
   const res = await fetch(url, {
     method: 'POST',
     headers: {

@@ -166,7 +166,7 @@ describe('CLOUD RED LINE — ZIBBY_SELF_HOST unset → HTTP branch, file untouch
 
       // It went over HTTP to the cloud route, NOT to a file.
       expect(spy).toHaveBeenCalledTimes(2);
-      expect(spy.mock.calls[0][0]).toBe('https://api-test.zibby.app/memory/review');
+      expect(spy.mock.calls[0][0]).toBe('https://api-test.zibby.app/credits/review-memory');
       expect(JSON.parse(spy.mock.calls[0][1].body)).toMatchObject({ op: 'store', scope: 's', content: 'c' });
       // The local file was never created.
       expect(existsSync(memPath)).toBe(false);

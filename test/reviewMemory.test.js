@@ -73,7 +73,7 @@ describe('handleToolCall — scope is a param end-to-end', () => {
 
     expect(spy).toHaveBeenCalledTimes(1);
     const [url, opts] = spy.mock.calls[0];
-    expect(url).toBe('https://api-test.zibby.app/memory/review');
+    expect(url).toBe('https://api-test.zibby.app/credits/review-memory');
     expect(opts.method).toBe('POST');
     expect(opts.headers.Authorization).toBe('Bearer zby_testprojecttoken');
     expect(JSON.parse(opts.body)).toEqual({ op: 'recall', scope: 'review:owner/repo#42' });
