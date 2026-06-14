@@ -1,6 +1,6 @@
 # @zibby/skills
 
-Skill definitions for the Zibby test automation framework.
+Skill definitions for the Zibby agent-workflow framework.
 
 A **skill** is the contract between a workflow node and a tool. It tells the framework what the tool does, how to start it, and what it needs. The framework never hardcodes any skill by name — it reads the skill definition and wires things up generically for both Claude and Cursor agents.
 
