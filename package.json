@@ -79,11 +79,13 @@
     "lint:fix": "eslint --fix ."
   },
   "keywords": [
-    "zibby",
+    "agent-workflow",
+    "ai-agents",
+    "claude",
+    "cursor",
     "skills",
-    "mcp",
-    "automation",
-    "testing"
+    "workflow",
+    "mcp"
   ],
   "author": "Zibby",
   "license": "MIT",

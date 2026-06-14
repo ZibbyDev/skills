@@ -1,18 +1,18 @@
-# @zibby/skills
+# @zibby/skills — Español
 
 [![npm version](https://img.shields.io/npm/v/@zibby/skills.svg)](https://www.npmjs.com/package/@zibby/skills)
 [![Types](https://img.shields.io/npm/types/@zibby/skills.svg)](https://www.npmjs.com/package/@zibby/skills)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](../LICENSE)
 
-[Deutsch](./i18n/README.de.md) | [Español](./i18n/README.es.md) | [français](./i18n/README.fr.md) | [日本語](./i18n/README.ja.md) | [한국어](./i18n/README.ko.md) | [Português](./i18n/README.pt.md) | [Русский](./i18n/README.ru.md) | [中文](./i18n/README.zh.md)
+[English](../README.md) | [Deutsch](./README.de.md) | [français](./README.fr.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Português](./README.pt.md) | [Русский](./README.ru.md) | [中文](./README.zh.md)
 
-📖 **Full docs:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
+📖 **Documentación completa:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **The skill layer for [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow).** Built-in skill definitions that give a workflow node the tools it needs — function tools, MCP servers, browser, issue trackers, memory. Vendor-neutral, JavaScript-first.
+> **La capa de skills para [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow).** Definiciones de skills integradas que dan a un nodo de workflow las herramientas que necesita: herramientas de función, servidores MCP, navegador, gestores de incidencias, memoria. Neutral respecto al proveedor, JavaScript primero.
 
-`@zibby/skills` is the batteries-included companion to [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *"Graph-based AI agent workflow orchestration."* The workflow engine ships **zero skills** on purpose; this package is where the built-in ones live.
+`@zibby/skills` es el complemento con todo incluido de [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *"Graph-based AI agent workflow orchestration."* El motor de workflow no incluye **ningún skill** a propósito; este paquete es donde viven los integrados.
 
-A **skill** is the contract between a workflow node and a tool. It tells the engine what the tool does, how to start it, and what it needs. The engine never hardcodes any skill by name — it reads the skill definition and wires things up generically for both Claude and Cursor agents.
+Un **skill** es el contrato entre un nodo de workflow y una herramienta. Le dice al motor qué hace la herramienta, cómo iniciarla y qué necesita. El motor nunca codifica ningún skill por su nombre: lee la definición del skill y conecta todo de forma genérica, tanto para agentes Claude como Cursor.
 
 ```
    @zibby/agent-workflow node            @zibby/skills
@@ -29,9 +29,9 @@ A **skill** is the contract between a workflow node and a tool. It tells the eng
 
 ---
 
-## Used with @zibby/agent-workflow
+## Uso con @zibby/agent-workflow
 
-You don't use `@zibby/skills` on its own — it plugs into [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow). A node names the skills it wants in its `skills:` array, and the workflow engine resolves them at run time:
+No usas `@zibby/skills` por sí solo: se conecta a [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow). Un nodo nombra los skills que quiere en su array `skills:`, y el motor de workflow los resuelve en tiempo de ejecución:
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills
@@ -42,7 +42,7 @@ npm install @zibby/agent-workflow @zibby/skills
 import '@zibby/skills';
 ```
 
-Define a skill once…
+Define un skill una vez…
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -54,7 +54,7 @@ export const add = skill('add', {
 });
 ```
 
-…and an **@zibby/agent-workflow node** requests it by id:
+…y un **nodo de @zibby/agent-workflow** lo solicita por su id:
 
 ```javascript
 // Used by an @zibby/agent-workflow node
@@ -65,17 +65,17 @@ export const mathNode = {
 };
 ```
 
-When the engine runs `do_math`, it sees `skills: ['add']`, looks the skill up, calls `resolve()`, and hands the resulting tool to whichever agent runs the node. See [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow) for how nodes, graphs, and state fit together.
+Cuando el motor ejecuta `do_math`, ve `skills: ['add']`, busca el skill, llama a `resolve()` y entrega la herramienta resultante al agente que ejecuta el nodo. Consulta [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow) para ver cómo encajan nodos, grafos y estado.
 
 ---
 
-## Quick start
+## Inicio rápido
 
 ```bash
 npm install @zibby/skills
 ```
 
-Import the package to register all built-in skills:
+Importa el paquete para registrar todos los skills integrados:
 
 ```javascript
 import '@zibby/skills';
@@ -83,13 +83,13 @@ import '@zibby/skills';
 
 ---
 
-## The `skill()` factory
+## La factory `skill()`
 
-One function to create any skill. Auto-detects the type and auto-registers.
+Una función para crear cualquier skill. Detecta el tipo automáticamente y lo registra automáticamente.
 
-### Function skill
+### Skill de función
 
-One skill = one tool. Flat, no nesting.
+Un skill = una herramienta. Plano, sin anidamiento.
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -101,7 +101,7 @@ export const add = skill('add', {
 });
 ```
 
-Use it in an @zibby/agent-workflow node:
+Úsalo en un nodo de @zibby/agent-workflow:
 
 ```javascript
 export const mathNode = {
@@ -111,9 +111,9 @@ export const mathNode = {
 };
 ```
 
-### MCP skill
+### Skill MCP
 
-For wrapping existing MCP server packages:
+Para envolver paquetes de servidores MCP existentes:
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -134,9 +134,9 @@ export const linear = skill('linear', {
 
 ---
 
-## Built-in skills
+## Skills integrados
 
-| ID | Server | MCP Package |
+| ID | Servidor | Paquete MCP |
 |----|--------|-------------|
 | `browser` | `playwright` | `@zibby/mcp-browser` / `@playwright/mcp` |
 | `jira` | `jira` | `@zibby/mcp-jira` |
@@ -145,15 +145,15 @@ export const linear = skill('linear', {
 
 ---
 
-## Function skill API
+## API del skill de función
 
 ```javascript
 skill(id, { description, input, handler })
 ```
 
-- `id` — Unique skill identifier (used in `skills: ['add']`)
-- `description` — What the tool does (shown to the LLM)
-- `input` — Parameter definitions:
+- `id` — Identificador único del skill (usado en `skills: ['add']`)
+- `description` — Lo que hace la herramienta (mostrado al LLM)
+- `input` — Definiciones de parámetros:
 
 ```javascript
 {
@@ -163,7 +163,7 @@ skill(id, { description, input, handler })
 }
 ```
 
-- `handler` — The function that runs when the tool is called:
+- `handler` — La función que se ejecuta cuando se llama a la herramienta:
 
 ```javascript
 handler: async ({ param, other }) => {
@@ -171,15 +171,15 @@ handler: async ({ param, other }) => {
 }
 ```
 
-### Handler rules
+### Reglas del handler
 
-- Must be `async` (or return a Promise)
-- Receives one object argument with the input parameters
-- Must return a JSON-serializable value
-- Has full access to imports, closures, and the module scope
-- Runs in a child process (the function bridge)
+- Debe ser `async` (o devolver una Promise)
+- Recibe un argumento objeto con los parámetros de entrada
+- Debe devolver un valor serializable a JSON
+- Tiene acceso completo a imports, closures y el scope del módulo
+- Se ejecuta en un proceso hijo (el puente de funciones)
 
-### More examples
+### Más ejemplos
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -201,26 +201,26 @@ export const healthCheck = skill('health_check', {
 
 ---
 
-## MCP skill API
+## API del skill MCP
 
 ```javascript
 skill(id, config)
 ```
 
-Config object:
+Objeto de configuración:
 
-| Property | Required | Description |
+| Propiedad | Requerido | Descripción |
 |---|---|---|
-| `resolve(options)` | Yes | Returns `{ command, args, env }` or `null` |
-| `serverName` | No | MCP server name (defaults to `id`) |
-| `allowedTools` | No | Tool patterns (defaults to `['mcp__<serverName>__*']`) |
-| `envKeys` | No | Env vars the skill needs |
-| `description` | No | Human-readable description |
-| `tools` | No | Tool schemas for compile-time validation |
-| `cursorKey` | No | Override key in `~/.cursor/mcp.json` |
-| `sessionEnvKey` | No | Env var for session artifact paths (Cursor only) |
+| `resolve(options)` | Sí | Devuelve `{ command, args, env }` o `null` |
+| `serverName` | No | Nombre del servidor MCP (por defecto `id`) |
+| `allowedTools` | No | Patrones de herramientas (por defecto `['mcp__<serverName>__*']`) |
+| `envKeys` | No | Variables de entorno que necesita el skill |
+| `description` | No | Descripción legible por humanos |
+| `tools` | No | Esquemas de herramientas para validación en tiempo de compilación |
+| `cursorKey` | No | Sobrescribe la clave en `~/.cursor/mcp.json` |
+| `sessionEnvKey` | No | Variable de entorno para rutas de artefactos de sesión (solo Cursor) |
 
-### Advanced example: custom binary with fallback
+### Ejemplo avanzado: binario personalizado con fallback
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -255,7 +255,7 @@ export const database = skill('database', {
 
 ---
 
-## How it works under the hood
+## Cómo funciona por dentro
 
 ```
   Node definition                Skill definition              Agent strategy
@@ -278,11 +278,11 @@ export const database = skill('database', {
                       query()            `agent` CLI
 ```
 
-**Claude**: The SDK receives `mcpServers` as a parameter. It spawns the MCP server as a child process, connects via stdio, routes tool calls through it.
+**Claude**: El SDK recibe `mcpServers` como parámetro. Inicia el servidor MCP como proceso hijo, se conecta vía stdio y enruta las llamadas a herramientas a través de él.
 
-**Cursor**: The engine writes `~/.cursor/mcp.json` to disk before spawning the `agent` CLI. Cursor reads that file and manages MCP servers itself.
+**Cursor**: El motor escribe `~/.cursor/mcp.json` en disco antes de iniciar la CLI `agent`. Cursor lee ese archivo y gestiona los servidores MCP por sí mismo.
 
-The strategies never reference any skill by name. They loop over the skill definitions and call `resolve()` on each.
+Las estrategias nunca referencian ningún skill por su nombre. Recorren las definiciones de skills y llaman a `resolve()` en cada una.
 
 ---
 
@@ -302,16 +302,16 @@ import {
 
 ---
 
-## Companion packages
+## Paquetes complementarios
 
-| Package | What it adds |
+| Paquete | Qué añade |
 |---|---|
-| [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow) | The graph engine. Skills here plug into its nodes. |
-| [`@zibby/cli`](https://www.npmjs.com/package/@zibby/cli) | `zibby` command — scaffold, dev server, deploy, trigger, logs. |
-| [`@zibby/core`](https://www.npmjs.com/package/@zibby/core) | Built-in agent strategies (Claude / Cursor / Codex / Gemini / OpenAI Assistant), MCP client, runtime. |
+| [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow) | El motor de grafos. Los skills aquí se conectan a sus nodos. |
+| [`@zibby/cli`](https://www.npmjs.com/package/@zibby/cli) | Comando `zibby` — scaffold, servidor de desarrollo, deploy, trigger, logs. |
+| [`@zibby/core`](https://www.npmjs.com/package/@zibby/core) | Estrategias de agente integradas (Claude / Cursor / Codex / Gemini / OpenAI Assistant), cliente MCP, runtime. |
 
 ---
 
-## License
+## Licencia
 
 MIT

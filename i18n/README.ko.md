@@ -1,18 +1,18 @@
-# @zibby/skills
+# @zibby/skills — 한국어
 
 [![npm version](https://img.shields.io/npm/v/@zibby/skills.svg)](https://www.npmjs.com/package/@zibby/skills)
 [![Types](https://img.shields.io/npm/types/@zibby/skills.svg)](https://www.npmjs.com/package/@zibby/skills)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](../LICENSE)
 
-[Deutsch](./i18n/README.de.md) | [Español](./i18n/README.es.md) | [français](./i18n/README.fr.md) | [日本語](./i18n/README.ja.md) | [한국어](./i18n/README.ko.md) | [Português](./i18n/README.pt.md) | [Русский](./i18n/README.ru.md) | [中文](./i18n/README.zh.md)
+[English](../README.md) | [Deutsch](./README.de.md) | [Español](./README.es.md) | [français](./README.fr.md) | [日本語](./README.ja.md) | [Português](./README.pt.md) | [Русский](./README.ru.md) | [中文](./README.zh.md)
 
-📖 **Full docs:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
+📖 **전체 문서:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **The skill layer for [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow).** Built-in skill definitions that give a workflow node the tools it needs — function tools, MCP servers, browser, issue trackers, memory. Vendor-neutral, JavaScript-first.
+> **[@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow)를 위한 스킬 레이어.** 워크플로 노드에 필요한 도구(함수 도구, MCP 서버, 브라우저, 이슈 트래커, 메모리)를 제공하는 내장 스킬 정의입니다. 벤더 중립적이며 JavaScript 우선.
 
-`@zibby/skills` is the batteries-included companion to [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *"Graph-based AI agent workflow orchestration."* The workflow engine ships **zero skills** on purpose; this package is where the built-in ones live.
+`@zibby/skills`는 [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow)([npm](https://www.npmjs.com/package/@zibby/agent-workflow))의 모든 기능이 포함된 동반 패키지입니다 — *"Graph-based AI agent workflow orchestration."* 워크플로 엔진은 의도적으로 **스킬을 하나도 제공하지 않습니다**. 이 패키지가 바로 내장 스킬이 사는 곳입니다.
 
-A **skill** is the contract between a workflow node and a tool. It tells the engine what the tool does, how to start it, and what it needs. The engine never hardcodes any skill by name — it reads the skill definition and wires things up generically for both Claude and Cursor agents.
+**스킬**은 워크플로 노드와 도구 사이의 계약입니다. 도구가 무엇을 하는지, 어떻게 시작하는지, 무엇이 필요한지를 엔진에 알려줍니다. 엔진은 스킬을 이름으로 하드코딩하지 않습니다. 스킬 정의를 읽어 Claude 및 Cursor 에이전트 모두에 대해 일반적인 방식으로 연결합니다.
 
 ```
    @zibby/agent-workflow node            @zibby/skills
@@ -29,9 +29,9 @@ A **skill** is the contract between a workflow node and a tool. It tells the eng
 
 ---
 
-## Used with @zibby/agent-workflow
+## @zibby/agent-workflow와 함께 사용하기
 
-You don't use `@zibby/skills` on its own — it plugs into [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow). A node names the skills it wants in its `skills:` array, and the workflow engine resolves them at run time:
+`@zibby/skills`는 단독으로 사용하지 않습니다. [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow)에 연결됩니다. 노드는 `skills:` 배열에 원하는 스킬을 지정하고, 워크플로 엔진이 실행 시점에 이를 해석합니다.
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills
@@ -42,7 +42,7 @@ npm install @zibby/agent-workflow @zibby/skills
 import '@zibby/skills';
 ```
 
-Define a skill once…
+스킬을 한 번 정의하면…
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -54,7 +54,7 @@ export const add = skill('add', {
 });
 ```
 
-…and an **@zibby/agent-workflow node** requests it by id:
+…**@zibby/agent-workflow 노드**가 id로 요청합니다.
 
 ```javascript
 // Used by an @zibby/agent-workflow node
@@ -65,17 +65,17 @@ export const mathNode = {
 };
 ```
 
-When the engine runs `do_math`, it sees `skills: ['add']`, looks the skill up, calls `resolve()`, and hands the resulting tool to whichever agent runs the node. See [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow) for how nodes, graphs, and state fit together.
+엔진이 `do_math`를 실행하면 `skills: ['add']`를 확인하고 스킬을 조회한 뒤 `resolve()`를 호출하고, 그 결과 도구를 노드를 실행하는 에이전트에 전달합니다. 노드, 그래프, 상태가 어떻게 맞물리는지는 [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow)를 참고하세요.
 
 ---
 
-## Quick start
+## 빠른 시작
 
 ```bash
 npm install @zibby/skills
 ```
 
-Import the package to register all built-in skills:
+패키지를 import하여 모든 내장 스킬을 등록합니다.
 
 ```javascript
 import '@zibby/skills';
@@ -83,13 +83,13 @@ import '@zibby/skills';
 
 ---
 
-## The `skill()` factory
+## `skill()` 팩토리
 
-One function to create any skill. Auto-detects the type and auto-registers.
+모든 스킬을 만드는 하나의 함수입니다. 유형을 자동 감지하고 자동 등록합니다.
 
-### Function skill
+### 함수 스킬
 
-One skill = one tool. Flat, no nesting.
+스킬 1개 = 도구 1개. 평면적이며 중첩 없음.
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -101,7 +101,7 @@ export const add = skill('add', {
 });
 ```
 
-Use it in an @zibby/agent-workflow node:
+@zibby/agent-workflow 노드에서 사용합니다.
 
 ```javascript
 export const mathNode = {
@@ -111,9 +111,9 @@ export const mathNode = {
 };
 ```
 
-### MCP skill
+### MCP 스킬
 
-For wrapping existing MCP server packages:
+기존 MCP 서버 패키지를 래핑할 때:
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -134,9 +134,9 @@ export const linear = skill('linear', {
 
 ---
 
-## Built-in skills
+## 내장 스킬
 
-| ID | Server | MCP Package |
+| ID | 서버 | MCP 패키지 |
 |----|--------|-------------|
 | `browser` | `playwright` | `@zibby/mcp-browser` / `@playwright/mcp` |
 | `jira` | `jira` | `@zibby/mcp-jira` |
@@ -145,15 +145,15 @@ export const linear = skill('linear', {
 
 ---
 
-## Function skill API
+## 함수 스킬 API
 
 ```javascript
 skill(id, { description, input, handler })
 ```
 
-- `id` — Unique skill identifier (used in `skills: ['add']`)
-- `description` — What the tool does (shown to the LLM)
-- `input` — Parameter definitions:
+- `id` — 고유 스킬 식별자(`skills: ['add']`에서 사용)
+- `description` — 도구가 하는 일(LLM에 표시됨)
+- `input` — 매개변수 정의:
 
 ```javascript
 {
@@ -163,7 +163,7 @@ skill(id, { description, input, handler })
 }
 ```
 
-- `handler` — The function that runs when the tool is called:
+- `handler` — 도구가 호출될 때 실행되는 함수:
 
 ```javascript
 handler: async ({ param, other }) => {
@@ -171,15 +171,15 @@ handler: async ({ param, other }) => {
 }
 ```
 
-### Handler rules
+### 핸들러 규칙
 
-- Must be `async` (or return a Promise)
-- Receives one object argument with the input parameters
-- Must return a JSON-serializable value
-- Has full access to imports, closures, and the module scope
-- Runs in a child process (the function bridge)
+- `async`여야 함(또는 Promise를 반환)
+- 입력 매개변수가 담긴 객체 인수 하나를 받음
+- JSON 직렬화 가능한 값을 반환해야 함
+- import, 클로저, 모듈 스코프에 완전히 접근 가능
+- 자식 프로세스(함수 브리지)에서 실행됨
 
-### More examples
+### 추가 예제
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -201,26 +201,26 @@ export const healthCheck = skill('health_check', {
 
 ---
 
-## MCP skill API
+## MCP 스킬 API
 
 ```javascript
 skill(id, config)
 ```
 
-Config object:
+구성 객체:
 
-| Property | Required | Description |
+| 속성 | 필수 | 설명 |
 |---|---|---|
-| `resolve(options)` | Yes | Returns `{ command, args, env }` or `null` |
-| `serverName` | No | MCP server name (defaults to `id`) |
-| `allowedTools` | No | Tool patterns (defaults to `['mcp__<serverName>__*']`) |
-| `envKeys` | No | Env vars the skill needs |
-| `description` | No | Human-readable description |
-| `tools` | No | Tool schemas for compile-time validation |
-| `cursorKey` | No | Override key in `~/.cursor/mcp.json` |
-| `sessionEnvKey` | No | Env var for session artifact paths (Cursor only) |
+| `resolve(options)` | 예 | `{ command, args, env }` 또는 `null`을 반환 |
+| `serverName` | 아니오 | MCP 서버 이름(기본값 `id`) |
+| `allowedTools` | 아니오 | 도구 패턴(기본값 `['mcp__<serverName>__*']`) |
+| `envKeys` | 아니오 | 스킬이 필요로 하는 환경 변수 |
+| `description` | 아니오 | 사람이 읽을 수 있는 설명 |
+| `tools` | 아니오 | 컴파일 타임 검증을 위한 도구 스키마 |
+| `cursorKey` | 아니오 | `~/.cursor/mcp.json`의 키를 재정의 |
+| `sessionEnvKey` | 아니오 | 세션 아티팩트 경로용 환경 변수(Cursor 전용) |
 
-### Advanced example: custom binary with fallback
+### 고급 예제: 폴백이 있는 커스텀 바이너리
 
 ```javascript
 import { skill } from '@zibby/skills';
@@ -255,7 +255,7 @@ export const database = skill('database', {
 
 ---
 
-## How it works under the hood
+## 내부 동작 방식
 
 ```
   Node definition                Skill definition              Agent strategy
@@ -278,11 +278,11 @@ export const database = skill('database', {
                       query()            `agent` CLI
 ```
 
-**Claude**: The SDK receives `mcpServers` as a parameter. It spawns the MCP server as a child process, connects via stdio, routes tool calls through it.
+**Claude**: SDK는 `mcpServers`를 매개변수로 받습니다. MCP 서버를 자식 프로세스로 시작하고 stdio를 통해 연결한 뒤, 도구 호출을 그를 통해 라우팅합니다.
 
-**Cursor**: The engine writes `~/.cursor/mcp.json` to disk before spawning the `agent` CLI. Cursor reads that file and manages MCP servers itself.
+**Cursor**: 엔진은 `agent` CLI를 시작하기 전에 `~/.cursor/mcp.json`을 디스크에 씁니다. Cursor는 그 파일을 읽고 MCP 서버를 직접 관리합니다.
 
-The strategies never reference any skill by name. They loop over the skill definitions and call `resolve()` on each.
+스트래티지는 스킬을 이름으로 참조하지 않습니다. 스킬 정의를 순회하며 각각에 대해 `resolve()`를 호출합니다.
 
 ---
 
@@ -302,16 +302,16 @@ import {
 
 ---
 
-## Companion packages
+## 동반 패키지
 
-| Package | What it adds |
+| 패키지 | 추가하는 기능 |
 |---|---|
-| [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow) | The graph engine. Skills here plug into its nodes. |
-| [`@zibby/cli`](https://www.npmjs.com/package/@zibby/cli) | `zibby` command — scaffold, dev server, deploy, trigger, logs. |
-| [`@zibby/core`](https://www.npmjs.com/package/@zibby/core) | Built-in agent strategies (Claude / Cursor / Codex / Gemini / OpenAI Assistant), MCP client, runtime. |
+| [`@zibby/agent-workflow`](https://www.npmjs.com/package/@zibby/agent-workflow) | 그래프 엔진. 여기의 스킬은 그 노드에 연결됩니다. |
+| [`@zibby/cli`](https://www.npmjs.com/package/@zibby/cli) | `zibby` 명령 — scaffold, 개발 서버, deploy, trigger, logs. |
+| [`@zibby/core`](https://www.npmjs.com/package/@zibby/core) | 내장 에이전트 스트래티지(Claude / Cursor / Codex / Gemini / OpenAI Assistant), MCP 클라이언트, 런타임. |
 
 ---
 
-## License
+## 라이선스
 
 MIT
