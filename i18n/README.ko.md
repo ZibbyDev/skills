@@ -8,9 +8,9 @@
 
 📖 **전체 문서:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **[@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow)를 위한 스킬 레이어.** 워크플로 노드에 필요한 도구(함수 도구, MCP 서버, 브라우저, 이슈 트래커, 메모리)를 제공하는 내장 스킬 정의입니다. 벤더 중립적이며 JavaScript 우선.
+> **[@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow)를 위한 스킬 레이어.** 워크플로 노드에 필요한 도구(함수 도구, MCP 서버, 브라우저, 이슈 트래커, 메모리)를 제공하는 내장 스킬 정의입니다. 벤더 중립적이며 JavaScript 우선.
 
-`@zibby/skills`는 [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow)([npm](https://www.npmjs.com/package/@zibby/agent-workflow))의 모든 기능이 포함된 동반 패키지입니다 — *"Graph-based AI agent workflow orchestration."* 워크플로 엔진은 의도적으로 **스킬을 하나도 제공하지 않습니다**. 이 패키지가 바로 내장 스킬이 사는 곳입니다.
+`@zibby/skills`는 [`@zibby/agent-workflow`](https://github.com/ZibbyDev/agent-workflow)([npm](https://www.npmjs.com/package/@zibby/agent-workflow))의 모든 기능이 포함된 동반 패키지입니다 — *"Graph-based AI agent workflow orchestration."* 워크플로 엔진은 의도적으로 **스킬을 하나도 제공하지 않습니다**. 이 패키지가 바로 내장 스킬이 사는 곳입니다.
 
 **스킬**은 워크플로 노드와 도구 사이의 계약입니다. 도구가 무엇을 하는지, 어떻게 시작하는지, 무엇이 필요한지를 엔진에 알려줍니다. 엔진은 스킬을 이름으로 하드코딩하지 않습니다. 스킬 정의를 읽어 Claude 및 Cursor 에이전트 모두에 대해 일반적인 방식으로 연결합니다.
 
@@ -31,7 +31,7 @@
 
 ## @zibby/agent-workflow와 함께 사용하기
 
-`@zibby/skills`는 단독으로 사용하지 않습니다. [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow)에 연결됩니다. 노드는 `skills:` 배열에 원하는 스킬을 지정하고, 워크플로 엔진이 실행 시점에 이를 해석합니다.
+`@zibby/skills`는 단독으로 사용하지 않습니다. [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow)에 연결됩니다. 노드는 `skills:` 배열에 원하는 스킬을 지정하고, 워크플로 엔진이 실행 시점에 이를 해석합니다.
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills

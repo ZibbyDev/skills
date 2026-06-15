@@ -8,9 +8,9 @@
 
 📖 **Documentation complète :** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **La couche de skills pour [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow).** Des définitions de skills intégrées qui donnent à un nœud de workflow les outils dont il a besoin — outils de fonction, serveurs MCP, navigateur, gestionnaires de tickets, mémoire. Neutre vis-à-vis des fournisseurs, JavaScript d'abord.
+> **La couche de skills pour [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow).** Des définitions de skills intégrées qui donnent à un nœud de workflow les outils dont il a besoin — outils de fonction, serveurs MCP, navigateur, gestionnaires de tickets, mémoire. Neutre vis-à-vis des fournisseurs, JavaScript d'abord.
 
-`@zibby/skills` est le complément clé en main de [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *« Graph-based AI agent workflow orchestration. »* Le moteur de workflow ne fournit **aucun skill** à dessein ; c'est dans ce paquet que vivent les skills intégrés.
+`@zibby/skills` est le complément clé en main de [`@zibby/agent-workflow`](https://github.com/ZibbyDev/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *« Graph-based AI agent workflow orchestration. »* Le moteur de workflow ne fournit **aucun skill** à dessein ; c'est dans ce paquet que vivent les skills intégrés.
 
 Un **skill** est le contrat entre un nœud de workflow et un outil. Il indique au moteur ce que fait l'outil, comment le démarrer et ce dont il a besoin. Le moteur ne code jamais en dur un skill par son nom — il lit la définition du skill et câble tout de manière générique, à la fois pour les agents Claude et Cursor.
 
@@ -31,7 +31,7 @@ Un **skill** est le contrat entre un nœud de workflow et un outil. Il indique a
 
 ## Utilisation avec @zibby/agent-workflow
 
-`@zibby/skills` ne s'utilise pas seul — il se branche sur [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow). Un nœud nomme les skills qu'il souhaite dans son tableau `skills:`, et le moteur de workflow les résout à l'exécution :
+`@zibby/skills` ne s'utilise pas seul — il se branche sur [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow). Un nœud nomme les skills qu'il souhaite dans son tableau `skills:`, et le moteur de workflow les résout à l'exécution :
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills

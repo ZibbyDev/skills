@@ -8,9 +8,9 @@
 
 📖 **Documentación completa:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **La capa de skills para [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow).** Definiciones de skills integradas que dan a un nodo de workflow las herramientas que necesita: herramientas de función, servidores MCP, navegador, gestores de incidencias, memoria. Neutral respecto al proveedor, JavaScript primero.
+> **La capa de skills para [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow).** Definiciones de skills integradas que dan a un nodo de workflow las herramientas que necesita: herramientas de función, servidores MCP, navegador, gestores de incidencias, memoria. Neutral respecto al proveedor, JavaScript primero.
 
-`@zibby/skills` es el complemento con todo incluido de [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *"Graph-based AI agent workflow orchestration."* El motor de workflow no incluye **ningún skill** a propósito; este paquete es donde viven los integrados.
+`@zibby/skills` es el complemento con todo incluido de [`@zibby/agent-workflow`](https://github.com/ZibbyDev/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *"Graph-based AI agent workflow orchestration."* El motor de workflow no incluye **ningún skill** a propósito; este paquete es donde viven los integrados.
 
 Un **skill** es el contrato entre un nodo de workflow y una herramienta. Le dice al motor qué hace la herramienta, cómo iniciarla y qué necesita. El motor nunca codifica ningún skill por su nombre: lee la definición del skill y conecta todo de forma genérica, tanto para agentes Claude como Cursor.
 
@@ -31,7 +31,7 @@ Un **skill** es el contrato entre un nodo de workflow y una herramienta. Le dice
 
 ## Uso con @zibby/agent-workflow
 
-No usas `@zibby/skills` por sí solo: se conecta a [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow). Un nodo nombra los skills que quiere en su array `skills:`, y el motor de workflow los resuelve en tiempo de ejecución:
+No usas `@zibby/skills` por sí solo: se conecta a [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow). Un nodo nombra los skills que quiere en su array `skills:`, y el motor de workflow los resuelve en tiempo de ejecución:
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills

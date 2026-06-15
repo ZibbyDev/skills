@@ -8,9 +8,9 @@
 
 📖 **Полная документация:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **Слой навыков для [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow).** Встроенные определения навыков, которые дают узлу workflow нужные инструменты — функциональные инструменты, серверы MCP, браузер, трекеры задач, память. Независимость от поставщика, JavaScript в первую очередь.
+> **Слой навыков для [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow).** Встроенные определения навыков, которые дают узлу workflow нужные инструменты — функциональные инструменты, серверы MCP, браузер, трекеры задач, память. Независимость от поставщика, JavaScript в первую очередь.
 
-`@zibby/skills` — это укомплектованный спутник [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *«Graph-based AI agent workflow orchestration.»* Движок workflow намеренно поставляется **без единого навыка**; именно в этом пакете живут встроенные.
+`@zibby/skills` — это укомплектованный спутник [`@zibby/agent-workflow`](https://github.com/ZibbyDev/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *«Graph-based AI agent workflow orchestration.»* Движок workflow намеренно поставляется **без единого навыка**; именно в этом пакете живут встроенные.
 
 **Навык** — это контракт между узлом workflow и инструментом. Он сообщает движку, что делает инструмент, как его запустить и что ему нужно. Движок никогда не прописывает навык по имени — он читает определение навыка и подключает всё универсально, как для агентов Claude, так и для Cursor.
 
@@ -31,7 +31,7 @@
 
 ## Использование с @zibby/agent-workflow
 
-Вы не используете `@zibby/skills` сам по себе — он подключается к [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow). Узел указывает нужные навыки в своём массиве `skills:`, а движок workflow разрешает их во время выполнения:
+Вы не используете `@zibby/skills` сам по себе — он подключается к [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow). Узел указывает нужные навыки в своём массиве `skills:`, а движок workflow разрешает их во время выполнения:
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills

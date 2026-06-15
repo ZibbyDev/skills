@@ -8,9 +8,9 @@
 
 📖 **完整文档：** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **[@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow) 的技能层。** 内置的技能定义，为工作流节点提供它所需的工具——函数工具、MCP 服务器、浏览器、问题追踪器、记忆。供应商中立，JavaScript 优先。
+> **[@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow) 的技能层。** 内置的技能定义，为工作流节点提供它所需的工具——函数工具、MCP 服务器、浏览器、问题追踪器、记忆。供应商中立，JavaScript 优先。
 
-`@zibby/skills` 是 [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow)（[npm](https://www.npmjs.com/package/@zibby/agent-workflow)）开箱即用的配套包——*“Graph-based AI agent workflow orchestration.”* 工作流引擎刻意**不附带任何技能**；内置技能就存放在本包中。
+`@zibby/skills` 是 [`@zibby/agent-workflow`](https://github.com/ZibbyDev/agent-workflow)（[npm](https://www.npmjs.com/package/@zibby/agent-workflow)）开箱即用的配套包——*“Graph-based AI agent workflow orchestration.”* 工作流引擎刻意**不附带任何技能**；内置技能就存放在本包中。
 
 **技能（skill）**是工作流节点与工具之间的契约。它告诉引擎这个工具做什么、如何启动、需要什么。引擎从不按名称硬编码任何技能——它读取技能定义，并以通用方式为 Claude 和 Cursor 两类代理完成接线。
 
@@ -31,7 +31,7 @@
 
 ## 与 @zibby/agent-workflow 配合使用
 
-你不会单独使用 `@zibby/skills`——它接入 [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow)。节点在其 `skills:` 数组中声明所需的技能，工作流引擎会在运行时解析它们：
+你不会单独使用 `@zibby/skills`——它接入 [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow)。节点在其 `skills:` 数组中声明所需的技能，工作流引擎会在运行时解析它们：
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills

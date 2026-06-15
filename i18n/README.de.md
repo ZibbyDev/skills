@@ -8,9 +8,9 @@
 
 📖 **Vollständige Doku:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **Die Skill-Ebene für [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow).** Integrierte Skill-Definitionen, die einem Workflow-Knoten die benötigten Werkzeuge geben — Funktions-Tools, MCP-Server, Browser, Issue-Tracker, Memory. Anbieterneutral, JavaScript-first.
+> **Die Skill-Ebene für [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow).** Integrierte Skill-Definitionen, die einem Workflow-Knoten die benötigten Werkzeuge geben — Funktions-Tools, MCP-Server, Browser, Issue-Tracker, Memory. Anbieterneutral, JavaScript-first.
 
-`@zibby/skills` ist das voll ausgestattete Gegenstück zu [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *„Graph-based AI agent workflow orchestration."* Die Workflow-Engine liefert bewusst **null Skills** mit; in diesem Paket leben die integrierten.
+`@zibby/skills` ist das voll ausgestattete Gegenstück zu [`@zibby/agent-workflow`](https://github.com/ZibbyDev/agent-workflow) ([npm](https://www.npmjs.com/package/@zibby/agent-workflow)) — *„Graph-based AI agent workflow orchestration."* Die Workflow-Engine liefert bewusst **null Skills** mit; in diesem Paket leben die integrierten.
 
 Ein **Skill** ist der Vertrag zwischen einem Workflow-Knoten und einem Werkzeug. Er sagt der Engine, was das Werkzeug tut, wie es gestartet wird und was es benötigt. Die Engine codiert niemals einen Skill anhand seines Namens fest — sie liest die Skill-Definition und verdrahtet alles generisch, sowohl für Claude- als auch für Cursor-Agenten.
 
@@ -31,7 +31,7 @@ Ein **Skill** ist der Vertrag zwischen einem Workflow-Knoten und einem Werkzeug.
 
 ## Verwendung mit @zibby/agent-workflow
 
-`@zibby/skills` wird nicht eigenständig verwendet — es klinkt sich in [@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow) ein. Ein Knoten benennt die gewünschten Skills in seinem `skills:`-Array, und die Workflow-Engine löst sie zur Laufzeit auf:
+`@zibby/skills` wird nicht eigenständig verwendet — es klinkt sich in [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow) ein. Ein Knoten benennt die gewünschten Skills in seinem `skills:`-Array, und die Workflow-Engine löst sie zur Laufzeit auf:
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills

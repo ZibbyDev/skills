@@ -92,10 +92,10 @@
   "homepage": "https://zibby.dev",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ZibbyHQ/skills"
+    "url": "https://github.com/ZibbyDev/skills"
   },
   "bugs": {
-    "url": "https://github.com/ZibbyHQ/skills/issues"
+    "url": "https://github.com/ZibbyDev/skills/issues"
   },
   "files": [
     "dist/",

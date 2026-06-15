@@ -8,9 +8,9 @@
 
 📖 **完全なドキュメント:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
-> **[@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow) のためのスキル層。** ワークフローノードに必要なツール（関数ツール、MCP サーバー、ブラウザ、課題トラッカー、メモリ）を与える組み込みのスキル定義です。ベンダー中立、JavaScript ファースト。
+> **[@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow) のためのスキル層。** ワークフローノードに必要なツール（関数ツール、MCP サーバー、ブラウザ、課題トラッカー、メモリ）を与える組み込みのスキル定義です。ベンダー中立、JavaScript ファースト。
 
-`@zibby/skills` は [`@zibby/agent-workflow`](https://github.com/ZibbyHQ/agent-workflow)（[npm](https://www.npmjs.com/package/@zibby/agent-workflow)）の充実した付属パッケージです — *「Graph-based AI agent workflow orchestration.」* ワークフローエンジンは意図的に**スキルをひとつも同梱しません**。このパッケージこそが組み込みスキルの置き場所です。
+`@zibby/skills` は [`@zibby/agent-workflow`](https://github.com/ZibbyDev/agent-workflow)（[npm](https://www.npmjs.com/package/@zibby/agent-workflow)）の充実した付属パッケージです — *「Graph-based AI agent workflow orchestration.」* ワークフローエンジンは意図的に**スキルをひとつも同梱しません**。このパッケージこそが組み込みスキルの置き場所です。
 
 **スキル**はワークフローノードとツールの間の契約です。そのツールが何をするのか、どう起動するのか、何を必要とするのかをエンジンに伝えます。エンジンがスキルを名前でハードコードすることは決してありません。スキル定義を読み取り、Claude エージェントと Cursor エージェントの両方に対して汎用的に配線します。
 
@@ -31,7 +31,7 @@
 
 ## @zibby/agent-workflow と併用する
 
-`@zibby/skills` を単体で使うことはありません。[@zibby/agent-workflow](https://github.com/ZibbyHQ/agent-workflow) に組み込んで使います。ノードは `skills:` 配列で必要なスキルを指定し、ワークフローエンジンが実行時にそれらを解決します。
+`@zibby/skills` を単体で使うことはありません。[@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow) に組み込んで使います。ノードは `skills:` 配列で必要なスキルを指定し、ワークフローエンジンが実行時にそれらを解決します。
 
 ```bash
 npm install @zibby/agent-workflow @zibby/skills
