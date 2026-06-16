@@ -61,6 +61,11 @@ describe('INTEGRATIONS constant', () => {
         // workspace slug / base URL). See linear.js + handlers/linear.js.
         // The skill talks to the Linear GraphQL API directly (no MCP server).
         'linear',
+        // Figma — first-class OAuth integration (NOT a paste-token). See
+        // figma.js + handlers/figma.js. The skill reads files/nodes/
+        // comments and renders frames via the Figma REST API with a Bearer
+        // token (auto-refreshed server-side); no MCP server.
+        'figma',
       ])
     );
   });

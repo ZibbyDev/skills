@@ -48,6 +48,12 @@ export const INTEGRATIONS = Object.freeze({
   // workspace slug / base URL). The linearSkill talks to the Linear
   // GraphQL API directly (no MCP server). See linear.js + handlers/linear.js.
   LINEAR:            'linear',
+  // Figma — paste-token (personal access token) integration, same shape as
+  // linear/plane (NOT OAuth). The figmaSkill talks to the Figma REST API
+  // directly with the `X-Figma-Token` header (no MCP server), resolved via
+  // resolveIntegrationToken('figma') (long-lived PAT, no refresh). See
+  // figma.js + handlers/figma.js.
+  FIGMA:             'figma',
 });
 
 /**
@@ -88,4 +94,5 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   notion: { id: 'notion', name: 'Notion', connectPath: '/integrations?provider=notion' },
   plane:  { id: 'plane',  name: 'Plane',  connectPath: '/integrations?provider=plane'  },
   linear: { id: 'linear', name: 'Linear', connectPath: '/integrations?provider=linear' },
+  figma:  { id: 'figma',  name: 'Figma',  connectPath: '/integrations?provider=figma'  },
 });
