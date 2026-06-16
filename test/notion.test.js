@@ -33,8 +33,18 @@ describe('notionSkill structure', () => {
     expect(names).toEqual(['notion_get_page', 'notion_query_database']);
   });
 
-  it('resolve() returns null (no MCP server — in-process context skill)', () => {
-    expect(notionSkill.resolve()).toBeNull();
+  it('resolve() spawns the generic skill MCP server so the AGENT can call notion tools', () => {
+    // Changed for agent-driven code review: notion used to be called only by
+    // deterministic node code (resolve()→null, no agent tool surface). Now the
+    // review agent pulls a page itself, so notion is served over MCP via the
+    // generic bin/mcp-skill.mjs, exactly like github/linear/figma.
+    const spec = notionSkill.resolve();
+    expect(spec).not.toBeNull();
+    expect(spec.command).toBe('node');
+    expect(spec.args).toEqual(expect.arrayContaining(['../dist/notion.js', 'notionSkill']));
+    expect(spec.alwaysLoad).toBe(true);
+    // and the skill advertises its mcp__notion__* tool prefix
+    expect(notionSkill.allowedTools).toEqual(['mcp__notion__*']);
   });
 });
 

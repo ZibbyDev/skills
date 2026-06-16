@@ -22,8 +22,23 @@
  * via handleToolCall, same as the in-process path for jira/slack.
  */
 
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+
+/**
+ * Resolve the generic skill MCP server binary (bin/mcp-skill.mjs), derived
+ * from import.meta.url so it works in src/, dist/, and a published install.
+ * See linear.js / github.js for the full rationale.
+ */
+function resolveSkillBin() {
+  if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidate = resolvePath(here, '..', 'bin', 'mcp-skill.mjs');
+  return existsSync(candidate) ? candidate : null;
+}
 
 // Current stable Notion API version. Notion requires this header on every
 // request; the value pins the response schema (block/property shapes).
@@ -307,6 +322,7 @@ function propToString(prop) {
 export const notionSkill = {
   id: 'notion',
   serverName: 'notion',
+  allowedTools: ['mcp__notion__*'],
   requiresIntegration: INTEGRATIONS.NOTION, // see jiraSkill.requiresIntegration for semantics
   description: 'Notion read-only context (pull a page/database as markdown)',
 
@@ -317,12 +333,32 @@ You can pull a referenced Notion page in as extra context. This is OPTIONAL — 
 Do not block the task if Notion is unavailable — these tools return { ok:false, error } on failure; treat a missing page as "no extra context" and continue.`,
 
   /**
-   * Context-only in-process skill — no MCP server binary. Mirrors how
-   * jira/slack fall back to handleToolCall; here there's no MCP path at
-   * all, so return null (no spawn spec).
+   * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
+   * module's notionSkill export, so the AGENT gets real mcp__notion__* tools
+   * and can pull a referenced page itself (the agent-driven code-review flow).
+   *
+   * Previously this returned null (no MCP server) because Notion was only ever
+   * called by deterministic node code via handleToolCall — there was no agent
+   * tool surface. Now the review agent gathers context itself, so it needs the
+   * tools. The bin imports ../dist/notion.js (resolved relative to bin/, like
+   * mcp-sentry.mjs) and dispatches through handleToolCall; auth flows through
+   * the INHERITED env (PROJECT_API_TOKEN → resolveIntegrationToken('notion')),
+   * so no provider-specific env keys are needed here. When unconnected,
+   * handleToolCall returns { ok:false, error } — the agent tolerates it.
    */
   resolve() {
-    return null;
+    const bin = resolveSkillBin();
+    if (!bin) return null;
+    return {
+      type: 'stdio',
+      command: 'node',
+      args: [bin, '../dist/notion.js', 'notionSkill'],
+      env: {},
+      description: this.description,
+      // Force tools into the system prompt instead of deferring behind the
+      // SDK's ToolSearch (see github.js / sentry.js resolve()).
+      alwaysLoad: true,
+    };
   },
 
   async handleToolCall(name, args) {

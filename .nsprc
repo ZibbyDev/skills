@@ -4,19 +4,59 @@
     "notes": "Insecure default file permissions in @anthropic-ai/sdk's local-filesystem memory tool. We do not enable that tool — claude-strategy only inspects tool names for logging (packages/core/src/strategies/claude-strategy.js:151), it never configures or invokes the memory_* tool. Re-evaluate when @anthropic-ai/claude-agent-sdk ships with @anthropic-ai/sdk >= 0.92.0 and drop this exception.",
     "expiry": "2026-08-01"
   },
-  "GHSA-v2v4-37r5-5v8g": {
+  "GHSA-gv7w-rqvm-qjhr": {
     "active": true,
-    "notes": "XSS in ip-address Address6 HTML-emitting methods. Reaches us via @modelcontextprotocol/sdk > express-rate-limit@8.4.1, which pins ip-address@10.1.0 exactly (patched in 10.1.1). express-rate-limit uses Address6 only for IPv6 parsing of client IPs to enforce rate limits — it never emits HTML, so the vulnerable code path is unreachable from our usage. npm overrides break the install (express-rate-limit's exact pin makes the override resolve to nothing), so the practical fix is upstream. Re-evaluate when @modelcontextprotocol/sdk bumps express-rate-limit past 8.4.1; drop this exception then.",
+    "notes": "esbuild: missing binary integrity verification in the Deno module enables RCE via NPM_CONFIG_REGISTRY. Build-time only — esbuild is a dev/bundling dep (via vite/tsup), never shipped or executed in production, and we never use the Deno install path. Re-evaluate when vite/tsup bump esbuild past 0.28.0; drop this exception then.",
     "expiry": "2026-09-01"
   },
-  "GHSA-qp7p-654g-cw7p": {
+  "GHSA-g7r4-m6w7-qqqr": {
     "active": true,
-    "notes": "CSS Declaration Injection via Style Object Values in Hono JSX SSR. Reaches us via @modelcontextprotocol/sdk > hono@4.12.17. We never use Hono's JSX renderer — MCP only uses Hono as a thin HTTP transport for stdio/SSE channels (no HTML/CSS rendering surface, no user-controlled style props). The vulnerable jsx-runtime code path is unreachable from our usage. Re-evaluate when @modelcontextprotocol/sdk bumps to a Hono release with this patch; drop this exception then.",
+    "notes": "esbuild: arbitrary file read when running the dev server on Windows. Build-time only — we never run the esbuild/vite dev server in CI or prod (bundle step only), and not on Windows. Patched in esbuild > 0.28.0. Re-evaluate on the next vite/tsup bump.",
     "expiry": "2026-09-01"
   },
-  "GHSA-p77w-8qqv-26rm": {
+  "GHSA-fx2h-pf6j-xcff": {
     "active": true,
-    "notes": "Hono Cache Middleware ignores Vary: Authorization / Vary: Cookie, leading to cross-user cache leakage. Reaches us via @modelcontextprotocol/sdk > hono@4.12.17. We never instantiate hono/cache — MCP uses Hono only as an HTTP transport (no caching middleware on any route). Vulnerable code path unreachable from our usage. Re-evaluate when @modelcontextprotocol/sdk ships with the fixed Hono release; drop this exception then.",
+    "notes": "vite: server.fs.deny bypass on Windows alternate paths. Dev-server only — we ship pre-built static assets and never expose the vite dev server in prod; Windows-specific. Re-evaluate when vite ships the patched release; drop this exception then.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-v6wh-96g9-6wx3": {
+    "active": true,
+    "notes": "launch-editor: NTLMv2 hash disclosure via UNC path handling on Windows, reached transitively via vite's dev-server error overlay. Dev-only (never invoked in a prod build) and Windows-specific. Re-evaluate when vite bumps launch-editor; drop this exception then.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-hmw2-7cc7-3qxx": {
+    "active": true,
+    "notes": "form-data: CRLF injection via unescaped multipart field names/filenames. Reaches us transitively via @anthropic-ai/sdk's HTTP client; the multipart field names we emit are fixed SDK constants, never user-controlled, so the injection vector is unreachable from our usage. Re-evaluate when @anthropic-ai/sdk bumps form-data past 4.0.5; drop this exception then.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-vmf3-w455-68vh": {
+    "active": true,
+    "notes": "node-tar: PAX size override applied to intermediary GNU long-name/long-link headers causes a parser interpretation differential (file smuggling). Reaches us only as a build/install-tooling transitive dep (node-gyp / @anthropic-ai/sdk tooling); we never extract untrusted tarballs at runtime. Re-evaluate when upstream bumps tar; drop this exception then.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-wwfh-h76j-fc44": {
+    "active": true,
+    "notes": "hono: path traversal in serve-static on Windows via encoded backslash. Reaches us via @modelcontextprotocol/sdk > hono, used ONLY as a thin stdio/SSE transport for MCP — we never mount hono's serveStatic middleware and our runtime is Linux, not Windows. Vulnerable code path unreachable. Re-evaluate when the MCP SDK bumps to a patched hono.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-j6c9-x7qj-28xf": {
+    "active": true,
+    "notes": "hono: AWS Lambda adapter merges multiple Set-Cookie headers. Reaches us via @modelcontextprotocol/sdk > hono used as an MCP stdio/SSE transport — we never run hono through its AWS Lambda adapter and set no cookies on that transport. Unreachable. Re-evaluate when the MCP SDK bumps to a patched hono.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-88fw-hqm2-52qc": {
+    "active": true,
+    "notes": "hono: CORS middleware reflects any Origin with credentials when origin defaults to wildcard. Reaches us via @modelcontextprotocol/sdk > hono used as an MCP stdio/SSE transport — we never mount hono's CORS middleware (no browser-origin/credentialed surface). Unreachable. Re-evaluate when the MCP SDK bumps to a patched hono.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-rv63-4mwf-qqc2": {
+    "active": true,
+    "notes": "hono: Body Limit middleware bypass on AWS Lambda by understating Content-Length. Reaches us via @modelcontextprotocol/sdk > hono used as an MCP stdio/SSE transport — not on the hono Lambda adapter, no bodyLimit security boundary. Unreachable. Re-evaluate when the MCP SDK bumps to a patched hono.",
+    "expiry": "2026-09-01"
+  },
+  "GHSA-wgpf-jwqj-8h8p": {
+    "active": true,
+    "notes": "hono: Lambda@Edge adapter keeps only the last value of a repeated request header. Reaches us via @modelcontextprotocol/sdk > hono used as an MCP stdio/SSE transport — we never use hono's Lambda@Edge adapter. Unreachable. Re-evaluate when the MCP SDK bumps to a patched hono.",
     "expiry": "2026-09-01"
   }
 }

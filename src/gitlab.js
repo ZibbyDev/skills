@@ -132,6 +132,23 @@ export async function glFetch(path, opts = {}) {
   return res.json();
 }
 
+/**
+ * The GitLab WEB host (for git clone URLs), derived from the same env as the
+ * API base but WITHOUT the /api/vN suffix. Works for gitlab.com + self-hosted.
+ */
+function gitlabWebHost() {
+  const explicit = process.env.GITLAB_API_URL;
+  const host = (process.env.GITLAB_URL || process.env.GITLAB_INSTANCE_URL
+    || (explicit ? explicit.replace(/\/api\/v\d+\/?$/, '') : '')
+    || 'https://gitlab.com').trim().replace(/\/+$/, '');
+  return host.replace(/\/api\/v\d+$/, '');
+}
+
+/** The token used to auth a git clone over HTTPS (oauth token or PAT). */
+function gitlabCloneToken() {
+  return process.env.GITLAB_OAUTH_TOKEN || process.env.GITLAB_TOKEN || null;
+}
+
 /** URL-encode a project id/path (numeric ids pass through; paths get encoded). */
 function encodeProject(projectId) {
   const id = String(projectId);
@@ -154,6 +171,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
 
 ### Discovery
 - gitlab_list_projects: List the projects this token can access (the ones you're a member of), optionally filtered by a search query. Use to find a RELATED project worth cloning for cross-repo context.
+- gitlab_clone: Clone a project locally (shallow, auto-authenticated) to read code OUTSIDE the MR diff — callers, shared types, an existing util, or a cross-repo dependency. After cloning, use Grep/Glob/Read on the returned path. Clone SPARINGLY (only when correctness needs context beyond the diff).
 
 ### Merge requests
 - gitlab_get_mr: Get an MR's details (title, description, author, source/target branch, state, web url, diff_refs)
@@ -203,6 +221,66 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
   async handleToolCall(name, args) {
     try {
       switch (name) {
+        case 'gitlab_clone': {
+          // Clone a GitLab repo locally so the agent can read code OUTSIDE the
+          // MR diff (callers, shared types, cross-repo contracts). Mirrors
+          // github_clone. Accepts a full project PATH ("group/repo") or a
+          // numeric projectId (resolved to its path via the API).
+          const { projectPath, projectId, destination, branch } = args || {};
+          let path = projectPath && String(projectPath).trim();
+          if (!path && projectId != null) {
+            if (/^\d+$/.test(String(projectId))) {
+              const proj = await glFetch(`/projects/${encodeProject(projectId)}`);
+              path = proj?.path_with_namespace;
+            } else {
+              path = String(projectId).trim();
+            }
+          }
+          if (!path) return JSON.stringify({ error: 'projectPath (e.g. "group/repo") or a numeric projectId is required' });
+
+          const token = gitlabCloneToken();
+          if (!token) return JSON.stringify({ error: 'GitLab is not connected (no token to authenticate the clone).' });
+
+          const { execSync } = await import('child_process');
+          const { join, resolve: resolvePath } = await import('path');
+          const { existsSync, mkdirSync } = await import('fs');
+
+          // Default into the workspace's .zibby/repos (same convention as the
+          // git skill) so the agent's Read/Grep/Glob tools can reach it.
+          const baseDir = destination
+            ? resolvePath(destination)
+            : resolvePath(process.cwd(), '.zibby', 'repos');
+          const repoName = path.split('/').filter(Boolean).pop();
+          const destPath = join(baseDir, repoName);
+          mkdirSync(baseDir, { recursive: true });
+
+          if (existsSync(destPath)) {
+            return JSON.stringify({ success: true, path: destPath, message: `Already cloned at ${destPath}`, alreadyCloned: true });
+          }
+
+          const host = gitlabWebHost().replace(/^https?:\/\//, '');
+          const scheme = gitlabWebHost().startsWith('http://') ? 'http' : 'https';
+          const repoUrl = `${scheme}://oauth2:${token}@${host}/${path}.git`;
+          const branchFlag = branch ? `--branch "${String(branch).replace(/"/g, '')}" ` : '';
+          try {
+            execSync(`git clone --depth 1 ${branchFlag}${repoUrl} "${destPath}"`, {
+              stdio: 'pipe',
+              env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+            });
+            const contents = execSync(`ls -la "${destPath}"`, { encoding: 'utf-8' });
+            return JSON.stringify({
+              success: true,
+              path: destPath,
+              message: `Cloned ${path} to ${destPath}`,
+              contents: contents.split('\n').slice(0, 30).join('\n'),
+            });
+          } catch (err) {
+            // Never leak the token in an error string.
+            const safe = String(err.message || err).split(token).join('***');
+            return JSON.stringify({ error: `Clone failed: ${safe}` });
+          }
+        }
+
         case 'gitlab_get_mr': {
           const { projectId, iid } = args || {};
           if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
@@ -598,6 +676,19 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
         properties: {
           query: { type: 'string', description: 'Optional search term matched against project name/path' },
           limit: { type: 'number', description: 'Max projects (default 50, hard max 200)' },
+        },
+      },
+    },
+    {
+      name: 'gitlab_clone',
+      description: 'Clone a GitLab repository locally (shallow) so you can read code OUTSIDE the MR diff — callers of a changed symbol, shared types/contracts, an existing util, or a cross-repo dependency. Auto-authenticates with the connected GitLab token. After cloning, use Grep/Glob/Read on the returned path. Clone SPARINGLY — only when the change\'s correctness depends on code beyond the diff.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: 'Full project path, e.g. "group/subgroup/repo" (preferred).' },
+          projectId: { type: 'string', description: 'Alternatively a numeric project id (resolved to its path via the API).' },
+          branch: { type: 'string', description: 'Branch to clone (default: the repo default branch).' },
+          destination: { type: 'string', description: 'Destination dir (default: <workspace>/.zibby/repos/<repo>).' },
         },
       },
     },
