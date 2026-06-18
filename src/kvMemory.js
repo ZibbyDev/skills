@@ -1,5 +1,5 @@
 /**
- * agentMemory.js — general-purpose, per-agent persistent KV skill.
+ * kvMemory.js — general-purpose, per-agent persistent key-value skill.
  *
  * WHAT IT IS
  * ──────────
@@ -111,10 +111,10 @@ function scopeFor(key) {
  * SAME route + ops + table as reviewMemory.js (intentional reuse — no backend
  * change). Throws a descriptive error on a non-2xx so handleToolCall surfaces it.
  */
-async function agentMemoryFetch(op, payload) {
+async function kvMemoryFetch(op, payload) {
   const session = getSessionToken();
   if (!session) {
-    throw new Error('No backend credential (PROJECT_API_TOKEN). Agent memory is only available inside a Zibby run.');
+    throw new Error('No backend credential (PROJECT_API_TOKEN). KV memory is only available inside a Zibby run.');
   }
   const url = `${getAccountApiUrl()}/credits/review-memory`;
   const res = await fetch(url, {
@@ -127,29 +127,29 @@ async function agentMemoryFetch(op, payload) {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Agent memory ${op} failed (${res.status}): ${body.slice(0, 300)}`);
+    throw new Error(`KV memory ${op} failed (${res.status}): ${body.slice(0, 300)}`);
   }
   return res.json();
 }
 
-export const agentMemorySkill = {
-  id: 'agent-memory',
-  serverName: 'agent_memory',
-  allowedTools: ['mcp__agent_memory__*'],
-  description: 'Agent memory — a private, per-agent persistent key→value store across stateless runs (auto-namespaced)',
+export const kvMemorySkill = {
+  id: 'kv-memory',
+  serverName: 'kv_memory',
+  allowedTools: ['mcp__kv_memory__*'],
+  description: 'KV memory — a private, per-agent persistent key→value store across stateless runs (auto-namespaced)',
 
-  promptFragment: `## Agent Memory (private, per-agent, persistent)
-You have a PRIVATE persistent memory that survives across your stateless runs.
-It is automatically namespaced to YOU (this agent type) — other agents cannot
-see or collide with your entries, and you don't need to prefix anything. Just
-use plain keys.
+  promptFragment: `## KV Memory (private, per-agent, persistent key-value store)
+You have a PRIVATE per-agent key-value memory that survives across your
+stateless runs. It is automatically namespaced to YOU (this agent type) — other
+agents cannot see or collide with your entries, and you don't need to prefix
+anything. Just use plain keys.
 
 Tools:
-- agent_memory_recall: Recall the value stored under a plain \`key\` (exact match).
+- kv_recall: Recall the value stored under a plain \`key\` (exact match).
   Use at the START of a run to pick up what a prior run of yours recorded.
-- agent_memory_recall_prefix: List entries whose plain \`keyPrefix\` matches
+- kv_recall_prefix: List entries whose plain \`keyPrefix\` matches
   (e.g. "seen#" to list everything you've marked seen). Capped at 25.
-- agent_memory_store: Store (overwrite) a concise value under a plain \`key\`.
+- kv_store: Store (overwrite) a concise value under a plain \`key\`.
   Use to record durable facts — e.g. dedup markers, prior decisions, summaries.
 
 Your namespace is added for you automatically; pass plain keys like
@@ -157,9 +157,9 @@ Your namespace is added for you automatically; pass plain keys like
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
-    // module's agentMemorySkill export — same FIXED pattern as reviewMemory/
+    // module's kvMemorySkill export — same FIXED pattern as reviewMemory/
     // github/gitlab (NEVER return { command: null }). The module arg resolves
-    // relative to bin/ at runtime → ../dist/agentMemory.js in a published install.
+    // relative to bin/ at runtime → ../dist/kvMemory.js in a published install.
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
     // Forward the backend-auth env + WORKFLOW_TYPE the spawned MCP process needs
@@ -176,7 +176,7 @@ Your namespace is added for you automatically; pass plain keys like
     return {
       type: 'stdio',
       command: 'node',
-      args: [bin, '../dist/agentMemory.js', 'agentMemorySkill'],
+      args: [bin, '../dist/kvMemory.js', 'kvMemorySkill'],
       env,
       description: this.description,
       // Force tools into the system prompt instead of deferring behind the
@@ -188,21 +188,21 @@ Your namespace is added for you automatically; pass plain keys like
   async handleToolCall(name, args) {
     try {
       switch (name) {
-        case 'agent_memory_recall': {
+        case 'kv_recall': {
           const key = typeof args?.key === 'string' ? args.key.trim() : '';
           if (!key) return JSON.stringify({ error: 'key is required' });
-          const data = await agentMemoryFetch('recall', { scope: scopeFor(key) });
+          const data = await kvMemoryFetch('recall', { scope: scopeFor(key) });
           return JSON.stringify(data);
         }
 
-        case 'agent_memory_recall_prefix': {
+        case 'kv_recall_prefix': {
           const keyPrefix = typeof args?.keyPrefix === 'string' ? args.keyPrefix.trim() : '';
           if (!keyPrefix) return JSON.stringify({ error: 'keyPrefix is required' });
-          const data = await agentMemoryFetch('recall-prefix', { scopePrefix: scopeFor(keyPrefix) });
+          const data = await kvMemoryFetch('recall-prefix', { scopePrefix: scopeFor(keyPrefix) });
           return JSON.stringify(data);
         }
 
-        case 'agent_memory_store': {
+        case 'kv_store': {
           const key = typeof args?.key === 'string' ? args.key.trim() : '';
           if (!key) return JSON.stringify({ error: 'key is required' });
           if (typeof args?.content !== 'string' || args.content.length === 0) {
@@ -210,7 +210,7 @@ Your namespace is added for you automatically; pass plain keys like
           }
           const payload = { scope: scopeFor(key), content: args.content };
           if (args.metadata != null) payload.metadata = args.metadata;
-          const data = await agentMemoryFetch('store', payload);
+          const data = await kvMemoryFetch('store', payload);
           return JSON.stringify(data);
         }
 
@@ -224,7 +224,7 @@ Your namespace is added for you automatically; pass plain keys like
 
   tools: [
     {
-      name: 'agent_memory_recall',
+      name: 'kv_recall',
       description: 'Recall the value you stored under a plain key (exact match). Your per-agent namespace is added automatically — pass a plain key like "seen#owner/repo#42".',
       input_schema: {
         type: 'object',
@@ -235,7 +235,7 @@ Your namespace is added for you automatically; pass plain keys like
       },
     },
     {
-      name: 'agent_memory_recall_prefix',
+      name: 'kv_recall_prefix',
       description: 'List your entries whose plain key STARTS WITH a prefix (e.g. "seen#"). Your per-agent namespace is added automatically. Capped at 25.',
       input_schema: {
         type: 'object',
@@ -246,7 +246,7 @@ Your namespace is added for you automatically; pass plain keys like
       },
     },
     {
-      name: 'agent_memory_store',
+      name: 'kv_store',
       description: 'Store (overwrite) a value under a plain key so a later run of yours can recall it. Your per-agent namespace is added automatically.',
       input_schema: {
         type: 'object',
