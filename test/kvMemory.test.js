@@ -1,13 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { kvMemorySkill } from '../src/kvMemory.js';
-import { reviewMemorySkill } from '../src/reviewMemory.js';
 
-// kv-memory reuses review-memory's EXACT backend route + ops + table
-// (POST {base}/credits/review-memory { op, ... }) but auto-namespaces the
+// kv-memory reuses the EXACT backend route + ops + table that review-memory
+// used (POST {base}/credits/review-memory { op, ... }) but auto-namespaces the
 // caller's plain `key` with WORKFLOW_TYPE before sending it as `scope`. These
-// tests assert: structure, op dispatch, the namespacing + fallback, disjoint
-// SKs across workflow types, and that review-memory is untouched.
+// tests assert: structure, op dispatch, the namespacing + fallback, and disjoint
+// SKs across workflow types.
 
 function fetchOk(payload = {}) {
   return { ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) };
@@ -173,19 +172,5 @@ describe('handleToolCall — reuses review-memory backend, auto-namespaces by WO
   it('unknown tool returns an error', async () => {
     const out = JSON.parse(await kvMemorySkill.handleToolCall('kv_bogus', {}));
     expect(out.error).toContain('Unknown tool');
-  });
-});
-
-describe('review-memory is left untouched', () => {
-  it('still exposes its original id, serverName, allowedTools and tool names', () => {
-    expect(reviewMemorySkill.id).toBe('review-memory');
-    expect(reviewMemorySkill.serverName).toBe('review_memory');
-    expect(reviewMemorySkill.allowedTools).toEqual(['mcp__review_memory__*']);
-    const names = reviewMemorySkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual([
-      'review_memory_recall',
-      'review_memory_recall_prefix',
-      'review_memory_store',
-    ]);
   });
 });

@@ -25,7 +25,6 @@ import { sentrySkill } from './sentry.js';
 import { testRunnerSkill } from './test-runner.js';
 import { gitSkill } from './git.js';
 import { chatMemorySkill } from './chat-memory.js';
-import { reviewMemorySkill } from './reviewMemory.js';
 import { kvMemorySkill } from './kvMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
 import {
@@ -52,7 +51,6 @@ registerSkill(gitSkill);
 registerSkill(skillInstallerSkill);
 registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
-registerSkill(reviewMemorySkill);
 registerSkill(kvMemorySkill);
 registerSkill(workflowBuilderSkill);
 registerSkill(openaiBillingSkill);
@@ -81,7 +79,6 @@ export const SKILLS = {
   SKILL_INSTALLER: 'skill-installer',
   CORE_TOOLS: 'core-tools',
   CHAT_MEMORY: 'chat-memory',
-  REVIEW_MEMORY: 'review-memory',
   KV_MEMORY: 'kv-memory',
   WORKFLOW_BUILDER: 'workflow-builder',
   OPENAI_BILLING: 'openai_billing',
@@ -89,7 +86,7 @@ export const SKILLS = {
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, reviewMemorySkill, kvMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
