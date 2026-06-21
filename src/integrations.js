@@ -54,6 +54,13 @@ export const INTEGRATIONS = Object.freeze({
   // resolveIntegrationToken('figma') (long-lived PAT, no refresh). See
   // figma.js + handlers/figma.js.
   FIGMA:             'figma',
+  // OpenDesign — paste-token + base URL integration (same { token, baseUrl }
+  // shape as plane). The opendesignSkill talks to the OpenDesign REST API
+  // directly (Authorization: Bearer <token>; all paths under `${baseUrl}/api`),
+  // resolved via resolveIntegrationToken('open_design'). NOTE: the skill is
+  // OPTIONAL — opendesignSkill deliberately sets NO requiresIntegration, so
+  // this id is NOT in any required-gating map. See opendesign.js.
+  OPEN_DESIGN:       'open_design',
 });
 
 /**
@@ -95,4 +102,5 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   plane:  { id: 'plane',  name: 'Plane',  connectPath: '/integrations?provider=plane'  },
   linear: { id: 'linear', name: 'Linear', connectPath: '/integrations?provider=linear' },
   figma:  { id: 'figma',  name: 'Figma',  connectPath: '/integrations?provider=figma'  },
+  open_design: { id: 'open_design', name: 'OpenDesign', connectPath: '/integrations?provider=open_design' },
 });

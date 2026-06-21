@@ -66,6 +66,11 @@ describe('INTEGRATIONS constant', () => {
         // comments and renders frames via the Figma REST API with a Bearer
         // token (auto-refreshed server-side); no MCP server.
         'figma',
+        // OpenDesign — paste-token + base URL integration (same { token,
+        // baseUrl } shape as plane). OPTIONAL skill — opendesignSkill sets
+        // NO requiresIntegration, so this id is not in any gating map.
+        // See opendesign.js.
+        'open_design',
       ])
     );
   });

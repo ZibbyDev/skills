@@ -14,6 +14,7 @@ import { gitlabSkill } from './gitlab.js';
 import { figmaSkill } from './figma.js';
 import { linearSkill } from './linear.js';
 import { planeSkill } from './plane.js';
+import { opendesignSkill } from './opendesign.js';
 import { slackSkill } from './slack.js';
 import { larkSkill } from './lark.js';
 import { notionSkill } from './notion.js';
@@ -40,6 +41,7 @@ registerSkill(gitlabSkill);
 registerSkill(figmaSkill);
 registerSkill(linearSkill);
 registerSkill(planeSkill);
+registerSkill(opendesignSkill);
 registerSkill(slackSkill);
 registerSkill(larkSkill);
 registerSkill(notionSkill);
@@ -68,6 +70,7 @@ export const SKILLS = {
   FIGMA: 'figma',
   LINEAR: 'linear',
   PLANE: 'plane',
+  OPEN_DESIGN: 'open-design',
   GIT: 'git',
   SLACK: 'slack',
   LARK: 'lark',
@@ -86,7 +89,7 @@ export const SKILLS = {
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, gitSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
