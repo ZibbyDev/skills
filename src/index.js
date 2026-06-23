@@ -27,6 +27,7 @@ import { testRunnerSkill } from './test-runner.js';
 import { gitSkill } from './git.js';
 import { chatMemorySkill } from './chat-memory.js';
 import { kvMemorySkill } from './kvMemory.js';
+import { codebaseMemorySkill } from './codebaseMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
 import {
   openaiBillingSkill,
@@ -54,6 +55,7 @@ registerSkill(skillInstallerSkill);
 registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
 registerSkill(kvMemorySkill);
+registerSkill(codebaseMemorySkill);
 registerSkill(workflowBuilderSkill);
 registerSkill(openaiBillingSkill);
 registerSkill(anthropicBillingSkill);
@@ -83,13 +85,20 @@ export const SKILLS = {
   CORE_TOOLS: 'core-tools',
   CHAT_MEMORY: 'chat-memory',
   KV_MEMORY: 'kv-memory',
+  // `codebase-memory` — code-graph + semantic index over the checked-out repo,
+  // backed by the DeusData/codebase-memory-mcp binary BAKED INTO the agent
+  // image. Fully local → UNGATED (no integration token; intentionally absent
+  // from backend skill-integrations maps). Activates ONLY when a node declares
+  // it (alwaysLoad:false), so existing agents are unaffected. The id MUST match
+  // the skill's registered id ('codebase-memory'). Backed by codebaseMemorySkill.
+  CODEBASE_MEMORY: 'codebase-memory',
   WORKFLOW_BUILDER: 'workflow-builder',
   OPENAI_BILLING: 'openai_billing',
   ANTHROPIC_BILLING: 'anthropic_billing',
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
