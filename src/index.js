@@ -25,6 +25,7 @@ import { coreToolsSkill } from './core-tools.js';
 import { sentrySkill } from './sentry.js';
 import { testRunnerSkill } from './test-runner.js';
 import { gitSkill } from './git.js';
+import { gitWriteSkill } from './git-write.js';
 import { chatMemorySkill } from './chat-memory.js';
 import { kvMemorySkill } from './kvMemory.js';
 import { codebaseMemorySkill } from './codebaseMemory.js';
@@ -51,6 +52,7 @@ registerSkill(sentrySkill);
 registerSkill(memorySkill);
 registerSkill(testRunnerSkill);
 registerSkill(gitSkill);
+registerSkill(gitWriteSkill);
 registerSkill(skillInstallerSkill);
 registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
@@ -74,6 +76,12 @@ export const SKILLS = {
   PLANE: 'plane',
   OPEN_DESIGN: 'open-design',
   GIT: 'git',
+  // `git-write` — REQUIRED alias of `git` (same git_clone/checkout/explore
+  // tools). Repo-MUTATING agents (push/PR/MR) declare this so deploy is
+  // gated on "GitHub OR GitLab" connected; backend maps it into
+  // REQUIRED_INTEGRATION_MAP as {any:[github,gitlab]}. Backed by
+  // gitWriteSkill (an alias of gitSkill). Read-only clone agents keep GIT.
+  GIT_WRITE: 'git-write',
   SLACK: 'slack',
   LARK: 'lark',
   NOTION: 'notion',
@@ -99,7 +107,7 @@ export const SKILLS = {
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
