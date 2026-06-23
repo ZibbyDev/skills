@@ -1,6 +1,6 @@
 {
   "name": "@zibby/skills",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "description": "Built-in skill definitions for the Zibby agent-workflow framework",
   "type": "module",
   "main": "dist/index.js",
