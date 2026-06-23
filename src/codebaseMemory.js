@@ -26,7 +26,11 @@
  * LEFT OUT of backend/src/services/skill-integrations.js
  * (REQUIRED_/OPTIONAL_INTEGRATION_MAP). Leaving it out = ungated = correct.
  * The skill ACTIVATES ONLY when a node declares 'codebase-memory' in its
- * `skills` array (alwaysLoad: false). Existing agents are unaffected.
+ * `skills` array — the registry never auto-loads it, so existing agents are
+ * unaffected (this is what makes the integration additive). `alwaysLoad: true`
+ * (matching every other skill) only means: once a node HAS declared it, its
+ * MCP tools load eagerly rather than lazily — it does NOT make the skill
+ * global.
  *
  * INDEX-AT-START HOOK
  * ───────────────────

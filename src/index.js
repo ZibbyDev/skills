@@ -89,8 +89,9 @@ export const SKILLS = {
   // backed by the DeusData/codebase-memory-mcp binary BAKED INTO the agent
   // image. Fully local → UNGATED (no integration token; intentionally absent
   // from backend skill-integrations maps). Activates ONLY when a node declares
-  // it (alwaysLoad:false), so existing agents are unaffected. The id MUST match
-  // the skill's registered id ('codebase-memory'). Backed by codebaseMemorySkill.
+  // it (the registry never auto-loads it), so existing agents are unaffected.
+  // The id MUST match the skill's registered id ('codebase-memory'). Backed by
+  // codebaseMemorySkill.
   CODEBASE_MEMORY: 'codebase-memory',
   WORKFLOW_BUILDER: 'workflow-builder',
   OPENAI_BILLING: 'openai_billing',
