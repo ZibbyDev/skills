@@ -76,11 +76,15 @@ export const SKILLS = {
   PLANE: 'plane',
   OPEN_DESIGN: 'open-design',
   GIT: 'git',
-  // `git-write` — REQUIRED alias of `git` (same git_clone/checkout/explore
-  // tools). Repo-MUTATING agents (push/PR/MR) declare this so deploy is
-  // gated on "GitHub OR GitLab" connected; backend maps it into
-  // REQUIRED_INTEGRATION_MAP as {any:[github,gitlab]}. Backed by
-  // gitWriteSkill (an alias of gitSkill). Read-only clone agents keep GIT.
+  // `git-write` — REQUIRED extension of `git`: the same
+  // git_checkout/list_repos/explore READ tools PLUS one provider-agnostic
+  // mutation tool, git_open_pr (opens a real PR/MR, delegating to the
+  // github/gitlab provider APIs). Repo-MUTATING agents (push/PR/MR) declare
+  // this so deploy is gated on "GitHub OR GitLab" connected; backend maps it
+  // into REQUIRED_INTEGRATION_MAP as {any:[github,gitlab]} — the OR-group is
+  // unchanged by adding git_open_pr (it's exposed THROUGH git-write precisely
+  // to avoid declaring github+gitlab separately, which would AND-gate them).
+  // Backed by gitWriteSkill. Read-only clone agents keep GIT.
   GIT_WRITE: 'git-write',
   SLACK: 'slack',
   LARK: 'lark',

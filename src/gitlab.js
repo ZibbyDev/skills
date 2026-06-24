@@ -175,6 +175,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
 
 ### Merge requests
 - gitlab_create_mr: OPEN a merge request (POST /projects/{id}/merge_requests). The source_branch must already be pushed. Returns the REAL pr_url (the MR's web_url) from GitLab — never fabricate it. Expected business errors (no changes between branches, an MR already exists, source==target) come back as { success:false, skippedReason } — not a hard failure.
+- gitlab_accept_mr: ACCEPT (merge) an MR (PUT /projects/{id}/merge_requests/{iid}/merge). Optional squash, mergeCommitMessage, mergeWhenPipelineSucceeds. Returns { success:true, merged:true, sha (merge_commit_sha) } on a real merge. Expected non-mergeable cases (405/406 = not mergeable / WIP / conflicts / pipeline not done, 404) come back as { success:false, skippedReason } — not a hard failure.
 - gitlab_get_mr: Get an MR's details (title, description, author, source/target branch, state, web url, diff_refs)
 - gitlab_get_mr_changes: Get the MR's changed files with per-file diffs — THIS is the code to review
 - gitlab_list_mrs: List a project's merge requests (filter by state: opened|closed|merged|all)
@@ -345,6 +346,67 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
                 success: false,
                 branch: payload.source_branch,
                 targetBranch: payload.target_branch,
+                project: String(project),
+                provider: 'gitlab',
+                skippedReason: msg,
+              });
+            }
+            throw err; // genuine auth/transport error → outer wrapper → { error }
+          }
+        }
+
+        case 'gitlab_accept_mr': {
+          // ACCEPT (merge) a merge request. DETERMINISTIC provider-API call via
+          // glFetch (the SAME PRIVATE-TOKEN/OAuth auth chokepoint every other
+          // gitlab_* tool uses — no new auth) — so a reported merge SHA is the
+          // REAL merge_commit_sha from GitLab's response, never fabricated.
+          //   PUT /projects/{id}/merge_requests/{iid}/merge
+          //       { squash?, merge_commit_message?, merge_when_pipeline_succeeds? }
+          // `project` is the numeric id OR the "group/repo" path (encodeProject
+          // handles both); `iid` is the per-project MR number.
+          //
+          // Expected NON-FATAL outcomes (the MR simply can't be merged right
+          // now) are returned as { success:false, skippedReason } instead of
+          // throwing — these are normal "not mergeable yet" states, not failures:
+          //   - 405: MR not mergeable (draft/WIP, conflicts, discussions unresolved)
+          //   - 406: merge conflict / branch can't be merged
+          //   - 404: MR (or project) not found
+          // Genuine auth/transport errors (401/403/5xx/network) still throw
+          // (caught by the outer wrapper → { error }).
+          const project = args?.project ?? args?.projectId;
+          const { iid } = args || {};
+          if (!project || !iid) {
+            return JSON.stringify({ error: 'project (id or "group/repo" path) and iid are required' });
+          }
+          const proj = encodeProject(project);
+          const payload = {};
+          if (args.squash != null) payload.squash = !!args.squash;
+          if (args.mergeCommitMessage) payload.merge_commit_message = String(args.mergeCommitMessage);
+          if (args.mergeWhenPipelineSucceeds != null) {
+            payload.merge_when_pipeline_succeeds = !!args.mergeWhenPipelineSucceeds;
+          }
+          try {
+            const mr = await glFetch(`/projects/${proj}/merge_requests/${iid}/merge`, {
+              method: 'PUT',
+              body: payload,
+            });
+            return JSON.stringify({
+              success: true,
+              merged: true,
+              sha: mr.merge_commit_sha ?? mr.sha ?? null,
+              iid: mr.iid ?? iid,
+              project: String(project),
+              provider: 'gitlab',
+              state: mr.state,
+            });
+          } catch (err) {
+            // glFetch throws `GitLab API <status>: <body>`. 405/406/404 are the
+            // expected "can't merge right now" class for a merge call.
+            const msg = String(err.message || err);
+            if (/GitLab API (405|406|404)/.test(msg)) {
+              return JSON.stringify({
+                success: false,
+                iid,
                 project: String(project),
                 provider: 'gitlab',
                 skippedReason: msg,
@@ -778,6 +840,21 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           description: { type: 'string', description: 'MR description (markdown)' },
         },
         required: ['project', 'source_branch', 'title'],
+      },
+    },
+    {
+      name: 'gitlab_accept_mr',
+      description: 'Accept (merge) a merge request on GitLab (PUT /projects/{id}/merge_requests/{iid}/merge). Optional squash, mergeCommitMessage, mergeWhenPipelineSucceeds. Returns { success:true, merged:true, sha } with the REAL merge_commit_sha from GitLab. Expected non-mergeable outcomes (405/406 = not mergeable / WIP / conflicts / pipeline not done, 404 = not found) return { success:false, skippedReason } rather than erroring.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          project: { type: 'string', description: 'Project numeric id OR full path (e.g. "group/repo")' },
+          iid: { type: 'number', description: 'Merge request iid (the per-project MR number in the URL)' },
+          squash: { type: 'boolean', description: 'Squash the MR commits into one on merge (optional)' },
+          mergeCommitMessage: { type: 'string', description: 'Custom merge commit message (optional)' },
+          mergeWhenPipelineSucceeds: { type: 'boolean', description: 'Merge automatically once the pipeline succeeds (optional)' },
+        },
+        required: ['project', 'iid'],
       },
     },
     {

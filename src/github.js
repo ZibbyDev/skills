@@ -77,6 +77,7 @@ You have access to the user's GitHub repositories. Available tools:
 - github_reply_issue_comment: Reply on the PR's top-level conversation (for non-inline/summary comments)
 - github_create_review: Post a review on a PR — a summary body plus optional inline comments on specific file/line positions, with an event (COMMENT, APPROVE, or REQUEST_CHANGES)
 - github_create_pr: OPEN a pull request (POST /repos/{owner}/{repo}/pulls). The branch must already be pushed. Returns the REAL pr_url from GitHub (never fabricate a PR url). Expected business errors (no commits between base and head, a PR already exists, base==head) come back as { success:false, skippedReason } — not a hard failure.
+- github_merge_pr: MERGE a pull request (PUT /repos/{owner}/{repo}/pulls/{number}/merge). mergeMethod is 'merge'|'squash'|'rebase' (default 'squash'). Returns { success:true, merged:true, sha } on a real merge. Expected non-mergeable cases (405 = draft / failing checks / not mergeable, 409 = head sha moved / conflict, 404) come back as { success:false, skippedReason } — not a hard failure.
 - github_create_issue: Create new issue
 - github_list_issues: List issues in a repo (filter by state/labels/since cursor) — excludes PRs
 - github_get_issue: Get a single issue's full detail (title, body, state, labels, assignee, url)
@@ -782,6 +783,64 @@ When user just wants to "look at" or "read" files (not clone):
           }
         }
 
+        case 'github_merge_pr': {
+          // MERGE a pull request. DETERMINISTIC provider-API call via ghFetch
+          // (the SAME GitHub OAuth/installation-token auth chokepoint every
+          // other github_* tool uses — no new auth) — so a reported merge SHA
+          // is the REAL one from GitHub's response, never fabricated.
+          //   PUT /repos/{owner}/{repo}/pulls/{number}/merge
+          //       { merge_method, commit_title?, commit_message? }
+          // mergeMethod selects the merge style ('merge' | 'squash' | 'rebase',
+          // default 'squash').
+          //
+          // Expected NON-FATAL outcomes (the PR simply can't be merged right
+          // now) are returned as { success:false, skippedReason } instead of
+          // throwing — these are normal "not mergeable yet" states, not failures:
+          //   - 405: PR not mergeable (draft, required checks/reviews failing,
+          //          branch protection not satisfied)
+          //   - 409: head sha moved since the merge was requested / merge conflict
+          //   - 404: PR (or repo) not found
+          // Genuine auth/transport errors (401/403/5xx/network) still throw
+          // (caught by the outer wrapper → { error }).
+          const { owner, repo, number } = args || {};
+          if (!owner || !repo || !number) {
+            return JSON.stringify({ error: 'owner, repo, and number are required' });
+          }
+          const method = args.mergeMethod || 'squash';
+          if (!['merge', 'squash', 'rebase'].includes(method)) {
+            return JSON.stringify({ error: `mergeMethod must be merge, squash, or rebase (got ${method})` });
+          }
+          const payload = { merge_method: method };
+          if (args.commitTitle) payload.commit_title = String(args.commitTitle);
+          if (args.commitMessage) payload.commit_message = String(args.commitMessage);
+          try {
+            const data = await ghFetch(`/repos/${owner}/${repo}/pulls/${number}/merge`, {
+              method: 'PUT',
+              body: payload,
+            });
+            return JSON.stringify({
+              success: true,
+              merged: true,
+              sha: data.sha,
+              number,
+              provider: 'github',
+            });
+          } catch (err) {
+            // ghFetch throws `GitHub API <status>: <body>` on non-2xx. 405/409/404
+            // are the expected "can't merge right now" class for a merge call.
+            const msg = String(err.message || err);
+            if (/GitHub API (405|409|404)/.test(msg)) {
+              return JSON.stringify({
+                success: false,
+                number,
+                provider: 'github',
+                skippedReason: msg,
+              });
+            }
+            throw err; // genuine auth/transport error → outer wrapper → { error }
+          }
+        }
+
         case 'github_create_issue': {
           const { owner, repo, title, body } = args;
           if (!owner || !repo || !title) return JSON.stringify({ error: 'owner, repo, and title are required' });
@@ -1207,6 +1266,22 @@ When user just wants to "look at" or "read" files (not clone):
           draft: { type: 'boolean', description: 'Open as a draft PR (default: false)' },
         },
         required: ['owner', 'repo', 'head', 'title'],
+      },
+    },
+    {
+      name: 'github_merge_pr',
+      description: 'Merge a pull request on GitHub (PUT /repos/{owner}/{repo}/pulls/{number}/merge). mergeMethod is merge | squash | rebase (default squash). Returns { success:true, merged:true, sha } with the REAL merge SHA from GitHub. Expected non-mergeable outcomes (405 = draft / failing checks / branch protection, 409 = head sha moved / conflict, 404 = not found) return { success:false, skippedReason } rather than erroring.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          number: { type: 'number', description: 'PR number to merge' },
+          mergeMethod: { type: 'string', enum: ['merge', 'squash', 'rebase'], description: 'How to merge (default: squash)' },
+          commitTitle: { type: 'string', description: 'Title for the merge/squash commit (optional)' },
+          commitMessage: { type: 'string', description: 'Body for the merge/squash commit (optional)' },
+        },
+        required: ['owner', 'repo', 'number'],
       },
     },
     {
