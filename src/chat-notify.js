@@ -60,24 +60,37 @@ export const chatNotifySkill = {
   //   LARK_RECEIVE_ID set → 'lark' + lark's allowedTools
   // The agent only ever sees ONE provider's server, so its serverName +
   // allowedTools + resolve() all agree.
+  // Provider pick — backward-compatible + a new "channel via instructions"
+  // path. Order:
+  //   1. explicit SLACK_CHANNEL  → slack (default channel baked in)
+  //   2. explicit LARK_RECEIVE_ID → lark
+  //   3. SLACK_BOT_TOKEN present (= Slack INTEGRATION connected, token
+  //      injected by the executor) → slack, EVEN WITHOUT SLACK_CHANNEL. The
+  //      agent supplies the channel in its slack_post_message call (e.g. from
+  //      a per-node custom prompt: "post the digest to #bla"). Lark has no
+  //      injected env signal (it resolves its token at resolve() time), so it
+  //      stays gated on the explicit LARK_RECEIVE_ID.
   get serverName() {
     if (process.env.SLACK_CHANNEL) return slackSkill.serverName;
     if (process.env.LARK_RECEIVE_ID) return larkSkill.serverName;
-    // Neither configured → resolve() returns null too, so no server is
-    // registered; the undefined here is never used as a map key.
+    if (process.env.SLACK_BOT_TOKEN) return slackSkill.serverName;
     return undefined;
   },
   get allowedTools() {
     if (process.env.SLACK_CHANNEL) return slackSkill.allowedTools || [];
     if (process.env.LARK_RECEIVE_ID) return larkSkill.allowedTools || [];
+    if (process.env.SLACK_BOT_TOKEN) return slackSkill.allowedTools || [];
     return [];
   },
 
   promptFragment: `## Chat notifications (Slack OR Lark — at least one connected)
-You can post chat messages via either:
-- slack_post_message (channel, text)      — Slack, when SLACK_CHANNEL is set
-- lark_send_message  (receive_id, text)   — Lark, when LARK_RECEIVE_ID is set
-Use whichever the user has configured.`,
+You can post chat messages via:
+- slack_post_message (channel, text[, blocks]) — Slack. The \`channel\` is REQUIRED on every call.
+- lark_send_message  (receive_id, text)        — Lark.
+Where to post:
+- If SLACK_CHANNEL / LARK_RECEIVE_ID is set, that is the default destination — use it.
+- If NO destination env var is set but your instructions name a channel (e.g. "post to #bla"), post to THAT channel — pass it as the \`channel\` arg (a "#name" or "C0123" id both work).
+- If neither an env var NOR an instruction gives you a channel, do NOT post — there is nowhere to send it.`,
 
   /**
    * Runtime MCP server selection. Picks the provider whose env var
@@ -91,6 +104,11 @@ Use whichever the user has configured.`,
     }
     if (process.env.LARK_RECEIVE_ID && typeof larkSkill.resolve === 'function') {
       return larkSkill.resolve(ctx);
+    }
+    // Slack connected (token injected) but no SLACK_CHANNEL — expose slack so
+    // the agent can post to a channel named in its instructions/custom prompt.
+    if (process.env.SLACK_BOT_TOKEN && typeof slackSkill.resolve === 'function') {
+      return slackSkill.resolve(ctx);
     }
     return null;
   },
