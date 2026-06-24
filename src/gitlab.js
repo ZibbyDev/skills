@@ -174,6 +174,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
 - gitlab_clone: Clone a project locally (shallow, auto-authenticated) to read code OUTSIDE the MR diff — callers, shared types, an existing util, or a cross-repo dependency. After cloning, use Grep/Glob/Read on the returned path. Clone SPARINGLY (only when correctness needs context beyond the diff).
 
 ### Merge requests
+- gitlab_create_mr: OPEN a merge request (POST /projects/{id}/merge_requests). The source_branch must already be pushed. Returns the REAL pr_url (the MR's web_url) from GitLab — never fabricate it. Expected business errors (no changes between branches, an MR already exists, source==target) come back as { success:false, skippedReason } — not a hard failure.
 - gitlab_get_mr: Get an MR's details (title, description, author, source/target branch, state, web url, diff_refs)
 - gitlab_get_mr_changes: Get the MR's changed files with per-file diffs — THIS is the code to review
 - gitlab_list_mrs: List a project's merge requests (filter by state: opened|closed|merged|all)
@@ -278,6 +279,78 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
             // Never leak the token in an error string.
             const safe = String(err.message || err).split(token).join('***');
             return JSON.stringify({ error: `Clone failed: ${safe}` });
+          }
+        }
+
+        case 'gitlab_create_mr': {
+          // OPEN a merge request. DETERMINISTIC provider-API call via glFetch
+          // (the same PRIVATE-TOKEN/OAuth auth chokepoint every other gitlab_*
+          // tool uses) — so the returned pr_url is a REAL GitLab url
+          // (response.web_url), never one the agent invents.
+          //   POST /projects/{id}/merge_requests { source_branch, target_branch,
+          //                                        title, description }
+          // `project` is the numeric id OR the "group/repo" path (encodeProject
+          // handles both). `source_branch` must already be pushed; `target_branch`
+          // defaults to the project's default branch (looked up when omitted).
+          //
+          // Expected BUSINESS errors are returned as { success:false,
+          // skippedReason } instead of throwing — these are normal "nothing to
+          // open" outcomes, not failures:
+          //   - 409: an MR for this source/target already exists
+          //   - 400: source == target, branch missing, or no changes
+          // Genuine auth/transport errors (401/403/5xx/network) still throw
+          // (caught by the outer wrapper → { error }).
+          const project = args?.project ?? args?.projectId;
+          const sourceBranch = args?.source_branch ?? args?.sourceBranch;
+          const { title } = args || {};
+          if (!project || !sourceBranch || !title) {
+            return JSON.stringify({ error: 'project (id or "group/repo" path), source_branch, and title are required' });
+          }
+          const proj = encodeProject(project);
+          // Default target to the project's default branch when not supplied.
+          let targetBranch = args?.target_branch ?? args?.targetBranch;
+          if (!targetBranch) {
+            try {
+              const info = await glFetch(`/projects/${proj}`);
+              targetBranch = info.default_branch || 'main';
+            } catch {
+              targetBranch = 'main';
+            }
+          }
+          const payload = {
+            source_branch: String(sourceBranch),
+            target_branch: String(targetBranch),
+            title: String(title),
+            description: args?.description ? String(args.description) : '',
+          };
+          try {
+            const mr = await glFetch(`/projects/${proj}/merge_requests`, { method: 'POST', body: payload });
+            return JSON.stringify({
+              success: true,
+              pr_url: mr.web_url,
+              number: mr.iid,
+              branch: payload.source_branch,
+              targetBranch: payload.target_branch,
+              project: String(project),
+              provider: 'gitlab',
+              state: mr.state,
+            });
+          } catch (err) {
+            // glFetch throws `GitLab API <status>: <body>`. 409 (MR already
+            // exists) and 400 (source==target / branch missing / no changes) are
+            // the expected-business class for MR creation.
+            const msg = String(err.message || err);
+            if (/GitLab API (409|400)/.test(msg)) {
+              return JSON.stringify({
+                success: false,
+                branch: payload.source_branch,
+                targetBranch: payload.target_branch,
+                project: String(project),
+                provider: 'gitlab',
+                skippedReason: msg,
+              });
+            }
+            throw err; // genuine auth/transport error → outer wrapper → { error }
           }
         }
 
@@ -690,6 +763,21 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           branch: { type: 'string', description: 'Branch to clone (default: the repo default branch).' },
           destination: { type: 'string', description: 'Destination dir (default: <workspace>/.zibby/repos/<repo>).' },
         },
+      },
+    },
+    {
+      name: 'gitlab_create_mr',
+      description: 'Open a merge request on GitLab (POST /projects/{id}/merge_requests). The source_branch must already be pushed. Returns the REAL pr_url (the MR web_url) from GitLab — never fabricate it. Expected business outcomes (no changes between branches, an MR already exists, source==target) return { success:false, skippedReason } rather than erroring.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          project: { type: 'string', description: 'Project numeric id OR full path (e.g. "group/repo")' },
+          source_branch: { type: 'string', description: 'Source branch to merge FROM (must already be pushed)' },
+          target_branch: { type: 'string', description: 'Target branch to merge INTO (default: the project\'s default branch)' },
+          title: { type: 'string', description: 'MR title' },
+          description: { type: 'string', description: 'MR description (markdown)' },
+        },
+        required: ['project', 'source_branch', 'title'],
       },
     },
     {

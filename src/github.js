@@ -76,6 +76,7 @@ You have access to the user's GitHub repositories. Available tools:
 - github_reply_review_thread: Reply IN-THREAD to an existing review-comment thread (conversational reply, not a new review)
 - github_reply_issue_comment: Reply on the PR's top-level conversation (for non-inline/summary comments)
 - github_create_review: Post a review on a PR — a summary body plus optional inline comments on specific file/line positions, with an event (COMMENT, APPROVE, or REQUEST_CHANGES)
+- github_create_pr: OPEN a pull request (POST /repos/{owner}/{repo}/pulls). The branch must already be pushed. Returns the REAL pr_url from GitHub (never fabricate a PR url). Expected business errors (no commits between base and head, a PR already exists, base==head) come back as { success:false, skippedReason } — not a hard failure.
 - github_create_issue: Create new issue
 - github_list_issues: List issues in a repo (filter by state/labels/since cursor) — excludes PRs
 - github_get_issue: Get a single issue's full detail (title, body, state, labels, assignee, url)
@@ -712,6 +713,75 @@ When user just wants to "look at" or "read" files (not clone):
           return JSON.stringify({ count: mappedRepos.length, repos: mappedRepos, truncated });
         }
 
+        case 'github_create_pr': {
+          // OPEN a pull request. DETERMINISTIC provider-API call via ghFetch
+          // (the same GitHub OAuth/installation-token auth path every other
+          // github_* tool uses) — so the returned pr_url is a REAL GitHub url
+          // (response.html_url), never one the agent invents.
+          //   POST /repos/{owner}/{repo}/pulls  { title, head, base, body, draft }
+          // `head` is the source branch (already pushed); `base` is the target
+          // (defaults to the repo's default branch, looked up when omitted).
+          //
+          // Expected BUSINESS errors (GitHub returns 422 for: no commits between
+          // base and head, a PR for this head already exists, base == head, or
+          // the head branch doesn't exist) are returned as
+          //   { success:false, skippedReason }
+          // instead of throwing — these are normal "nothing to open" outcomes, not
+          // failures. Genuine auth/transport errors (401/403/5xx/network) still
+          // throw (caught by the outer wrapper → { error }).
+          const { owner, repo, head, title } = args || {};
+          if (!owner || !repo || !head || !title) {
+            return JSON.stringify({ error: 'owner, repo, head (source branch), and title are required' });
+          }
+          // Default base to the repo's default branch when not supplied.
+          let base = args.base;
+          if (!base) {
+            try {
+              const repoInfo = await ghFetch(`/repos/${owner}/${repo}`);
+              base = repoInfo.default_branch || 'main';
+            } catch {
+              base = 'main';
+            }
+          }
+          const payload = {
+            title: String(title),
+            head: String(head),
+            base: String(base),
+            body: args.body ? String(args.body) : '',
+            draft: !!args.draft,
+          };
+          try {
+            const pr = await ghFetch(`/repos/${owner}/${repo}/pulls`, { method: 'POST', body: payload });
+            return JSON.stringify({
+              success: true,
+              pr_url: pr.html_url,
+              number: pr.number,
+              branch: head,
+              base,
+              repo: `${owner}/${repo}`,
+              provider: 'github',
+              draft: !!pr.draft,
+              state: pr.state,
+            });
+          } catch (err) {
+            // ghFetch throws `GitHub API <status>: <body>` on non-2xx. A 422 is
+            // GitHub's "unprocessable" — the expected-business class for pull
+            // creation (no commits / already exists / same branch / missing head).
+            const msg = String(err.message || err);
+            if (/GitHub API 422/.test(msg)) {
+              return JSON.stringify({
+                success: false,
+                branch: head,
+                base,
+                repo: `${owner}/${repo}`,
+                provider: 'github',
+                skippedReason: msg,
+              });
+            }
+            throw err; // genuine auth/transport error → outer wrapper → { error }
+          }
+        }
+
         case 'github_create_issue': {
           const { owner, repo, title, body } = args;
           if (!owner || !repo || !title) return JSON.stringify({ error: 'owner, repo, and title are required' });
@@ -1120,6 +1190,23 @@ When user just wants to "look at" or "read" files (not clone):
           ref: { type: 'string', description: 'Branch, tag, or commit SHA (default: repo default branch)' },
         },
         required: ['owner', 'repo', 'path'],
+      },
+    },
+    {
+      name: 'github_create_pr',
+      description: 'Open a pull request on GitHub (POST /repos/{owner}/{repo}/pulls). The head (source) branch must already be pushed. Returns the REAL pr_url from GitHub — never fabricate a PR url. Expected business outcomes (no commits between base and head, a PR already exists for this branch, base==head, missing head) return { success:false, skippedReason } rather than erroring.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: 'Repository owner' },
+          repo: { type: 'string', description: 'Repository name' },
+          head: { type: 'string', description: 'Source branch to merge FROM (must already be pushed). For a cross-fork PR use "fork-owner:branch".' },
+          base: { type: 'string', description: 'Target branch to merge INTO (default: the repo\'s default branch)' },
+          title: { type: 'string', description: 'PR title' },
+          body: { type: 'string', description: 'PR description (markdown)' },
+          draft: { type: 'boolean', description: 'Open as a draft PR (default: false)' },
+        },
+        required: ['owner', 'repo', 'head', 'title'],
       },
     },
     {
