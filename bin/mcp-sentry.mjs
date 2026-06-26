@@ -31,7 +31,7 @@ import { z } from 'zod';
 // Sentry endpoint = one edit in src/sentry.js, not three. Deterministic
 // workflow nodes import the same functions for cost-optimized fetches
 // that skip the LLM entirely.
-import { sentryListProjects, sentryListIssues, sentryGetIssue } from '../dist/sentry.js';
+import { sentryListProjects, sentryListIssues, sentryGetIssue, sentryUpdateIssue, sentryAddComment } from '../dist/sentry.js';
 
 const server = new McpServer(
   { name: 'zibby-sentry', version: '1.0.0' },
@@ -121,10 +121,67 @@ server.registerTool(
   },
 );
 
+// ── sentry_update_issue ─────────────────────────────────────────────
+server.registerTool(
+  'sentry_update_issue',
+  {
+    title: 'Update Sentry Issue',
+    description: "Update a Sentry issue's status (resolved | resolvedInNextRelease | unresolved | ignored | muted), assignment, or bookmark. Requires the connected Sentry integration to have the event:write scope.",
+    inputSchema: z.object({
+      issueId: z.string().describe('Sentry issue ID'),
+      status: z.string().optional().describe('resolved | resolvedInNextRelease | unresolved | ignored | muted'),
+      statusDetails: z.object({}).passthrough().optional().describe('Optional status details, e.g. { "inRelease": "latest" }'),
+      assignedTo: z.string().optional().describe('Assignee actor id, e.g. "user:123" or "team:456"'),
+      isBookmarked: z.boolean().optional().describe('Bookmark/unbookmark the issue'),
+      hasSeen: z.boolean().optional().describe('Mark the issue seen/unseen'),
+    }),
+  },
+  async (args = {}) => {
+    try {
+      const data = await sentryUpdateIssue(args.issueId, {
+        status: args.status,
+        statusDetails: args.statusDetails,
+        assignedTo: args.assignedTo,
+        isBookmarked: args.isBookmarked,
+        hasSeen: args.hasSeen,
+      });
+      const text = JSON.stringify({
+        ok: true, id: data.id ?? args.issueId, status: data.status,
+        assignedTo: data.assignedTo, isBookmarked: data.isBookmarked,
+      });
+      return { content: [{ type: 'text', text }] };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+    }
+  },
+);
+
+// ── sentry_add_comment ──────────────────────────────────────────────
+server.registerTool(
+  'sentry_add_comment',
+  {
+    title: 'Comment on a Sentry Issue',
+    description: 'Post a comment/note on a Sentry issue. Requires the connected Sentry integration to have the event:write scope.',
+    inputSchema: z.object({
+      issueId: z.string().describe('Sentry issue ID'),
+      text: z.string().describe('Comment body (markdown)'),
+    }),
+  },
+  async (args = {}) => {
+    try {
+      const data = await sentryAddComment(args.issueId, args.text);
+      const text = JSON.stringify({ ok: true, id: data.id, issueId: args.issueId });
+      return { content: [{ type: 'text', text }] };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+    }
+  },
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
 // Tiny diagnostic line on stderr so operators can confirm the MCP
 // server actually started. stdout is reserved for MCP JSON-RPC; only
 // stderr is safe for human-readable logs.
-console.error('[mcp-sentry] connected (3 tools: sentry_list_projects, sentry_list_issues, sentry_get_issue)');
+console.error('[mcp-sentry] connected (5 tools: sentry_list_projects, sentry_list_issues, sentry_get_issue, sentry_update_issue, sentry_add_comment)');

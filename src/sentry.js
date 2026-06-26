@@ -60,10 +60,17 @@ function resolveSentryBin() {
 export async function sentryFetch(path, opts = {}) {
   const { token, organizationSlug } = await resolveIntegrationToken('sentry');
   const url = `https://sentry.io/api/0/organizations/${organizationSlug}${path}`;
-  const res = await fetch(url, {
+  // Forward a JSON body for write calls. We accept either an already-serialized
+  // string or a plain object (serialized here) — so callers can pass `{ body: {…} }`
+  // for PUT/POST without remembering to JSON.stringify. GET stays body-less.
+  const init = {
     method: opts.method || 'GET',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  });
+  };
+  if (opts.body != null) {
+    init.body = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
+  }
+  const res = await fetch(url, init);
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`Sentry API ${res.status}: ${err.slice(0, 300)}`);
@@ -115,6 +122,90 @@ export async function sentryGetIssue(issueId) {
   return res.json();
 }
 
+/**
+ * WRITE-back to a Sentry issue. Mutates issue STATE (resolve / ignore / mute /
+ * reopen), assignment, bookmark, or seen-flag via the global
+ * `PUT /issues/<id>/` endpoint (NOT org-scoped — issues route by id, same as
+ * sentryGetIssue). Only the fields you pass are sent.
+ *
+ * Common uses:
+ *   sentryUpdateIssue(id, { status: 'resolvedInNextRelease' })  // leaves the
+ *     is:unresolved queue, regresses only if it recurs in a LATER release
+ *   sentryUpdateIssue(id, { status: 'resolved', statusDetails: { inRelease: 'latest' } })
+ *   sentryUpdateIssue(id, { status: 'ignored' })
+ *   sentryUpdateIssue(id, { assignedTo: 'user:123' })
+ *
+ * @param {string} issueId
+ * @param {{ status?: 'resolved'|'resolvedInNextRelease'|'unresolved'|'ignored'|'muted',
+ *           statusDetails?: object, assignedTo?: string, isBookmarked?: boolean,
+ *           hasSeen?: boolean }} update
+ *
+ * Requires the connected Sentry integration's token to carry the `event:write`
+ * scope. A 403 → a CLEAR error telling the operator the Sentry connection likely
+ * lacks write scope and must be reconnected with it.
+ */
+export async function sentryUpdateIssue(issueId, update = {}) {
+  if (!issueId) throw new Error('sentryUpdateIssue: issueId is required');
+  // Only forward the fields the caller actually set — Sentry treats a present
+  // key as "change this", so an undefined must never leak into the body.
+  const body = {};
+  for (const k of ['status', 'statusDetails', 'assignedTo', 'isBookmarked', 'hasSeen']) {
+    if (update[k] !== undefined) body[k] = update[k];
+  }
+  if (Object.keys(body).length === 0) {
+    throw new Error('sentryUpdateIssue: nothing to update (pass status / statusDetails / assignedTo / isBookmarked / hasSeen)');
+  }
+  const { token } = await resolveIntegrationToken('sentry');
+  const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    if (res.status === 403) {
+      throw new Error(
+        `Sentry API 403 updating issue ${issueId}: ${err.slice(0, 200)}. The connected Sentry `
+        + 'integration likely lacks the `event:write` scope — reconnect Sentry with write access '
+        + 'to let Zibby resolve/comment on issues.',
+      );
+    }
+    throw new Error(`Sentry API ${res.status} updating issue ${issueId}: ${err.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+/**
+ * Post a comment ("note") on a Sentry issue via
+ * `POST /issues/<id>/comments/`. Same global-issue endpoint + token as
+ * sentryGetIssue / sentryUpdateIssue, and the same `event:write`-scope 403 →
+ * clear-error contract.
+ *
+ * @param {string} issueId
+ * @param {string} text  the comment body (Sentry markdown)
+ */
+export async function sentryAddComment(issueId, text) {
+  if (!issueId) throw new Error('sentryAddComment: issueId is required');
+  if (!text || !String(text).trim()) throw new Error('sentryAddComment: text is required');
+  const { token } = await resolveIntegrationToken('sentry');
+  const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/comments/`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: String(text) }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    if (res.status === 403) {
+      throw new Error(
+        `Sentry API 403 commenting on issue ${issueId}: ${err.slice(0, 200)}. The connected Sentry `
+        + 'integration likely lacks the `event:write` scope — reconnect Sentry with write access.',
+      );
+    }
+    throw new Error(`Sentry API ${res.status} commenting on issue ${issueId}: ${err.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
 export const sentrySkill = {
   id: 'sentry',
   serverName: 'sentry',                  // MCP server name; tools appear as mcp__sentry__<tool>
@@ -133,7 +224,9 @@ export const sentrySkill = {
 You have access to the user's Sentry. Use these tools:
 - sentry_list_projects: List projects in the organization
 - sentry_list_issues: List errors/issues (supports Sentry search query, project filter, sort)
-- sentry_get_issue: Get detailed info about a specific issue (requires issueId)`,
+- sentry_get_issue: Get detailed info about a specific issue (requires issueId)
+- sentry_update_issue: Change an issue's status (resolved / resolvedInNextRelease / ignored / unresolved / muted), assignment, or bookmark (requires issueId; needs write scope)
+- sentry_add_comment: Post a comment/note on an issue (requires issueId + text; needs write scope)`,
 
   resolve() {
     const bin = resolveSentryBin();
@@ -211,6 +304,23 @@ You have access to the user's Sentry. Use these tools:
             project: { slug: data.project?.slug, name: data.project?.name },
           });
         }
+        case 'sentry_update_issue': {
+          const data = await sentryUpdateIssue(args.issueId, {
+            status: args.status,
+            statusDetails: args.statusDetails,
+            assignedTo: args.assignedTo,
+            isBookmarked: args.isBookmarked,
+            hasSeen: args.hasSeen,
+          });
+          return JSON.stringify({
+            ok: true, id: data.id ?? args.issueId, status: data.status,
+            assignedTo: data.assignedTo, isBookmarked: data.isBookmarked,
+          });
+        }
+        case 'sentry_add_comment': {
+          const data = await sentryAddComment(args.issueId, args.text);
+          return JSON.stringify({ ok: true, id: data.id, issueId: args.issueId });
+        }
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -243,6 +353,34 @@ You have access to the user's Sentry. Use these tools:
         type: 'object',
         properties: { issueId: { type: 'string', description: 'Sentry issue ID' } },
         required: ['issueId'],
+      },
+    },
+    {
+      name: 'sentry_update_issue',
+      description: "Update a Sentry issue's status, assignment, or bookmark (needs event:write scope)",
+      input_schema: {
+        type: 'object',
+        properties: {
+          issueId: { type: 'string', description: 'Sentry issue ID' },
+          status: { type: 'string', description: 'resolved | resolvedInNextRelease | unresolved | ignored | muted' },
+          statusDetails: { type: 'object', description: 'Optional status details, e.g. { "inRelease": "latest" }' },
+          assignedTo: { type: 'string', description: 'Assignee actor id, e.g. "user:123" or "team:456" (optional)' },
+          isBookmarked: { type: 'boolean', description: 'Bookmark/unbookmark the issue (optional)' },
+          hasSeen: { type: 'boolean', description: 'Mark the issue seen/unseen (optional)' },
+        },
+        required: ['issueId'],
+      },
+    },
+    {
+      name: 'sentry_add_comment',
+      description: 'Post a comment/note on a Sentry issue (needs event:write scope)',
+      input_schema: {
+        type: 'object',
+        properties: {
+          issueId: { type: 'string', description: 'Sentry issue ID' },
+          text: { type: 'string', description: 'Comment body (markdown)' },
+        },
+        required: ['issueId', 'text'],
       },
     },
   ],
