@@ -28,6 +28,7 @@ import { gitSkill } from './git.js';
 import { gitWriteSkill } from './git-write.js';
 import { chatMemorySkill } from './chat-memory.js';
 import { kvMemorySkill } from './kvMemory.js';
+import { datasetStoreSkill } from './datasetStore.js';
 import { codebaseMemorySkill } from './codebaseMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
 import {
@@ -57,6 +58,7 @@ registerSkill(skillInstallerSkill);
 registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
 registerSkill(kvMemorySkill);
+registerSkill(datasetStoreSkill);
 registerSkill(codebaseMemorySkill);
 registerSkill(workflowBuilderSkill);
 registerSkill(openaiBillingSkill);
@@ -97,6 +99,14 @@ export const SKILLS = {
   CORE_TOOLS: 'core-tools',
   CHAT_MEMORY: 'chat-memory',
   KV_MEMORY: 'kv-memory',
+  // `dataset-store` — durable, queryable structured-record store (append rows,
+  // run SQL-style aggregations later for reports). Auths with the run's OWN
+  // project token (getSessionToken Bearer) → UNGATED, like kv-memory
+  // (intentionally absent from backend skill-integrations maps). Opt-in: it is
+  // NOT alwaysLoad — activates ONLY when a node declares it via skills:[...],
+  // so existing agents are unaffected. The id MUST match the skill's registered
+  // id ('dataset-store'). Backed by datasetStoreSkill.
+  DATASET_STORE: 'dataset-store',
   // `codebase-memory` — code-graph + semantic index over the checked-out repo,
   // backed by the DeusData/codebase-memory-mcp binary BAKED INTO the agent
   // image. Fully local → UNGATED (no integration token; intentionally absent
@@ -111,7 +121,7 @@ export const SKILLS = {
   CURSOR_ADMIN: 'cursor_admin',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, notionSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
