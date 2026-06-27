@@ -121,6 +121,45 @@ async function datasetFetch(dataset, action, payload) {
   return res.json();
 }
 
+/**
+ * The store allowlist for this run, parsed from ZIBBY_STORES (comma-joined ids
+ * injected by the workflow-executor for a node that declares `stores:[...]`).
+ * Returns null when unset/empty (no gating — backward-compatible). Helper kept
+ * pure so handleToolCall can fast-fail BEFORE any network call.
+ */
+function storeAllowlist() {
+  const raw = typeof process.env.ZIBBY_STORES === 'string' ? process.env.ZIBBY_STORES.trim() : '';
+  if (!raw) return null;
+  const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
+  return ids.length ? ids : null;
+}
+
+/**
+ * POST {base}/datasets/stores/{storeId}/{action} with `payload`. The store-id
+ * addressing variant of datasetFetch — resolves to the live store backend
+ * (GET/POST /datasets/stores/{storeId}/...). Same auth + error shape.
+ */
+async function storeFetch(storeId, action, payload) {
+  const session = getSessionToken();
+  if (!session) {
+    throw new Error('No backend credential (PROJECT_API_TOKEN). Dataset store is only available inside a Zibby run.');
+  }
+  const url = `${getAccountApiUrl()}/datasets/stores/${encodeURIComponent(storeId)}/${action}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${session}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Store ${action} failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
 export const datasetStoreSkill = {
   id: 'dataset-store',
   serverName: 'dataset_store',
@@ -133,7 +172,9 @@ stateless runs. Unlike key-value memory (for picking up where you left off),
 this is for accumulating DATA you want to QUERY and AGGREGATE later — e.g.
 per-run metrics, processed items, findings — and turn into a report.
 
-Records are grouped by a named \`dataset\` (your choice, e.g. "scout-metrics").
+If your node has provisioned stores, an "AVAILABLE STORES" list appears below —
+pick one BY DESCRIPTION and pass its \`storeId\` to the tools. Otherwise records
+are grouped by a named \`dataset\` (your choice, e.g. "scout-metrics").
 Each appended record is an arbitrary JSON object and is auto-tagged with YOUR
 agent type, so you can later filter to just your own writes.
 
@@ -160,6 +201,9 @@ Tools:
       'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'ZIBBY_USER_TOKEN',
       // The namespace source. Forwarded only when set; absent → 'agent' fallback.
       'WORKFLOW_TYPE',
+      // The node's store allowlist (comma-joined ids). Forwarded only when set,
+      // so a node without `stores` gets no ZIBBY_STORES → no gating (no-op).
+      'ZIBBY_STORES',
     ]) {
       if (process.env[key]) env[key] = process.env[key];
     }
@@ -178,28 +222,63 @@ Tools:
 
   async handleToolCall(name, args) {
     try {
+      // Resolve the target: a `store`/`storeId` arg (new, store-id addressed)
+      // takes precedence over the legacy `dataset` name path. Returns one of:
+      //   { storeId }          — hit /datasets/stores/{storeId}/...
+      //   { dataset }          — legacy /datasets/{dataset}/...
+      //   { error }            — fast-fail (allowlist reject / missing target)
+      // ALLOWLIST GATE: when ZIBBY_STORES is set, a storeId outside it is
+      // rejected BEFORE any backend call. Guarded: ZIBBY_STORES unset → no
+      // gating, so existing dataset-name callers are unaffected.
+      const resolveTarget = () => {
+        let storeId = typeof args?.storeId === 'string' ? args.storeId.trim()
+                    : typeof args?.store === 'string' ? args.store.trim()
+                    : '';
+        const allow = storeAllowlist();
+        // Single-store convenience: if exactly one store is allowlisted and the
+        // caller omitted a storeId, default to it.
+        if (!storeId && allow && allow.length === 1) storeId = allow[0];
+        if (storeId) {
+          if (allow && !allow.includes(storeId)) {
+            return { error: `storeId '${storeId}' is not in this node's store allowlist (${allow.join(', ')})` };
+          }
+          return { storeId };
+        }
+        const dataset = typeof args?.dataset === 'string' ? args.dataset.trim() : '';
+        if (dataset) return { dataset };
+        return { error: 'a storeId (or legacy dataset name) is required' };
+      };
+
       switch (name) {
         case 'dataset_append': {
-          const dataset = typeof args?.dataset === 'string' ? args.dataset.trim() : '';
-          if (!dataset) return JSON.stringify({ error: 'dataset is required' });
           if (args?.record == null || typeof args.record !== 'object' || Array.isArray(args.record)) {
             return JSON.stringify({ error: 'record is required (a JSON object)' });
           }
+          const target = resolveTarget();
+          if (target.error) return JSON.stringify({ error: target.error });
           const agent = typeof args?.agent === 'string' && args.agent.trim() ? args.agent.trim() : agentNamespace();
-          const data = await datasetFetch(dataset, 'append', { record: args.record, agent });
+          if (target.storeId) {
+            const data = await storeFetch(target.storeId, 'append', { record: args.record, agent });
+            return JSON.stringify({ ...data, storeId: target.storeId });
+          }
+          const data = await datasetFetch(target.dataset, 'append', { record: args.record, agent });
           return JSON.stringify(data);
         }
 
         case 'dataset_query': {
-          const dataset = typeof args?.dataset === 'string' ? args.dataset.trim() : '';
-          if (!dataset) return JSON.stringify({ error: 'dataset is required' });
+          const target = resolveTarget();
+          if (target.error) return JSON.stringify({ error: target.error });
           // Pass the DSL straight through; the backend validates it. Only
           // forward keys that were actually provided.
           const payload = {};
           for (const key of ['select', 'where', 'groupBy', 'orderBy', 'limit', 'since', 'until', 'agent']) {
             if (args?.[key] != null) payload[key] = args[key];
           }
-          const data = await datasetFetch(dataset, 'query', payload);
+          if (target.storeId) {
+            const data = await storeFetch(target.storeId, 'query', payload);
+            return JSON.stringify({ ...data, storeId: target.storeId });
+          }
+          const data = await datasetFetch(target.dataset, 'query', payload);
           return JSON.stringify(data);
         }
 
@@ -218,11 +297,12 @@ Tools:
       input_schema: {
         type: 'object',
         properties: {
-          dataset: { type: 'string', description: 'The dataset name to append to (your choice, e.g. "scout-metrics"). Records with the same dataset name are queried together.' },
+          storeId: { type: 'string', description: 'A provisioned store id (from AVAILABLE STORES — pick by description). Preferred. If your node has exactly one store, you may omit this and it defaults to that store.' },
+          dataset: { type: 'string', description: 'Legacy: an ad-hoc dataset name (your choice, e.g. "scout-metrics"). Use `storeId` when a store is provisioned; only use `dataset` when no store is available.' },
           record: { type: 'object', description: 'An arbitrary JSON object — one row of data. Its keys become queryable fields (e.g. {"repo":"owner/x","stars":1200}).' },
           agent: { type: 'string', description: 'Optional writing-agent tag. Defaults to your own agent type — leave unset to auto-tag.' },
         },
-        required: ['dataset', 'record'],
+        required: ['record'],
       },
     },
     {
@@ -231,7 +311,8 @@ Tools:
       input_schema: {
         type: 'object',
         properties: {
-          dataset: { type: 'string', description: 'The dataset name to query (same name you appended under).' },
+          storeId: { type: 'string', description: 'A provisioned store id (from AVAILABLE STORES — pick by description). Preferred. If your node has exactly one store, you may omit this and it defaults to that store.' },
+          dataset: { type: 'string', description: 'Legacy: the ad-hoc dataset name you appended under. Use `storeId` when a store is provisioned.' },
           select: {
             type: 'array',
             description: 'Columns to return. Each item is { field?, agg?, as? }. agg ∈ count|sum|avg|min|max; omit field for count(*). Omit `select` entirely to return raw rows.',
@@ -253,7 +334,7 @@ Tools:
           until: { type: 'string', description: "Inclusive upper bound month, 'yyyy-MM' (e.g. '2026-06')." },
           agent: { type: 'string', description: 'Filter to records written by one agent namespace. Omit to query across all writers.' },
         },
-        required: ['dataset'],
+        required: [],
       },
     },
   ],
