@@ -8,20 +8,29 @@
  * `resolve()` that spawns the GENERIC bin/mcp-skill.mjs. Unlike kv-memory (a
  * key→value MEMORY for picking up where a prior run left off), this is a durable
  * STRUCTURED-RECORD store: an agent appends arbitrary JSON records to a named
- * dataset and later runs SQL-style queries/aggregations over them — e.g. to
+ * store and later runs SQL-style queries/aggregations over them — e.g. to
  * accumulate metrics across runs and produce a report.
+ *
+ * STORES v2 — NAME-BASED RESOLUTION (the shared contract)
+ * ────────────────────────────────────────────────────────
+ * Stores are auto-provisioned at DEPLOY and resolved at runtime BY NAME via env:
+ *   - The run carries one `ZIBBY_STORE__<name> = <storeId>` per bound store.
+ *   - The agent reads the injected "AVAILABLE STORES" prompt catalog (name +
+ *     description), picks one, and passes the chosen logical `name` to the tool.
+ *   - This name→storeId env map is BOTH the allowlist AND the resolver: the
+ *     agent can only ever write to a declared/bound name (anti-fragmentation).
  *
  * BACKEND (already built — NO change here)
  * ─────────────────────────────────────────
  * Two routes on the SAME base URL kv-memory uses (getAccountApiUrl(), prod
  * https://api-prod.zibby.app), authed with the SAME Bearer project token
  * (getSessionToken()):
- *   - POST {base}/datasets/{dataset}/append  body { record, agent }
- *       → { ok, id, dataset, ts }
- *   - POST {base}/datasets/{dataset}/query   body { select?, where?, groupBy?,
- *       orderBy?, limit?, since?, until?, agent? }
- *       → { ok, dataset, rowCount, columns, rows }
- * The `dataset` lives in the URL path. Tenancy (account + project) is enforced
+ *   - POST {base}/datasets/stores/{storeId}/append  body { record, agent }
+ *       → { ok, id, ts }
+ *   - POST {base}/datasets/stores/{storeId}/query   body { select?, where?,
+ *       groupBy?, orderBy?, limit?, since?, until?, agent? }
+ *       → { ok, rowCount, columns, rows }
+ * The `storeId` lives in the URL path. Tenancy (account + project) is enforced
  * SERVER-SIDE from the Bearer token — the skill NEVER sends account/project.
  *
  * AUTOMATIC PER-AGENT TAGGING
@@ -95,49 +104,57 @@ function agentNamespace() {
 }
 
 /**
- * POST {base}/datasets/{dataset}/{action} with `payload`. Returns parsed JSON.
- * `dataset` is path-encoded; tenancy is derived server-side from the Bearer
- * token (the skill never sends account/project). Throws a descriptive error on
- * a non-2xx so handleToolCall surfaces it.
+ * The run's bound-store map, derived from the `ZIBBY_STORE__<name>=<storeId>`
+ * env injected at deploy/dispatch (one var per store the node declared). The
+ * returned `{ <name>: <storeId> }` is BOTH the allowlist AND the resolver:
+ *   - keys are the logical store NAMES the agent sees in "AVAILABLE STORES";
+ *   - values are the opaque storeIds the backend addresses.
+ * Empty values are skipped (an unbound placeholder must not become writable).
+ * Pure, so handleToolCall can fast-fail BEFORE any network call.
  */
-async function datasetFetch(dataset, action, payload) {
-  const session = getSessionToken();
-  if (!session) {
-    throw new Error('No backend credential (PROJECT_API_TOKEN). Dataset store is only available inside a Zibby run.');
+function storeMap() {
+  const map = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    const m = /^ZIBBY_STORE__(.+)$/.exec(key);
+    if (!m) continue;
+    const id = typeof value === 'string' ? value.trim() : '';
+    if (!id) continue;
+    map[m[1]] = id;
   }
-  const url = `${getAccountApiUrl()}/datasets/${encodeURIComponent(dataset)}/${action}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${session}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Dataset ${action} failed (${res.status}): ${body.slice(0, 300)}`);
-  }
-  return res.json();
+  return map;
 }
 
 /**
- * The store allowlist for this run, parsed from ZIBBY_STORES (comma-joined ids
- * injected by the workflow-executor for a node that declares `stores:[...]`).
- * Returns null when unset/empty (no gating — backward-compatible). Helper kept
- * pure so handleToolCall can fast-fail BEFORE any network call.
+ * Resolve a logical store NAME to its backend storeId against the bound map.
+ * Returns `{ storeId, name }` on success or `{ error }` (a clear, agent-facing
+ * message) — never throws. This is the anti-fragmentation guard: an agent can
+ * ONLY ever address a store that was declared at deploy and bound into env.
+ *   - name omitted + exactly one bound store → default to it
+ *   - name omitted + multiple                → error, list the names to choose
+ *   - name omitted + zero bound stores       → error, nothing to write to
+ *   - name given but not bound               → error, list the available names
  */
-function storeAllowlist() {
-  const raw = typeof process.env.ZIBBY_STORES === 'string' ? process.env.ZIBBY_STORES.trim() : '';
-  if (!raw) return null;
-  const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
-  return ids.length ? ids : null;
+function resolveStore(store) {
+  const map = storeMap();
+  const names = Object.keys(map);
+  const requested = typeof store === 'string' ? store.trim() : '';
+  if (!requested) {
+    if (names.length === 1) return { storeId: map[names[0]], name: names[0] };
+    if (names.length === 0) return { error: 'no stores bound to this agent' };
+    return { error: `multiple stores are bound; pass \`store\` (one of: ${names.join(', ')})` };
+  }
+  if (!Object.prototype.hasOwnProperty.call(map, requested)) {
+    return { error: `unknown store '${requested}'; available: ${names.join(', ')}` };
+  }
+  return { storeId: map[requested], name: requested };
 }
 
 /**
- * POST {base}/datasets/stores/{storeId}/{action} with `payload`. The store-id
- * addressing variant of datasetFetch — resolves to the live store backend
- * (GET/POST /datasets/stores/{storeId}/...). Same auth + error shape.
+ * POST {base}/datasets/stores/{storeId}/{action} with `payload`. Addresses the
+ * live store backend by the storeId resolved from a bound store name
+ * (resolveStore). Tenancy is derived server-side from the Bearer token (the
+ * skill never sends account/project). Throws a descriptive error on a non-2xx
+ * so handleToolCall surfaces it.
  */
 async function storeFetch(storeId, action, payload) {
   const session = getSessionToken();
@@ -167,21 +184,22 @@ export const datasetStoreSkill = {
   description: 'Dataset store — a durable, queryable store for structured JSON records; append rows now, run SQL-style aggregations/reports later',
 
   promptFragment: `## Dataset Store (durable, queryable structured-record store)
-You have a durable store for STRUCTURED records that survives across your
-stateless runs. Unlike key-value memory (for picking up where you left off),
-this is for accumulating DATA you want to QUERY and AGGREGATE later — e.g.
+You have one or more durable stores for STRUCTURED records that survive across
+your stateless runs. Unlike key-value memory (for picking up where you left
+off), this is for accumulating DATA you want to QUERY and AGGREGATE later — e.g.
 per-run metrics, processed items, findings — and turn into a report.
 
-If your node has provisioned stores, an "AVAILABLE STORES" list appears below —
-pick one BY DESCRIPTION and pass its \`storeId\` to the tools. Otherwise records
-are grouped by a named \`dataset\` (your choice, e.g. "scout-metrics").
-Each appended record is an arbitrary JSON object and is auto-tagged with YOUR
-agent type, so you can later filter to just your own writes.
+Your bound stores are listed in the "AVAILABLE STORES" block below (each with a
+name + description). Pick one BY DESCRIPTION and pass its \`store\` NAME (e.g.
+"scorecards") to the tools — NOT an id. If exactly one store is bound you may
+omit \`store\` and it defaults to that one. You can ONLY write to a bound store
+name; any other name is rejected. Each appended record is an arbitrary JSON
+object, auto-tagged with YOUR agent type so you can later filter to your writes.
 
 Tools:
-- dataset_append: Append ONE structured JSON \`record\` to a \`dataset\`. Use to
-  durably persist a row of data each run (e.g. {repo, stars, ts}).
-- dataset_query: Run a SQL-style query over a \`dataset\` — select/aggregate
+- dataset_append: Append ONE structured JSON \`record\` to a store (by \`store\`
+  name). Use to durably persist a row of data each run (e.g. {repo, stars, ts}).
+- dataset_query: Run a SQL-style query over a store — select/aggregate
   (count|sum|avg|min|max), filter (where), group (groupBy), order, limit, and
   bound by month (since/until). Use to compute reports from what you've stored.`,
 
@@ -201,11 +219,14 @@ Tools:
       'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'ZIBBY_USER_TOKEN',
       // The namespace source. Forwarded only when set; absent → 'agent' fallback.
       'WORKFLOW_TYPE',
-      // The node's store allowlist (comma-joined ids). Forwarded only when set,
-      // so a node without `stores` gets no ZIBBY_STORES → no gating (no-op).
-      'ZIBBY_STORES',
     ]) {
       if (process.env[key]) env[key] = process.env[key];
+    }
+    // Forward EVERY bound-store mapping (ZIBBY_STORE__<name>=<storeId>) so the
+    // spawned MCP process can resolve store names → ids. A node without `stores`
+    // has none → the map is empty → the tools report "no stores bound".
+    for (const key of Object.keys(process.env)) {
+      if (/^ZIBBY_STORE__.+$/.test(key) && process.env[key]) env[key] = process.env[key];
     }
     return {
       type: 'stdio',
@@ -222,51 +243,28 @@ Tools:
 
   async handleToolCall(name, args) {
     try {
-      // Resolve the target: a `store`/`storeId` arg (new, store-id addressed)
-      // takes precedence over the legacy `dataset` name path. Returns one of:
-      //   { storeId }          — hit /datasets/stores/{storeId}/...
-      //   { dataset }          — legacy /datasets/{dataset}/...
-      //   { error }            — fast-fail (allowlist reject / missing target)
-      // ALLOWLIST GATE: when ZIBBY_STORES is set, a storeId outside it is
-      // rejected BEFORE any backend call. Guarded: ZIBBY_STORES unset → no
-      // gating, so existing dataset-name callers are unaffected.
-      const resolveTarget = () => {
-        let storeId = typeof args?.storeId === 'string' ? args.storeId.trim()
-                    : typeof args?.store === 'string' ? args.store.trim()
-                    : '';
-        const allow = storeAllowlist();
-        // Single-store convenience: if exactly one store is allowlisted and the
-        // caller omitted a storeId, default to it.
-        if (!storeId && allow && allow.length === 1) storeId = allow[0];
-        if (storeId) {
-          if (allow && !allow.includes(storeId)) {
-            return { error: `storeId '${storeId}' is not in this node's store allowlist (${allow.join(', ')})` };
-          }
-          return { storeId };
-        }
-        const dataset = typeof args?.dataset === 'string' ? args.dataset.trim() : '';
-        if (dataset) return { dataset };
-        return { error: 'a storeId (or legacy dataset name) is required' };
-      };
-
       switch (name) {
         case 'dataset_append': {
           if (args?.record == null || typeof args.record !== 'object' || Array.isArray(args.record)) {
             return JSON.stringify({ error: 'record is required (a JSON object)' });
           }
-          const target = resolveTarget();
+          // Resolve the logical store NAME → storeId via the bound env map. The
+          // map is the allowlist: an unbound name is rejected BEFORE any call.
+          const target = resolveStore(args?.store);
           if (target.error) return JSON.stringify({ error: target.error });
           const agent = typeof args?.agent === 'string' && args.agent.trim() ? args.agent.trim() : agentNamespace();
-          if (target.storeId) {
-            const data = await storeFetch(target.storeId, 'append', { record: args.record, agent });
-            return JSON.stringify({ ...data, storeId: target.storeId });
+          const payload = { record: args.record, agent };
+          // `description` is informational (the store already exists from
+          // deploy) — accepted + passed through when present, never required.
+          if (typeof args?.description === 'string' && args.description.trim()) {
+            payload.description = args.description.trim();
           }
-          const data = await datasetFetch(target.dataset, 'append', { record: args.record, agent });
-          return JSON.stringify(data);
+          const data = await storeFetch(target.storeId, 'append', payload);
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
 
         case 'dataset_query': {
-          const target = resolveTarget();
+          const target = resolveStore(args?.store);
           if (target.error) return JSON.stringify({ error: target.error });
           // Pass the DSL straight through; the backend validates it. Only
           // forward keys that were actually provided.
@@ -274,12 +272,8 @@ Tools:
           for (const key of ['select', 'where', 'groupBy', 'orderBy', 'limit', 'since', 'until', 'agent']) {
             if (args?.[key] != null) payload[key] = args[key];
           }
-          if (target.storeId) {
-            const data = await storeFetch(target.storeId, 'query', payload);
-            return JSON.stringify({ ...data, storeId: target.storeId });
-          }
-          const data = await datasetFetch(target.dataset, 'query', payload);
-          return JSON.stringify(data);
+          const data = await storeFetch(target.storeId, 'query', payload);
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
 
         default:
@@ -293,13 +287,13 @@ Tools:
   tools: [
     {
       name: 'dataset_append',
-      description: 'Append ONE structured JSON record to a named dataset, durably. Records persist across your stateless runs and are auto-tagged with your agent type so you can filter to your own writes later. Use to accumulate data you will query/aggregate (e.g. per-run metrics, processed items).',
+      description: 'Append ONE structured JSON record to a bound store, durably. Records persist across your stateless runs and are auto-tagged with your agent type so you can filter to your own writes later. Use to accumulate data you will query/aggregate (e.g. per-run metrics, processed items). Append ONE record per call.',
       input_schema: {
         type: 'object',
         properties: {
-          storeId: { type: 'string', description: 'A provisioned store id (from AVAILABLE STORES — pick by description). Preferred. If your node has exactly one store, you may omit this and it defaults to that store.' },
-          dataset: { type: 'string', description: 'Legacy: an ad-hoc dataset name (your choice, e.g. "scout-metrics"). Use `storeId` when a store is provisioned; only use `dataset` when no store is available.' },
-          record: { type: 'object', description: 'An arbitrary JSON object — one row of data. Its keys become queryable fields (e.g. {"repo":"owner/x","stars":1200}).' },
+          store: { type: 'string', description: 'The logical store NAME to write to (e.g. "scorecards"), taken from the AVAILABLE STORES list — pick by description. NOT an id. If exactly one store is bound you may omit this and it defaults to that store; you can ONLY write to a bound store name.' },
+          record: { type: 'object', description: 'An arbitrary JSON object — one row of data. Its keys become queryable fields (e.g. {"repo":"owner/x","stars":1200}). One record per call.' },
+          description: { type: 'string', description: 'Optional, informational note about this write. The store already exists from deploy, so this is not required and does not create anything.' },
           agent: { type: 'string', description: 'Optional writing-agent tag. Defaults to your own agent type — leave unset to auto-tag.' },
         },
         required: ['record'],
@@ -307,12 +301,11 @@ Tools:
     },
     {
       name: 'dataset_query',
-      description: 'Run a SQL-style query over a dataset to build reports: select/aggregate (count|sum|avg|min|max), filter, group, order, limit, and bound by month. Returns { columns, rows }. Use this to compute summaries/aggregations from records you appended earlier.',
+      description: 'Run a SQL-style query over a bound store to build reports: select/aggregate (count|sum|avg|min|max), filter, group, order, limit, and bound by month. Returns { columns, rows }. Use this to compute summaries/aggregations from records you appended earlier.',
       input_schema: {
         type: 'object',
         properties: {
-          storeId: { type: 'string', description: 'A provisioned store id (from AVAILABLE STORES — pick by description). Preferred. If your node has exactly one store, you may omit this and it defaults to that store.' },
-          dataset: { type: 'string', description: 'Legacy: the ad-hoc dataset name you appended under. Use `storeId` when a store is provisioned.' },
+          store: { type: 'string', description: 'The logical store NAME to query (e.g. "scorecards"), taken from the AVAILABLE STORES list — pick by description. NOT an id. If exactly one store is bound you may omit this and it defaults to that store.' },
           select: {
             type: 'array',
             description: 'Columns to return. Each item is { field?, agg?, as? }. agg ∈ count|sum|avg|min|max; omit field for count(*). Omit `select` entirely to return raw rows.',
