@@ -109,7 +109,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@zibby/agent-workflow": "^0.3.0",
+    "@zibby/agent-workflow": "^0.4.0",
     "mem0ai": "npm:@zibby/mem0ai@^3.0.5",
     "zod": "^3.23.0 || ^4.0.0"
   },
