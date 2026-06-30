@@ -1,12 +1,20 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Mock backend-client BEFORE importing the skill so resolveIntegrationToken is
-// replaced at load time. Shape mirrors GET /integrations/token/linkedin.
+// replaced at load time. Resolves a VARIANT-SPECIFIC token per provider:
+// linkedin_business (org tools) vs linkedin_personal (member publish — its blob
+// also carries memberId). Shape mirrors GET /integrations/token/{provider}.
 vi.mock('@zibby/core/backend-client.js', () => ({
-  resolveIntegrationToken: vi.fn(async () => ({ provider: 'linkedin', token: 'secret_li' })),
+  resolveIntegrationToken: vi.fn(async (provider) => {
+    if (provider === 'linkedin_personal') {
+      return { provider: 'linkedin_personal', token: 'secret_li', memberId: 'abc123' };
+    }
+    return { provider: 'linkedin_business', token: 'secret_li' };
+  }),
   clearTokenCache: vi.fn(),
 }));
 
+const { resolveIntegrationToken } = await import('@zibby/core/backend-client.js');
 const { linkedinSkill, parseOrgId } = await import('../src/linkedin.js');
 
 // Build a fetch Response-like object. linkedinApi reads res.ok, res.status,
@@ -22,17 +30,23 @@ function fetchJson(payload, { ok = true, status = 200, headers = {} } = {}) {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // restoreAllMocks does NOT clear the module-mock vi.fn() call history, so
+  // per-provider toHaveBeenCalledWith assertions would see calls bleed across
+  // tests. Clear call history (implementations from the mock factory persist).
+  vi.clearAllMocks();
 });
 
 describe('linkedinSkill structure', () => {
-  it('has correct id + requiresIntegration', () => {
+  it('has correct id and does NOT declare requiresIntegration (gated via backend OR-group)', () => {
     expect(linkedinSkill.id).toBe('linkedin');
-    expect(linkedinSkill.requiresIntegration).toBe('linkedin');
+    // Two providers (linkedin_personal OR linkedin_business) → no single
+    // requiresIntegration; the OR-group lives in the backend map (like git-write).
+    expect(linkedinSkill.requiresIntegration).toBeUndefined();
   });
 
-  it('exposes linkedin_list_organizations + linkedin_create_draft_post', () => {
+  it('exposes linkedin_list_organizations + linkedin_create_draft_post + linkedin_publish_post', () => {
     const names = linkedinSkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['linkedin_create_draft_post', 'linkedin_list_organizations']);
+    expect(names).toEqual(['linkedin_create_draft_post', 'linkedin_list_organizations', 'linkedin_publish_post']);
   });
 
   it('resolve() spawns the generic skill MCP server so the AGENT can call linkedin tools', () => {
@@ -132,6 +146,10 @@ describe('linkedin_create_draft_post — body, author, headers', () => {
     expect(result.author).toBe('urn:li:organization:12345');
     expect(result.lifecycleState).toBe('DRAFT');
 
+    // Org tools resolve the BUSINESS (Community Management API) provider.
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_business');
+    expect(resolveIntegrationToken).not.toHaveBeenCalledWith('linkedin_personal');
+
     // The request hit /rest/posts with POST + required headers.
     expect(posted.url).toContain('/rest/posts');
     expect(posted.init.method).toBe('POST');
@@ -174,6 +192,80 @@ describe('linkedin_create_draft_post — body, author, headers', () => {
 
   it('rejects missing text without throwing', async () => {
     const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_create_draft_post', { organizationId: '1' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/text/i);
+  });
+});
+
+describe('linkedin_publish_post — personal/member publish', () => {
+  it('PUBLISHES to the member profile with the person URN author + required headers', async () => {
+    let posted;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      posted = { url, init };
+      return fetchJson('', { status: 201, headers: { 'x-restli-id': 'urn:li:share:9999' } });
+    });
+
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {
+      text: 'Hello from my profile',
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.postUrn).toBe('urn:li:share:9999');
+    expect(result.author).toBe('urn:li:person:abc123');
+    expect(result.lifecycleState).toBe('PUBLISHED');
+    expect(result.visibility).toBe('PUBLIC');
+
+    // Resolves the PERSONAL provider (for the memberId + the POST token).
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_personal');
+    expect(resolveIntegrationToken).not.toHaveBeenCalledWith('linkedin_business');
+
+    // The request hit /rest/posts with POST + the required versioned headers.
+    expect(posted.url).toContain('/rest/posts');
+    expect(posted.init.method).toBe('POST');
+    expect(posted.init.headers.Authorization).toBe('Bearer secret_li');
+    expect(posted.init.headers['LinkedIn-Version']).toBe('202506');
+    expect(posted.init.headers['X-Restli-Protocol-Version']).toBe('2.0.0');
+    expect(posted.init.headers['Content-Type']).toBe('application/json');
+
+    // The body is a PUBLISHED post authored by the person urn.
+    const body = JSON.parse(posted.init.body);
+    expect(body.lifecycleState).toBe('PUBLISHED');
+    expect(body.author).toBe('urn:li:person:abc123');
+    expect(body.commentary).toBe('Hello from my profile');
+    expect(body.visibility).toBe('PUBLIC');
+    expect(body.isReshareDisabledByAuthor).toBe(false);
+    expect(body.distribution).toEqual({
+      feedDistribution: 'MAIN_FEED',
+      targetEntities: [],
+      thirdPartyDistributionChannels: [],
+    });
+  });
+
+  it('honours an explicit CONNECTIONS visibility (uppercased)', async () => {
+    let posted;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      posted = { url, init };
+      return fetchJson('', { status: 201, headers: { 'x-linkedin-id': 'urn:li:share:1010' } });
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {
+      text: 'Connections only',
+      visibility: 'connections',
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.postUrn).toBe('urn:li:share:1010');
+    expect(result.visibility).toBe('CONNECTIONS');
+    expect(JSON.parse(posted.init.body).visibility).toBe('CONNECTIONS');
+  });
+
+  it('returns { ok:false, error } when the member id is unavailable — never throws', async () => {
+    resolveIntegrationToken.mockResolvedValueOnce({ provider: 'linkedin_personal', token: 'secret_li' });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', { text: 'x' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/member id unavailable|reconnect LinkedIn Personal/i);
+  });
+
+  it('rejects missing text without throwing', async () => {
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {}));
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/text/i);
   });

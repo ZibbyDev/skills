@@ -72,11 +72,13 @@ describe('INTEGRATIONS constant', () => {
         // NO requiresIntegration, so this id is not in any gating map.
         // See opendesign.js.
         'open_design',
-        // LinkedIn — OAuth integration (member access token). The
-        // linkedinSkill talks to the LinkedIn versioned REST API directly
-        // (no MCP server): list admin Organizations + create DRAFT posts on
-        // a company Page. See linkedin.js + handlers/linkedin.js.
-        'linkedin',
+        // LinkedIn — TWO distinct OAuth providers (the single `linkedin`
+        // provider is GONE). The linkedinSkill resolves a variant-specific
+        // token per tool: linkedin_business (Community Management API, org
+        // Pages — list admin Organizations + create DRAFT posts) and
+        // linkedin_personal (Share on LinkedIn, member profile — PUBLISH a
+        // post to the member's own feed). See linkedin.js + handlers/linkedin.js.
+        'linkedin_personal', 'linkedin_business',
       ])
     );
   });
@@ -126,19 +128,23 @@ describe('skill.requiresIntegration declarations', () => {
   it('larkSkill declares lark', () => {
     expect(larkSkill.requiresIntegration).toBe(INTEGRATIONS.LARK);
   });
-  it('linkedinSkill declares linkedin', () => {
-    expect(linkedinSkill.requiresIntegration).toBe(INTEGRATIONS.LINKEDIN);
-  });
 
   // Skills that run entirely against local state / process env / a
   // self-contained MCP server must NOT declare an integration. Adding
   // one would force users to "connect" something that isn't actually a
   // prerequisite. Re-verify each time someone touches these files.
+  // linkedinSkill is here too: it spans TWO providers (linkedin_personal OR
+  // linkedin_business) so it omits requiresIntegration and is gated via the
+  // backend OR-group {any:[linkedin_personal, linkedin_business]}, exactly
+  // like git-write.
   it('memory/chat-memory/core-tools/browser do NOT declare an integration', () => {
     expect(memorySkill.requiresIntegration).toBeUndefined();
     expect(chatMemorySkill.requiresIntegration).toBeUndefined();
     expect(coreToolsSkill.requiresIntegration).toBeUndefined();
     expect(browserSkill.requiresIntegration).toBeUndefined();
+  });
+  it('linkedinSkill does NOT declare an integration (gated via backend OR-group)', () => {
+    expect(linkedinSkill.requiresIntegration).toBeUndefined();
   });
 
   it('openaiBillingSkill declares openai_billing', () => {

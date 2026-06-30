@@ -2,10 +2,13 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
-import { INTEGRATIONS } from './integrations.js';
 
 /**
- * LinkedIn skill — create DRAFT posts on a LinkedIn Organization (company Page).
+ * LinkedIn skill — TWO capabilities over TWO distinct OAuth providers:
+ *   - linkedin_business (Community Management API, org Pages): list admin
+ *     Organizations + create DRAFT posts on a company Page.
+ *   - linkedin_personal (Share on LinkedIn, member profile): PUBLISH a post to
+ *     the authenticated member's own feed (member profiles have no DRAFT state).
  *
  * Mirrors notion.js / figma.js (the hand-written generic-bin skills: a
  * `tools[]` array + a `handleToolCall` switch, served over MCP by
@@ -13,14 +16,15 @@ import { INTEGRATIONS } from './integrations.js';
  * is returned as { ok:false, error } so an unconnected/erroring LinkedIn can't
  * crash the run.
  *
- * Auth: LinkedIn is an OAuth integration. The member access token (with the
- * w_organization_social / r_organization_admin scopes) is resolved per-call
- * via resolveIntegrationToken('linkedin') — exactly like notion.js
- * (resolveIntegrationToken('notion')). The backend connect handler decrypts
- * the stored token and returns { provider:'linkedin', token, ... }; we only
- * need `token`, which is sent as `Authorization: Bearer <token>`. When no
- * token is available the helper throws a clear "LinkedIn not connected" error
- * that handleToolCall surfaces as { ok:false, error }.
+ * Auth: LinkedIn is an OAuth integration, now split into TWO providers (the
+ * single `linkedin` provider is GONE). Each call resolves the VARIANT-SPECIFIC
+ * member access token via resolveIntegrationToken('linkedin_business') (org
+ * tools) or resolveIntegrationToken('linkedin_personal') (member publish). The
+ * backend connect handler decrypts the stored token and returns
+ * { provider, token, ... }; the personal endpoint also returns the resolved
+ * member id as `memberId`. We send the token as `Authorization: Bearer <token>`.
+ * When no token is available the helper throws a clear "LinkedIn not connected"
+ * error that handleToolCall surfaces as { ok:false, error }.
  *
  * Every LinkedIn REST (/rest/*) call REQUIRES the versioned-API headers:
  *   Authorization: Bearer <token>
@@ -76,16 +80,18 @@ function readHeader(headers, key) {
 
 /**
  * Single chokepoint for every LinkedIn REST call. Resolves the OAuth bearer
- * via resolveIntegrationToken('linkedin'), sets the required versioned-API
- * headers, retries once on transient auth errors, and returns
+ * for the given `provider` via resolveIntegrationToken(provider) — defaulting
+ * to 'linkedin_business' (org Community Management API); pass
+ * 'linkedin_personal' for member-profile calls — sets the required
+ * versioned-API headers, retries once on transient auth errors, and returns
  * { status, headers, body }. Throws (trimmed) on non-2xx so handleToolCall can
  * surface it as JSON.
  *
  * Keep this the single auth chokepoint — don't resolve tokens at call sites.
  */
-export async function linkedinApi(path, opts = {}) {
+export async function linkedinApi(path, opts = {}, provider = 'linkedin_business') {
   const makeRequest = async () => {
-    const { token } = await resolveIntegrationToken('linkedin');
+    const { token } = await resolveIntegrationToken(provider);
     if (typeof token !== 'string' || !token) {
       throw new Error('LinkedIn is not connected: no access token available. Connect LinkedIn in Integrations.');
     }
@@ -120,7 +126,7 @@ export async function linkedinApi(path, opts = {}) {
     const msg = String(error?.message || error || '').toLowerCase();
     const shouldRetry = msg.includes('token') || msg.includes('401') || msg.includes('unauthorized');
     if (!shouldRetry) throw error;
-    clearTokenCache('linkedin');
+    clearTokenCache(provider);
     return makeRequest();
   }
 }
@@ -129,24 +135,33 @@ export const linkedinSkill = {
   id: 'linkedin',
   serverName: 'linkedin',
   allowedTools: ['mcp__linkedin__*'],
-  // LinkedIn is an OAuth integration. The backend connect handler stores the
-  // member access token and the skill resolves it at runtime via
-  // resolveIntegrationToken('linkedin'). Declaring this gates deploy on a
-  // connected LinkedIn integration (mirror in
-  // backend/src/services/skill-integrations.js → INTEGRATIONS.LINKEDIN).
-  requiresIntegration: INTEGRATIONS.LINKEDIN,
+  // NO requiresIntegration. The two capabilities use two DIFFERENT providers
+  // (linkedin_business for the org tools, linkedin_personal for the publish
+  // tool), and either one connected is enough to be useful. The
+  // "personal OR business" OR-group gating is done in the BACKEND map
+  // (REQUIRED_INTEGRATION_MAP → linkedin: {any:[linkedin_personal,
+  // linkedin_business]}), exactly like git-write (git-write.js omits
+  // requiresIntegration and is gated via {any:[github,gitlab]}). Declaring a
+  // single requiresIntegration here would force ONE specific provider and
+  // break the OR-group.
   // Token is resolved per-call via the backend (not injected as env), so there
   // are no env keys to forward to the MCP child.
   envKeys: [],
-  description: 'LinkedIn — list admin Organizations and create DRAFT posts on a company Page',
+  description: 'LinkedIn — (business) list admin Organizations + create DRAFT posts on a company Page, and (personal) PUBLISH a post to your own member profile feed',
 
   promptFragment: `## LinkedIn (connected)
-You can create DRAFT posts on a LinkedIn Organization (company Page) the authenticated member administers. Posts are created in DRAFT state — a human reviews and publishes them in LinkedIn. Tools:
-- linkedin_list_organizations: List the Organizations (company Pages) the member ADMINISTERS. Returns [{ id, urn, name, vanityName }]. Call this first to choose the author org.
-- linkedin_create_draft_post: Create a DRAFT post. Pass organizationId (or organizationUrn) + text (the post commentary). Returns { postUrn } so a human can find and publish it in LinkedIn.
+You can post to LinkedIn two ways — an ORG company Page (business) and your own member PROFILE (personal). Each path needs its own LinkedIn integration connected.
+
+Business (company Page) — DRAFT only:
+- linkedin_list_organizations: List the Organizations (company Pages) the member ADMINISTERS. Returns [{ id, urn, name, vanityName }]. Call this first to choose the author org. (needs LinkedIn Business connected)
+- linkedin_create_draft_post: Create a DRAFT post on a company Page. Pass organizationId (or organizationUrn) + text (the post commentary). The post is created in DRAFT state (never published automatically) so a human reviews and publishes it in LinkedIn. Returns { postUrn }. (needs LinkedIn Business connected)
+
+Personal (your own profile) — PUBLISHES IMMEDIATELY:
+- linkedin_publish_post: PUBLISH a post to your OWN member profile feed. Pass text (the post body) + optional visibility ('PUBLIC' default, or 'CONNECTIONS'). UNLIKE the org draft tool, this PUBLISHES the post immediately — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns { postUrn }. (needs LinkedIn Personal connected)
+
 Notes:
-- The post is ALWAYS created as a DRAFT — it is never published automatically.
-- If LinkedIn is not connected these tools return { ok:false, error }; treat that as "LinkedIn unavailable" and continue.`,
+- Org-page posts are ALWAYS created as a DRAFT; personal-profile posts are ALWAYS published live — choose the tool accordingly.
+- If the relevant LinkedIn integration is not connected these tools return { ok:false, error }; treat that as "LinkedIn unavailable" and continue.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it at
@@ -173,8 +188,9 @@ Notes:
     try {
       switch (name) {
         case 'linkedin_list_organizations': {
-          // ACLs where the member is an APPROVED ADMINISTRATOR.
-          const { body } = await linkedinApi('/rest/organizationAcls?q=roleAssignee&role=ADMINISTRATOR&state=APPROVED');
+          // ACLs where the member is an APPROVED ADMINISTRATOR. Org tools use
+          // the BUSINESS (Community Management API) provider.
+          const { body } = await linkedinApi('/rest/organizationAcls?q=roleAssignee&role=ADMINISTRATOR&state=APPROVED', {}, 'linkedin_business');
           const elements = Array.isArray(body.elements) ? body.elements : [];
           const organizations = [];
           for (const el of elements) {
@@ -184,7 +200,7 @@ Notes:
             let name = '';
             let vanityName = '';
             try {
-              const org = (await linkedinApi(`/rest/organizations/${id}`)).body;
+              const org = (await linkedinApi(`/rest/organizations/${id}`, {}, 'linkedin_business')).body;
               name = orgName(org);
               vanityName = org.vanityName || '';
             } catch {
@@ -220,7 +236,7 @@ Notes:
             lifecycleState: 'DRAFT',
             isReshareDisabledByAuthor: false,
           };
-          const res = await linkedinApi('/rest/posts', { method: 'POST', body: requestBody });
+          const res = await linkedinApi('/rest/posts', { method: 'POST', body: requestBody }, 'linkedin_business');
           // The created post URN comes back in the x-restli-id (or x-linkedin-id)
           // response header; fall back to the body id if present.
           const postUrn =
@@ -233,6 +249,53 @@ Notes:
             postUrn,
             author,
             lifecycleState: 'DRAFT',
+            visibility,
+            status: res.status,
+          });
+        }
+
+        case 'linkedin_publish_post': {
+          // PERSONAL / member-profile publish. The personal token endpoint
+          // returns the resolved member id alongside the token; the author urn
+          // is urn:li:person:{memberId}. Resolve it directly here (linkedinApi
+          // doesn't expose memberId); linkedinApi resolves the token again for
+          // the POST — that's fine, tokens are cached.
+          const { memberId } = await resolveIntegrationToken('linkedin_personal');
+          if (!memberId) {
+            return JSON.stringify({ ok: false, error: 'LinkedIn (personal) not connected or member id unavailable — reconnect LinkedIn Personal' });
+          }
+          const text = args?.text;
+          if (typeof text !== 'string' || !text.trim()) {
+            return JSON.stringify({ ok: false, error: 'text (the post body) is required' });
+          }
+          const visibility = args?.visibility ? String(args.visibility).toUpperCase() : 'PUBLIC';
+          const author = `urn:li:person:${memberId}`;
+          const requestBody = {
+            author,
+            commentary: text,
+            visibility,
+            distribution: {
+              feedDistribution: 'MAIN_FEED',
+              targetEntities: [],
+              thirdPartyDistributionChannels: [],
+            },
+            // Member profiles have NO DRAFT state — this PUBLISHES immediately.
+            lifecycleState: 'PUBLISHED',
+            isReshareDisabledByAuthor: false,
+          };
+          const res = await linkedinApi('/rest/posts', { method: 'POST', body: requestBody }, 'linkedin_personal');
+          // Same URN extraction as the draft tool: x-restli-id (or
+          // x-linkedin-id) response header, then the body id.
+          const postUrn =
+            readHeader(res.headers, 'x-restli-id') ||
+            readHeader(res.headers, 'x-linkedin-id') ||
+            res.body?.id ||
+            null;
+          return JSON.stringify({
+            ok: true,
+            postUrn,
+            author,
+            lifecycleState: 'PUBLISHED',
             visibility,
             status: res.status,
           });
@@ -266,6 +329,18 @@ Notes:
           organizationUrn: { type: 'string', description: 'The organization URN, e.g. "urn:li:organization:12345". Alternative to organizationId.' },
           text: { type: 'string', description: 'The post commentary (the body text of the post).' },
           visibility: { type: 'string', enum: ['PUBLIC'], description: 'Post visibility. Defaults to PUBLIC.' },
+        },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'linkedin_publish_post',
+      description: 'PUBLISH a post to the authenticated member\'s OWN LinkedIn profile feed (personal). UNLIKE linkedin_create_draft_post (which only drafts on a company Page), this PUBLISHES the post IMMEDIATELY — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns the created post URN. Requires the LinkedIn Personal integration connected.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The post body (the commentary text of the post).' },
+          visibility: { type: 'string', enum: ['PUBLIC', 'CONNECTIONS'], description: 'Post visibility: PUBLIC (anyone) or CONNECTIONS (your connections only). Defaults to PUBLIC.' },
         },
         required: ['text'],
       },
