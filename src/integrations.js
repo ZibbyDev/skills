@@ -61,6 +61,13 @@ export const INTEGRATIONS = Object.freeze({
   // OPTIONAL — opendesignSkill deliberately sets NO requiresIntegration, so
   // this id is NOT in any required-gating map. See opendesign.js.
   OPEN_DESIGN:       'open_design',
+  // LinkedIn — OAuth integration (member access token with
+  // w_organization_social / r_organization_admin scopes). The linkedinSkill
+  // talks to the LinkedIn versioned REST API directly (Authorization: Bearer
+  // <token> + LinkedIn-Version + X-Restli-Protocol-Version headers), resolved
+  // via resolveIntegrationToken('linkedin'). Used to list admin Organizations
+  // and create DRAFT posts on a company Page. See linkedin.js.
+  LINKEDIN:          'linkedin',
 });
 
 /**
@@ -103,4 +110,5 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   linear: { id: 'linear', name: 'Linear', connectPath: '/integrations?provider=linear' },
   figma:  { id: 'figma',  name: 'Figma',  connectPath: '/integrations?provider=figma'  },
   open_design: { id: 'open_design', name: 'OpenDesign', connectPath: '/integrations?provider=open_design' },
+  linkedin: { id: 'linkedin', name: 'LinkedIn', connectPath: '/integrations?provider=linkedin' },
 });

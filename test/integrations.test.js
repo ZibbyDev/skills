@@ -16,6 +16,7 @@ const { planeSkill } = await import('../src/plane.js');
 const { linearSkill } = await import('../src/linear.js');
 const { slackSkill } = await import('../src/slack.js');
 const { larkSkill } = await import('../src/lark.js');
+const { linkedinSkill } = await import('../src/linkedin.js');
 const { memorySkill } = await import('../src/memory.js');
 const { chatMemorySkill } = await import('../src/chat-memory.js');
 const { coreToolsSkill } = await import('../src/core-tools.js');
@@ -71,6 +72,11 @@ describe('INTEGRATIONS constant', () => {
         // NO requiresIntegration, so this id is not in any gating map.
         // See opendesign.js.
         'open_design',
+        // LinkedIn — OAuth integration (member access token). The
+        // linkedinSkill talks to the LinkedIn versioned REST API directly
+        // (no MCP server): list admin Organizations + create DRAFT posts on
+        // a company Page. See linkedin.js + handlers/linkedin.js.
+        'linkedin',
       ])
     );
   });
@@ -119,6 +125,9 @@ describe('skill.requiresIntegration declarations', () => {
   });
   it('larkSkill declares lark', () => {
     expect(larkSkill.requiresIntegration).toBe(INTEGRATIONS.LARK);
+  });
+  it('linkedinSkill declares linkedin', () => {
+    expect(linkedinSkill.requiresIntegration).toBe(INTEGRATIONS.LINKEDIN);
   });
 
   // Skills that run entirely against local state / process env / a
