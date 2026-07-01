@@ -134,8 +134,20 @@ function storeMap() {
  *   - name omitted + zero bound stores       → error, nothing to write to
  *   - name given but not bound               → error, list the available names
  */
+// Stores the agent CREATES at runtime via `ensure_store` (name→storeId), merged
+// into resolution so sqlite_exec/query/dataset tools can address them by name in
+// the same run — WITHOUT any deploy-time ZIBBY_STORE__ declaration. ensure_store
+// is idempotent, so re-ensuring the same name next run returns the same store.
+const ensuredStores = {};
+
+// Test-only: reset the per-process ensured-store cache between cases (in prod
+// each Fargate run is a fresh process, so this is naturally clean per run).
+export function __clearEnsuredStores() {
+  for (const k of Object.keys(ensuredStores)) delete ensuredStores[k];
+}
+
 function resolveStore(store) {
-  const map = storeMap();
+  const map = { ...storeMap(), ...ensuredStores };
   const names = Object.keys(map);
   const requested = typeof store === 'string' ? store.trim() : '';
   if (!requested) {
@@ -156,6 +168,28 @@ function resolveStore(store) {
  * skill never sends account/project). Throws a descriptive error on a non-2xx
  * so handleToolCall surfaces it.
  */
+/**
+ * POST {base}/datasets/stores/ensure — agent-driven, idempotent-by-name store
+ * creation (scoped private to this agent via namespace = WORKFLOW_TYPE). Returns
+ * { storeId, ... }. Tenancy is server-derived from the Bearer token.
+ */
+async function ensureStoreFetch(payload) {
+  const session = getSessionToken();
+  if (!session) {
+    throw new Error('No backend credential (PROJECT_API_TOKEN). Stores are only available inside a Zibby run.');
+  }
+  const res = await fetch(`${getAccountApiUrl()}/datasets/stores/ensure`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`ensure_store failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
 async function storeFetch(storeId, action, payload) {
   const session = getSessionToken();
   if (!session) {
@@ -203,7 +237,14 @@ There are TWO kinds of bound store (shown as TYPE in AVAILABLE STORES):
   runs. Use this when you need to UPDATE rows / track changing state (e.g. a
   queue with a status column), not just append.
 
+You can also CREATE your own store on demand (no deploy needed) with
+ensure_store — e.g. an agent that needs a private sqlite DB to track drafts/
+state creates it at the start of the run and reuses it every run.
+
 Tools:
+- ensure_store: Create/reuse a store ON DEMAND for this agent (idempotent by
+  name). Use when you need a store not bound at deploy. Then use its name with
+  the tools below.
 - dataset_append: (dataset stores) Append ONE structured JSON \`record\`.
 - dataset_query: (dataset stores) SQL-style select/aggregate over appended records.
 - sqlite_exec: (sqlite stores) Run SQL that CHANGES data — CREATE TABLE / INSERT /
@@ -287,6 +328,19 @@ store (or vice-versa) is rejected.`,
           return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
 
+        case 'ensure_store': {
+          // Create (or reuse) a store ON DEMAND for this agent. Idempotent by
+          // name + this agent's namespace, so the SAME store comes back across
+          // runs. Caches name→storeId so subsequent tool calls resolve it.
+          const name = typeof args?.name === 'string' ? args.name.trim() : '';
+          if (!name) return JSON.stringify({ error: 'name is required' });
+          const type = (typeof args?.type === 'string' && args.type.trim()) ? args.type.trim().toLowerCase() : 'sqlite';
+          const description = typeof args?.description === 'string' ? args.description.trim() : '';
+          const data = await ensureStoreFetch({ name, type, description, namespace: agentNamespace() });
+          if (data?.storeId) ensuredStores[name] = data.storeId;
+          return JSON.stringify({ ...data, store: name });
+        }
+
         case 'sqlite_exec':
         case 'sqlite_query': {
           // Both map to the /sql route on a SQLITE-type store. exec vs query is
@@ -356,6 +410,19 @@ store (or vice-versa) is rejected.`,
           agent: { type: 'string', description: 'Filter to records written by one agent namespace. Omit to query across all writers.' },
         },
         required: [],
+      },
+    },
+    {
+      name: 'ensure_store',
+      description: 'Create (or reuse) a store ON DEMAND for THIS agent — use when you need a store that was NOT declared/bound at deploy. Idempotent by name and private to this agent: calling again with the same name returns the SAME store (safe to call at the start of every run). Returns { storeId }. For type "sqlite" you then define schema with sqlite_exec (CREATE TABLE IF NOT EXISTS) and read/write via sqlite_exec/sqlite_query using this name.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'A short logical name for the store (e.g. "linkedin_posts"). Letters, digits, _ and - only.' },
+          type: { type: 'string', enum: ['sqlite', 'dataset'], description: 'Store type. "sqlite" (default) = a mutable relational DB whose schema YOU define with SQL. "dataset" = append-only JSON records for later aggregation/analytics.' },
+          description: { type: 'string', description: 'What this store is for (shown in the Storage UI).' },
+        },
+        required: ['name'],
       },
     },
     {

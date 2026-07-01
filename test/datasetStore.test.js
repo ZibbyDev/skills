@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { datasetStoreSkill } from '../src/datasetStore.js';
+import { datasetStoreSkill, __clearEnsuredStores } from '../src/datasetStore.js';
 
 // Stores v2: stores are auto-provisioned at deploy and resolved at runtime BY
 // NAME via `ZIBBY_STORE__<name>=<storeId>` env. That name→storeId map is BOTH
@@ -30,6 +30,7 @@ beforeEach(() => {
   process.env.WORKFLOW_TYPE = 'github-ai-scout';
   delete process.env.ZIBBY_USER_TOKEN;
   clearStoreEnv();
+  __clearEnsuredStores();
 });
 
 afterEach(() => {
@@ -48,7 +49,7 @@ describe('datasetStoreSkill structure', () => {
 
   it('exposes the expected tools', () => {
     const names = datasetStoreSkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['dataset_append', 'dataset_query', 'sqlite_exec', 'sqlite_query']);
+    expect(names).toEqual(['dataset_append', 'dataset_query', 'ensure_store', 'sqlite_exec', 'sqlite_query']);
   });
 
   it('sqlite tools take a logical `store` name + required sql', () => {
@@ -112,6 +113,23 @@ describe('name→storeId resolution from ZIBBY_STORE__* env', () => {
 
     const [url] = spy.mock.calls[0];
     expect(url).toBe('https://api-test.zibby.app/datasets/stores/store_only/append');
+  });
+
+  it('ensure_store creates on demand, caches name→id, and later tools resolve it', async () => {
+    // No ZIBBY_STORE__ bound. ensure_store returns a storeId → cached → a
+    // following sqlite_exec by the SAME name resolves it (no deploy declaration).
+    const spy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(fetchOk({ ok: true, storeId: 'store_ensured1', name: 'linkedin_posts', type: 'sqlite' }))
+      .mockResolvedValueOnce(fetchOk({ ok: true, wrote: true, rowsModified: 1 }));
+    const ens = JSON.parse(await datasetStoreSkill.handleToolCall('ensure_store', {
+      name: 'linkedin_posts', type: 'sqlite', description: 'drafts',
+    }));
+    expect(ens).toMatchObject({ storeId: 'store_ensured1', store: 'linkedin_posts' });
+    expect(spy.mock.calls[0][0]).toBe('https://api-test.zibby.app/datasets/stores/ensure');
+    expect(JSON.parse(spy.mock.calls[0][1].body)).toMatchObject({ name: 'linkedin_posts', type: 'sqlite', namespace: 'github-ai-scout' });
+    // now use it by name — resolves to the ensured id via /sql
+    await datasetStoreSkill.handleToolCall('sqlite_exec', { store: 'linkedin_posts', sql: "INSERT INTO posts VALUES(1)" });
+    expect(spy.mock.calls[1][0]).toBe('https://api-test.zibby.app/datasets/stores/store_ensured1/sql');
   });
 
   it('sqlite_exec/query hit the /sql route with sql + params on the resolved storeId', async () => {
