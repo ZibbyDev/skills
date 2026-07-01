@@ -57,9 +57,39 @@ function resolveSentryBin() {
  * going through the LLM tool layer. `sentryListIssues / Projects /
  * GetIssue` below are thin wrappers — prefer those over raw `sentryFetch`.
  */
+/**
+ * Base URL of the Sentry instance. Resolution order:
+ *   1. `explicit` — the baseUrl the token resolver returns for a CLOUD account
+ *      that connected a self-hosted Sentry (integration metadata.baseUrl).
+ *   2. `SENTRY_URL` env — a SELF-HOSTED Zibby operator points at their instance
+ *      via .env (mirrors the gitlab skill's `GITLAB_URL`).
+ *   3. `https://sentry.io` — SaaS default (both cloud + self-host unchanged).
+ * Trailing slash trimmed so path concatenation stays clean.
+ */
+function sentryBaseUrl(explicit) {
+  return (explicit || process.env.SENTRY_URL || 'https://sentry.io').trim().replace(/\/+$/, '');
+}
+
+/**
+ * Organization slug for org-scoped endpoints. Cloud provides it via the
+ * connected integration (`organizationSlug` from resolveIntegrationToken).
+ * Self-hosted has no integration record, so fall back to `SENTRY_ORG`
+ * (the self-hosted installer's default org is literally `sentry`).
+ */
+function sentryOrg(organizationSlug) {
+  const org = organizationSlug || process.env.SENTRY_ORG;
+  if (!org) {
+    throw new Error(
+      'Sentry organization not resolved — reconnect Sentry, or set SENTRY_ORG '
+      + '(self-hosted; the default org slug is "sentry").',
+    );
+  }
+  return org;
+}
+
 export async function sentryFetch(path, opts = {}) {
-  const { token, organizationSlug } = await resolveIntegrationToken('sentry');
-  const url = `https://sentry.io/api/0/organizations/${organizationSlug}${path}`;
+  const { token, organizationSlug, baseUrl } = await resolveIntegrationToken('sentry');
+  const url = `${sentryBaseUrl(baseUrl)}/api/0/organizations/${sentryOrg(organizationSlug)}${path}`;
   // Forward a JSON body for write calls. We accept either an already-serialized
   // string or a plain object (serialized here) — so callers can pass `{ body: {…} }`
   // for PUT/POST without remembering to JSON.stringify. GET stays body-less.
@@ -111,8 +141,8 @@ export async function sentryListIssues({ query = 'is:unresolved', sort = 'date',
  */
 export async function sentryGetIssue(issueId) {
   if (!issueId) throw new Error('sentryGetIssue: issueId is required');
-  const { token } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/`, {
+  const { token, baseUrl } = await resolveIntegrationToken('sentry');
+  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${issueId}/`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
@@ -155,8 +185,8 @@ export async function sentryUpdateIssue(issueId, update = {}) {
   if (Object.keys(body).length === 0) {
     throw new Error('sentryUpdateIssue: nothing to update (pass status / statusDetails / assignedTo / isBookmarked / hasSeen)');
   }
-  const { token } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/`, {
+  const { token, baseUrl } = await resolveIntegrationToken('sentry');
+  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${issueId}/`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -187,8 +217,8 @@ export async function sentryUpdateIssue(issueId, update = {}) {
 export async function sentryAddComment(issueId, text) {
   if (!issueId) throw new Error('sentryAddComment: issueId is required');
   if (!text || !String(text).trim()) throw new Error('sentryAddComment: text is required');
-  const { token } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`https://sentry.io/api/0/issues/${issueId}/comments/`, {
+  const { token, baseUrl } = await resolveIntegrationToken('sentry');
+  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${issueId}/comments/`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: String(text) }),
@@ -243,7 +273,13 @@ You have access to the user's Sentry. Use these tools:
     // 401s ("project not found") on every sentry_* call — returning 0 issues
     // that the LLM faithfully transcribes as []. ZIBBY_USER_TOKEN is the
     // session-token fallback when PROJECT_API_TOKEN isn't set.
-    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_USER_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE']) {
+    // SELF-HOSTED Sentry: the MCP child only gets THIS allow-list, so the base
+    // URL / org / token vars must be forwarded explicitly or a self-hosted
+    // instance falls back to sentry.io + the cloud token endpoint (→ "session
+    // expired" / wrong host). ZIBBY_SELF_HOST flips resolveIntegrationToken to
+    // the env-token fast path; SENTRY_AUTH_TOKEN is that token (see SELF_HOST_ENV
+    // in @zibby/core). Absent on cloud → the child behaves exactly as before.
+    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_USER_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE', 'ZIBBY_SELF_HOST', 'SENTRY_URL', 'SENTRY_ORG', 'SENTRY_AUTH_TOKEN']) {
       if (process.env[k]) env[k] = process.env[k];
     }
     return {

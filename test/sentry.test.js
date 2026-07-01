@@ -10,6 +10,7 @@ vi.mock('@zibby/core/backend-client.js', () => ({
   clearTokenCache: vi.fn(),
 }));
 
+const { resolveIntegrationToken } = await import('@zibby/core/backend-client.js');
 const { sentrySkill, sentryUpdateIssue, sentryAddComment, sentryFetch } = await import('../src/sentry.js');
 
 // Build a fetch Response-like object (res.ok + res.json()/res.text()).
@@ -134,6 +135,65 @@ describe('sentryAddComment', () => {
   it('a 403 throws a CLEAR error mentioning the event:write scope', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => fetchJson('forbidden', false, 403)));
     await expect(sentryAddComment('42', 'hi')).rejects.toThrow(/event:write/);
+  });
+});
+
+describe('self-hosted Sentry — configurable base URL + org', () => {
+  afterEach(() => {
+    delete process.env.SENTRY_URL;
+    delete process.env.SENTRY_ORG;
+  });
+
+  it('sentryFetch targets SENTRY_URL (trailing slash trimmed) on the org-scoped endpoint', async () => {
+    process.env.SENTRY_URL = 'https://sentry-pro.example.com/';
+    const f = vi.fn(async () => fetchJson([]));
+    vi.stubGlobal('fetch', f);
+    await sentryFetch('/issues/');
+    expect(f.mock.calls[0][0]).toBe('https://sentry-pro.example.com/api/0/organizations/acme/issues/');
+  });
+
+  it('sentryUpdateIssue + sentryAddComment hit the self-hosted host on the GLOBAL issue endpoint', async () => {
+    process.env.SENTRY_URL = 'https://sentry.example.com';
+    const f = vi.fn(async () => fetchJson({ id: '9' }));
+    vi.stubGlobal('fetch', f);
+    await sentryUpdateIssue('9', { status: 'resolved' });
+    expect(f.mock.calls[0][0]).toBe('https://sentry.example.com/api/0/issues/9/');
+    await sentryAddComment('9', 'hi');
+    expect(f.mock.calls[1][0]).toBe('https://sentry.example.com/api/0/issues/9/comments/');
+  });
+
+  it('falls back to SENTRY_ORG when the integration provides no organizationSlug (self-hosted env path)', async () => {
+    resolveIntegrationToken.mockResolvedValueOnce({ provider: 'sentry', token: 'sntrys_test' });
+    process.env.SENTRY_URL = 'https://sentry.example.com';
+    process.env.SENTRY_ORG = 'sentry'; // the self-hosted installer's default org slug
+    const f = vi.fn(async () => fetchJson([]));
+    vi.stubGlobal('fetch', f);
+    await sentryFetch('/projects/');
+    expect(f.mock.calls[0][0]).toBe('https://sentry.example.com/api/0/organizations/sentry/projects/');
+  });
+
+  it('throws a CLEAR, actionable error when no org can be resolved', async () => {
+    resolveIntegrationToken.mockResolvedValueOnce({ provider: 'sentry', token: 'sntrys_test' });
+    vi.stubGlobal('fetch', vi.fn(async () => fetchJson([])));
+    await expect(sentryFetch('/issues/')).rejects.toThrow(/SENTRY_ORG/);
+  });
+
+  it('honors baseUrl from the token resolver (CLOUD account connected to a self-hosted Sentry)', async () => {
+    resolveIntegrationToken.mockResolvedValueOnce({
+      provider: 'sentry', token: 'sntrys_test', organizationSlug: 'acme', baseUrl: 'https://sentry.corp.internal',
+    });
+    const f = vi.fn(async () => fetchJson([]));
+    vi.stubGlobal('fetch', f);
+    await sentryFetch('/issues/');
+    // token-resolver baseUrl WINS over env + the sentry.io default
+    expect(f.mock.calls[0][0]).toBe('https://sentry.corp.internal/api/0/organizations/acme/issues/');
+  });
+
+  it('defaults to sentry.io when SENTRY_URL is unset (cloud unchanged)', async () => {
+    const f = vi.fn(async () => fetchJson([]));
+    vi.stubGlobal('fetch', f);
+    await sentryFetch('/issues/');
+    expect(f.mock.calls[0][0]).toBe('https://sentry.io/api/0/organizations/acme/issues/');
   });
 });
 
