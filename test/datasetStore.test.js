@@ -48,7 +48,16 @@ describe('datasetStoreSkill structure', () => {
 
   it('exposes the expected tools', () => {
     const names = datasetStoreSkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['dataset_append', 'dataset_query']);
+    expect(names).toEqual(['dataset_append', 'dataset_query', 'sqlite_exec', 'sqlite_query']);
+  });
+
+  it('sqlite tools take a logical `store` name + required sql', () => {
+    for (const n of ['sqlite_exec', 'sqlite_query']) {
+      const t = datasetStoreSkill.tools.find((x) => x.name === n);
+      expect(t.input_schema.required).toEqual(['sql']);
+      expect(t.input_schema.properties).toHaveProperty('store');
+      expect(t.input_schema.properties).toHaveProperty('params');
+    }
   });
 
   it('tools take a logical `store` name (not a storeId/dataset) and only require record/none', () => {
@@ -103,6 +112,26 @@ describe('name→storeId resolution from ZIBBY_STORE__* env', () => {
 
     const [url] = spy.mock.calls[0];
     expect(url).toBe('https://api-test.zibby.app/datasets/stores/store_only/append');
+  });
+
+  it('sqlite_exec/query hit the /sql route with sql + params on the resolved storeId', async () => {
+    process.env.ZIBBY_STORE__outbox = 'store_sql1';
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(fetchOk({ ok: true, columns: ['id'], rows: [[1]], wrote: false }));
+    const out = JSON.parse(await datasetStoreSkill.handleToolCall('sqlite_query', {
+      sql: 'SELECT id FROM outbox WHERE status = ?', params: ['scheduled'],
+    }));
+    expect(out).toMatchObject({ ok: true, store: 'outbox', storeId: 'store_sql1' });
+    const [url, opts] = spy.mock.calls[0];
+    expect(url).toBe('https://api-test.zibby.app/datasets/stores/store_sql1/sql');
+    expect(JSON.parse(opts.body)).toEqual({ sql: 'SELECT id FROM outbox WHERE status = ?', params: ['scheduled'] });
+  });
+
+  it('sqlite_exec requires sql (no call when missing)', async () => {
+    process.env.ZIBBY_STORE__outbox = 'store_sql1';
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(fetchOk({}));
+    const out = JSON.parse(await datasetStoreSkill.handleToolCall('sqlite_exec', { store: 'outbox' }));
+    expect(out.error).toMatch(/sql is required/);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('multiple-needs-store: omitting `store` with >1 bound store errors and lists names', async () => {

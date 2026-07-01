@@ -196,12 +196,23 @@ omit \`store\` and it defaults to that one. You can ONLY write to a bound store
 name; any other name is rejected. Each appended record is an arbitrary JSON
 object, auto-tagged with YOUR agent type so you can later filter to your writes.
 
+There are TWO kinds of bound store (shown as TYPE in AVAILABLE STORES):
+• dataset — append-only structured records you QUERY/AGGREGATE later (analytics).
+• sqlite  — a real, MUTABLE relational database (a SQLite file per store): CREATE
+  TABLE on the fly, INSERT/UPDATE/DELETE, SELECT. Schema + data persist across
+  runs. Use this when you need to UPDATE rows / track changing state (e.g. a
+  queue with a status column), not just append.
+
 Tools:
-- dataset_append: Append ONE structured JSON \`record\` to a store (by \`store\`
-  name). Use to durably persist a row of data each run (e.g. {repo, stars, ts}).
-- dataset_query: Run a SQL-style query over a store — select/aggregate
-  (count|sum|avg|min|max), filter (where), group (groupBy), order, limit, and
-  bound by month (since/until). Use to compute reports from what you've stored.`,
+- dataset_append: (dataset stores) Append ONE structured JSON \`record\`.
+- dataset_query: (dataset stores) SQL-style select/aggregate over appended records.
+- sqlite_exec: (sqlite stores) Run SQL that CHANGES data — CREATE TABLE / INSERT /
+  UPDATE / DELETE (one or more statements). Idempotent DDL: use CREATE TABLE IF
+  NOT EXISTS. Returns { rowsModified, wrote }.
+- sqlite_query: (sqlite stores) Run a SELECT (optionally with \`params\` for safe
+  binding). Returns { columns, rows }. Read-only — never changes data.
+Pick the tool that matches the store's TYPE; using a dataset tool on a sqlite
+store (or vice-versa) is rejected.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -276,6 +287,23 @@ Tools:
           return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
 
+        case 'sqlite_exec':
+        case 'sqlite_query': {
+          // Both map to the /sql route on a SQLITE-type store. exec vs query is
+          // guidance for the agent; the backend runs the SQL and (for writes)
+          // persists with optimistic concurrency. A dataset-type store here is
+          // rejected server-side ("not a sqlite store").
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          if (typeof args?.sql !== 'string' || !args.sql.trim()) {
+            return JSON.stringify({ error: 'sql is required (a non-empty SQL string)' });
+          }
+          const payload = { sql: args.sql };
+          if (Array.isArray(args?.params)) payload.params = args.params;
+          const data = await storeFetch(target.storeId, 'sql', payload);
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+        }
+
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -328,6 +356,32 @@ Tools:
           agent: { type: 'string', description: 'Filter to records written by one agent namespace. Omit to query across all writers.' },
         },
         required: [],
+      },
+    },
+    {
+      name: 'sqlite_exec',
+      description: 'For SQLITE-type stores: run SQL that CHANGES data — CREATE TABLE (use IF NOT EXISTS), INSERT, UPDATE, DELETE (one or more statements in one call). The store is a real, mutable SQLite database that persists across your stateless runs. Returns { rowsModified, wrote }. Use this to build schema on the fly and to update rows / track changing state (e.g. a queue with a status column).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          store: { type: 'string', description: 'The logical store NAME (a sqlite-type store from AVAILABLE STORES) — pick by description. NOT an id. If exactly one store is bound you may omit this.' },
+          sql: { type: 'string', description: 'The SQL to run. May contain multiple statements separated by ";". Prefer CREATE TABLE IF NOT EXISTS for idempotent schema.' },
+          params: { type: 'array', description: 'Optional positional bind params for a SINGLE parameterized statement (safe binding of values), e.g. sql "UPDATE t SET s=? WHERE id=?" with params ["done", 1].' },
+        },
+        required: ['sql'],
+      },
+    },
+    {
+      name: 'sqlite_query',
+      description: 'For SQLITE-type stores: run a read-only SELECT (optionally with `params` for safe binding) against the store\'s SQLite database. Returns { columns, rows }. Never changes data. Use to read back rows/state you stored earlier.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          store: { type: 'string', description: 'The logical store NAME (a sqlite-type store from AVAILABLE STORES) — pick by description. NOT an id. If exactly one store is bound you may omit this.' },
+          sql: { type: 'string', description: 'A single SELECT statement. Use ? placeholders + `params` for any values.' },
+          params: { type: 'array', description: 'Optional positional bind params for the SELECT, e.g. ["linkedin_personal"].' },
+        },
+        required: ['sql'],
       },
     },
   ],
