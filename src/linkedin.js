@@ -161,6 +161,7 @@ Personal (your own profile) — PUBLISHES IMMEDIATELY:
 
 Notes:
 - Org-page posts are ALWAYS created as a DRAFT; personal-profile posts are ALWAYS published live — choose the tool accordingly.
+- PUBLISHING IS OUTWARD-FACING AND IRREVERSIBLE. linkedin_publish_post posts live to a real audience the instant you call it — there is no undo and no draft state for member profiles. Only call it after the human has EXPLICITLY approved publishing THIS specific text in THIS conversation. If you wrote or edited the text, show it and get an explicit "yes, publish" first; if you are unsure, HOLD/draft rather than publish. The org draft tool (linkedin_create_draft_post) is the safe default when a human still needs to review.
 - If the relevant LinkedIn integration is not connected these tools return { ok:false, error }; treat that as "LinkedIn unavailable" and continue.`,
 
   resolve() {
