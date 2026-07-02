@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock backend-client BEFORE importing the skill so resolveIntegrationToken is
 // replaced at load time. Resolves a VARIANT-SPECIFIC token per provider:
@@ -399,5 +399,68 @@ describe('graceful error path', () => {
     const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_bogus', {}));
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/Unknown tool/);
+  });
+});
+
+describe('injected-token path — Copilot per-turn verified-sender injection', () => {
+  const T = 'ZIBBY_INJECTED_LINKEDIN_TOKEN';
+  const M = 'ZIBBY_INJECTED_LINKEDIN_MEMBER_ID';
+  afterEach(() => { delete process.env[T]; delete process.env[M]; });
+
+  it('publish uses the INJECTED token + member id (sender identity) and does NOT resolve the PAT account token', async () => {
+    process.env[T] = 'sender-injected-token';
+    process.env[M] = 'sender-member-777';
+    let posted;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      posted = { url, init };
+      return fetchJson('', { status: 201, headers: { 'x-restli-id': 'urn:li:share:INJ' } });
+    });
+
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {
+      text: 'Posted as the verified Slack sender',
+    }));
+
+    expect(result.ok).toBe(true);
+    // Attributed to the INJECTED sender member id — NOT the mock's 'abc123'.
+    expect(result.author).toBe('urn:li:person:sender-member-777');
+    // The Bearer is the injected sender token, not the PAT-account 'secret_li'.
+    expect(posted.init.headers.Authorization).toBe('Bearer sender-injected-token');
+    // Injection short-circuits the PAT chokepoint entirely (no cross-account leak).
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+  });
+
+  it('dry_run reports the INJECTED identity via /v2/userinfo with the injected token; no PAT resolve', async () => {
+    process.env[T] = 'sender-injected-token';
+    process.env[M] = 'sender-member-777';
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (url.includes('/v2/userinfo')) return fetchJson({ sub: 'sender-member-777', name: 'Verified Sender' });
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {
+      text: 'preview', dry_run: true,
+    }));
+
+    expect(result.dryRun).toBe(true);
+    expect(result.wouldPostAs).toEqual({ name: 'Verified Sender', id: 'sender-member-777', urn: 'urn:li:person:sender-member-777' });
+    // The identity read used the injected token; never hit the write endpoint.
+    expect(calls[0].init.headers.Authorization).toBe('Bearer sender-injected-token');
+    expect(calls.some((c) => c.url.includes('/rest/posts'))).toBe(false);
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+  });
+
+  it('NO injection (env unset) → unchanged: resolves the PAT account token', async () => {
+    let posted;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      posted = { url, init };
+      return fetchJson('', { status: 201, headers: { 'x-restli-id': 'urn:li:share:PAT' } });
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', { text: 'x' }));
+    expect(result.ok).toBe(true);
+    expect(result.author).toBe('urn:li:person:abc123'); // the PAT-account member
+    expect(posted.init.headers.Authorization).toBe('Bearer secret_li');
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_personal');
   });
 });

@@ -40,6 +40,36 @@ function resolveSkillBin() {
   return existsSync(candidate) ? candidate : null;
 }
 
+/**
+ * INJECTED-TOKEN fast path (Zibby Copilot per-turn credential injection).
+ *
+ * The Zibby Copilot is ONE shared Slack/Lark bot backed by ONE project's
+ * PROJECT_API_TOKEN. resolveIntegrationToken(provider) authenticates with that
+ * PAT, so the account is inferred SERVER-SIDE from the PAT — meaning the shared
+ * bot would only ever see the PROJECT OWNER's LinkedIn, never the (different)
+ * person who actually sent the Slack message.
+ *
+ * To let the bot post to the VERIFIED SENDER's OWN LinkedIn, the copilot-runtime
+ * (a TRUSTED backend service that already KMS-decrypts tenants' creds directly)
+ * resolves the EMAIL-VERIFIED Slack sender's OWN linkedin_personal token straight
+ * from the encrypted store and injects it into THIS turn's env
+ * (ZIBBY_INJECTED_LINKEDIN_TOKEN / ZIBBY_INJECTED_LINKEDIN_MEMBER_ID, set +
+ * restored per-turn — never persisted, never cross-turn). When present it takes
+ * PRECEDENCE over resolveIntegrationToken so the post is attributed to the sender.
+ *
+ * SCOPED to linkedin_personal ONLY (member-profile publishing). It is NEVER used
+ * for the business/org provider (company Pages) or any other integration. Absent
+ * (no injection) → this returns null and the normal PAT chokepoint runs
+ * unchanged (self-host + cloud), so the Fargate linkedin-post workflow, which
+ * never sets these vars, is byte-for-byte unaffected.
+ */
+export function injectedPersonalToken() {
+  const token = String(process.env.ZIBBY_INJECTED_LINKEDIN_TOKEN || '').trim();
+  if (!token) return null;
+  const memberId = String(process.env.ZIBBY_INJECTED_LINKEDIN_MEMBER_ID || '').trim();
+  return { token, memberId };
+}
+
 // LinkedIn versioned REST API. The LinkedIn-Version header is REQUIRED and
 // pins the request/response schema; use a recent stable YYYYMM month.
 const LINKEDIN_VERSION = '202506';
@@ -91,7 +121,16 @@ function readHeader(headers, key) {
  */
 export async function linkedinApi(path, opts = {}, provider = 'linkedin_business') {
   const makeRequest = async () => {
-    const { token } = await resolveIntegrationToken(provider);
+    // INJECTED-TOKEN fast path (Copilot per-turn injection) — linkedin_personal
+    // ONLY. When the runtime injected the verified sender's own member token,
+    // use it VERBATIM (it takes precedence over the PAT-inferred account token),
+    // so the call is attributed to the sender, not the shared project owner.
+    let token;
+    if (provider === 'linkedin_personal') {
+      const injected = injectedPersonalToken();
+      if (injected) token = injected.token;
+    }
+    if (!token) ({ token } = await resolveIntegrationToken(provider));
     if (typeof token !== 'string' || !token) {
       throw new Error('LinkedIn is not connected: no access token available. Connect LinkedIn in Integrations.');
     }
@@ -284,12 +323,18 @@ Notes:
         }
 
         case 'linkedin_publish_post': {
-          // PERSONAL / member-profile publish. The personal token endpoint
-          // returns the resolved member id alongside the token; the author urn
-          // is urn:li:person:{memberId}. Resolve it directly here (linkedinApi
-          // doesn't expose memberId); linkedinApi resolves the token again for
-          // the POST — that's fine, tokens are cached.
-          const { memberId } = await resolveIntegrationToken('linkedin_personal');
+          // PERSONAL / member-profile publish. The author urn is
+          // urn:li:person:{memberId}. When the runtime injected the verified
+          // sender's identity, the member id comes from the injection (the
+          // sender's OWN member id) — NOT from resolveIntegrationToken, whose
+          // PAT-inferred account would be the shared project owner's. Otherwise
+          // the personal token endpoint returns the resolved member id alongside
+          // the token. linkedinApi resolves the token again for the POST (same
+          // injected/PAT precedence) — that's fine, tokens are cached.
+          const injected = injectedPersonalToken();
+          const memberId = injected
+            ? injected.memberId
+            : (await resolveIntegrationToken('linkedin_personal')).memberId;
           if (!memberId) {
             return JSON.stringify({ ok: false, error: 'LinkedIn (personal) not connected or member id unavailable — reconnect LinkedIn Personal' });
           }
