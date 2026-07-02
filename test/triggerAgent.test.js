@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { triggerWorkflowSkill } from '../src/triggerWorkflow.js';
+import { triggerAgentSkill } from '../src/triggerAgent.js';
 
 const ENV_KEYS = ['PROJECT_ID', 'PROJECT_API_TOKEN', 'WORKFLOW_TYPE', 'PROGRESS_API_URL', 'ZIBBY_ACCOUNT_API_URL'];
 let saved;
@@ -19,9 +19,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const call = (args) => triggerWorkflowSkill.handleToolCall('trigger_workflow', args).then(JSON.parse);
+const call = (args) => triggerAgentSkill.handleToolCall('trigger_agent', args).then(JSON.parse);
 
-describe('trigger_workflow skill', () => {
+describe('trigger_agent skill', () => {
   it('self-dispatches (no workflowType → own WORKFLOW_TYPE) and returns executionId', async () => {
     process.env.PROGRESS_API_URL = 'https://api-prod.zibby.app/executions';
     const out = await call({ input: { trigger: 'fix', issueId: '1' } });
@@ -60,13 +60,13 @@ describe('trigger_workflow skill', () => {
   });
 
   it('graceful: unknown tool name → ok:false', async () => {
-    const out = await triggerWorkflowSkill.handleToolCall('bogus', {}).then(JSON.parse);
+    const out = await triggerAgentSkill.handleToolCall('bogus', {}).then(JSON.parse);
     expect(out.ok).toBe(false);
   });
 
-  it('exposes one MCP tool named trigger_workflow', () => {
-    expect(triggerWorkflowSkill.tools).toHaveLength(1);
-    expect(triggerWorkflowSkill.tools[0].name).toBe('trigger_workflow');
-    expect(triggerWorkflowSkill.id).toBe('trigger-workflow');
+  it('exposes one MCP tool named trigger_agent', () => {
+    expect(triggerAgentSkill.tools).toHaveLength(1);
+    expect(triggerAgentSkill.tools[0].name).toBe('trigger_agent');
+    expect(triggerAgentSkill.id).toBe('trigger-agent');
   });
 });

@@ -30,7 +30,7 @@ import { gitWriteSkill } from './git-write.js';
 import { chatMemorySkill } from './chat-memory.js';
 import { kvMemorySkill } from './kvMemory.js';
 import { datasetStoreSkill } from './datasetStore.js';
-import { triggerWorkflowSkill } from './triggerWorkflow.js';
+import { triggerAgentSkill } from './triggerAgent.js';
 import { codebaseMemorySkill } from './codebaseMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
 import {
@@ -62,7 +62,7 @@ registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
 registerSkill(kvMemorySkill);
 registerSkill(datasetStoreSkill);
-registerSkill(triggerWorkflowSkill);
+registerSkill(triggerAgentSkill);
 registerSkill(codebaseMemorySkill);
 registerSkill(workflowBuilderSkill);
 registerSkill(openaiBillingSkill);

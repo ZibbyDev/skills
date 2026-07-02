@@ -1,8 +1,8 @@
 /**
- * trigger-workflow — a GENERIC, agent-callable skill for firing another Zibby
- * workflow run from inside a running agent.
+ * trigger-agent — a GENERIC, agent-callable skill for firing another Zibby
+ * agent run from inside a running agent.
  *
- * The agent gets ONE real MCP tool, `trigger_workflow`, and DECIDES for itself
+ * The agent gets ONE real MCP tool, `trigger_agent`, and DECIDES for itself
  * when (and how many times) to call it — so a triage agent can trigger a fix for
  * every issue it judges worth fixing, an orchestrator can fan out to N children,
  * etc. This is the agent-driven counterpart to the engine's deterministic
@@ -60,7 +60,7 @@ function getApiBase() {
 }
 
 const TRIGGER_TOOL = {
-  name: 'trigger_workflow',
+  name: 'trigger_agent',
   description:
     'Trigger another Zibby workflow/agent run in THIS project (fire-and-forget). ' +
     'Call it once per run you want to start — the agent decides which and how many. ' +
@@ -83,16 +83,16 @@ const TRIGGER_TOOL = {
   },
 };
 
-export const triggerWorkflowSkill = {
-  id: 'trigger-workflow',
+export const triggerAgentSkill = {
+  id: 'trigger-agent',
   serverName: 'trigger',
   allowedTools: ['mcp__trigger__*'],
   envKeys: [],
   description:
     'Trigger another Zibby workflow/agent run in this project (agent-driven, fire-and-forget; cloud + self-hosted).',
 
-  promptFragment: `## Trigger another workflow (agent-driven)
-You can start another Zibby workflow/agent run yourself with the \`trigger_workflow\`
+  promptFragment: `## Trigger another agent (agent-driven)
+You can start another Zibby agent run yourself with the \`trigger_agent\`
 tool — and YOU decide when and how many times to call it. Each call starts ONE
 independent run (fire-and-forget) and returns its executionId; it does NOT wait for
 that run to finish.
@@ -118,7 +118,7 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
     return {
       type: 'stdio',
       command: 'node',
-      args: [bin, '../dist/triggerWorkflow.js', 'triggerWorkflowSkill'],
+      args: [bin, '../dist/triggerAgent.js', 'triggerAgentSkill'],
       env,
       description: this.description,
       alwaysLoad: false,
@@ -126,7 +126,7 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
   },
 
   async handleToolCall(name, args = {}) {
-    if (name !== 'trigger_workflow') {
+    if (name !== 'trigger_agent') {
       return JSON.stringify({ ok: false, error: `unknown tool: ${name}` });
     }
     try {
@@ -162,7 +162,7 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
       const executionId = body.executionId || body.execution?.id || body.id || null;
       return JSON.stringify({ ok: true, workflowType, executionId, note: 'run started (fire-and-forget)' });
     } catch (e) {
-      return JSON.stringify({ ok: false, error: `trigger_workflow failed: ${e?.message || String(e)}` });
+      return JSON.stringify({ ok: false, error: `trigger_agent failed: ${e?.message || String(e)}` });
     }
   },
 
