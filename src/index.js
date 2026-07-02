@@ -124,6 +124,20 @@ export const SKILLS = {
   OPENAI_BILLING: 'openai_billing',
   ANTHROPIC_BILLING: 'anthropic_billing',
   CURSOR_ADMIN: 'cursor_admin',
+  // `circleci` — INTEGRATION-GATE MARKER, not a runtime MCP skill: no skill
+  // object registers under this id (the runtime tool-resolver warns + skips it).
+  // Declaring it on a node's `skills` makes the backend's
+  // REQUIRED_INTEGRATION_MAP gate deploy on a connected CircleCI (the
+  // flaky-test-fixer pattern — the node resolves the CircleCI token
+  // deterministically, no LLM tools involved). Mirrored in
+  // @zibby/agent-workflow's SKILLS map.
+  CIRCLECI: 'circleci',
+  // `trigger-agent` — the agent-callable `trigger_agent` MCP tool
+  // (triggerAgentSkill): fire another Zibby workflow/agent run in this project
+  // (fire-and-forget, returns the executionId). Declares no
+  // requiresIntegration → never gates deploy. The id MUST match the skill's
+  // registered id ('trigger-agent'). Mirrored in @zibby/agent-workflow's map.
+  TRIGGER_AGENT: 'trigger-agent',
 };
 
 export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, notionSkill, linkedinSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
