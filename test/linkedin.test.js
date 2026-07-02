@@ -271,6 +271,120 @@ describe('linkedin_publish_post — personal/member publish', () => {
   });
 });
 
+describe('dry_run — validate identity WITHOUT posting', () => {
+  it('member dry_run resolves wouldPostAs via /v2/userinfo and NEVER hits /rest/posts', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (url.includes('/v2/userinfo')) {
+        return fetchJson({ sub: 'abc123', name: 'Leo Founder', given_name: 'Leo', family_name: 'Founder' });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {
+      text: 'Would-be post body',
+      visibility: 'connections',
+      dry_run: true,
+    }));
+
+    expect(result).toEqual({
+      dryRun: true,
+      target: 'member',
+      wouldPostAs: { name: 'Leo Founder', id: 'abc123', urn: 'urn:li:person:abc123' },
+      visibility: 'CONNECTIONS',
+      textPreview: 'Would-be post body',
+      note: 'DRY RUN — nothing was posted',
+    });
+
+    // The READ identity endpoint WAS called; the write endpoint was NOT.
+    expect(calls.some((c) => c.url.includes('/v2/userinfo'))).toBe(true);
+    expect(calls.some((c) => c.url.includes('/rest/posts'))).toBe(false);
+    // Resolved the PERSONAL provider for the identity read.
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_personal');
+  });
+
+  it('member dry_run returns { dryRun:true, ok:false, error } when the identity read fails — never throws', async () => {
+    globalThis.fetch = vi.fn(async (url) => {
+      if (url.includes('/v2/userinfo')) return fetchJson({ message: 'nope' }, { ok: false, status: 401 });
+      throw new Error(`unexpected url ${url}`);
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {
+      text: 'x',
+      dry_run: true,
+    }));
+    expect(result.dryRun).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/LinkedIn API 401/);
+  });
+
+  it('org dry_run confirms the org id/urn + name via a READ call and NEVER hits /rest/posts', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (url.includes('/rest/organizations/12345')) {
+        return fetchJson({ id: 12345, localizedName: 'Acme Inc', vanityName: 'acme' });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_create_draft_post', {
+      organizationId: '12345',
+      text: 'Would-be draft commentary',
+      dry_run: true,
+    }));
+
+    expect(result).toEqual({
+      dryRun: true,
+      target: 'organization',
+      wouldPostAs: { name: 'Acme Inc', id: '12345', urn: 'urn:li:organization:12345' },
+      visibility: 'PUBLIC',
+      textPreview: 'Would-be draft commentary',
+      note: 'DRY RUN — nothing was posted',
+    });
+
+    expect(calls.some((c) => c.url.includes('/rest/organizations/12345'))).toBe(true);
+    expect(calls.some((c) => c.url.includes('/rest/posts'))).toBe(false);
+    // Org path uses the BUSINESS provider.
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_business');
+  });
+
+  it('org dry_run still returns the confirmed org (empty name) when name resolution fails — no post', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url) => {
+      calls.push({ url });
+      if (url.includes('/rest/organizations/')) return fetchJson({ message: 'forbidden' }, { ok: false, status: 403 });
+      throw new Error(`unexpected url ${url}`);
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_create_draft_post', {
+      organizationUrn: 'urn:li:organization:777',
+      text: 'body',
+      dry_run: true,
+    }));
+    expect(result.dryRun).toBe(true);
+    expect(result.wouldPostAs).toEqual({ name: '', id: '777', urn: 'urn:li:organization:777' });
+    expect(result.textPreview).toBe('body');
+    expect(calls.some((c) => c.url.includes('/rest/posts'))).toBe(false);
+  });
+
+  it('dry_run:false is unchanged — the write endpoint IS called', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      return fetchJson('', { status: 201, headers: { 'x-restli-id': 'urn:li:share:2020' } });
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', {
+      text: 'real post',
+      dry_run: false,
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.postUrn).toBe('urn:li:share:2020');
+    expect(result.lifecycleState).toBe('PUBLISHED');
+    expect(calls.some((c) => c.url.includes('/rest/posts'))).toBe(true);
+    expect(calls.some((c) => c.url.includes('/v2/userinfo'))).toBe(false);
+  });
+});
+
 describe('graceful error path', () => {
   it('returns { ok:false, error } on an HTTP failure — never throws', async () => {
     globalThis.fetch = vi.fn(async () => fetchJson({ message: 'nope' }, { ok: false, status: 422 }));

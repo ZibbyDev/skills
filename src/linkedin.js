@@ -154,10 +154,10 @@ You can post to LinkedIn two ways — an ORG company Page (business) and your ow
 
 Business (company Page) — DRAFT only:
 - linkedin_list_organizations: List the Organizations (company Pages) the member ADMINISTERS. Returns [{ id, urn, name, vanityName }]. Call this first to choose the author org. (needs LinkedIn Business connected)
-- linkedin_create_draft_post: Create a DRAFT post on a company Page. Pass organizationId (or organizationUrn) + text (the post commentary). The post is created in DRAFT state (never published automatically) so a human reviews and publishes it in LinkedIn. Returns { postUrn }. (needs LinkedIn Business connected)
+- linkedin_create_draft_post: Create a DRAFT post on a company Page. Pass organizationId (or organizationUrn) + text (the post commentary). The post is created in DRAFT state (never published automatically) so a human reviews and publishes it in LinkedIn. Returns { postUrn }. Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published; returns { dryRun, target, wouldPostAs, textPreview }. (needs LinkedIn Business connected)
 
 Personal (your own profile) — PUBLISHES IMMEDIATELY:
-- linkedin_publish_post: PUBLISH a post to your OWN member profile feed. Pass text (the post body) + optional visibility ('PUBLIC' default, or 'CONNECTIONS'). UNLIKE the org draft tool, this PUBLISHES the post immediately — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns { postUrn }. (needs LinkedIn Personal connected)
+- linkedin_publish_post: PUBLISH a post to your OWN member profile feed. Pass text (the post body) + optional visibility ('PUBLIC' default, or 'CONNECTIONS'). UNLIKE the org draft tool, this PUBLISHES the post immediately — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns { postUrn }. Set dry_run:true to VALIDATE which member profile the post would publish to (and preview the text) WITHOUT publishing — nothing is posted; returns { dryRun, target, wouldPostAs, textPreview }. Use this to confirm the identity before an approved publish. (needs LinkedIn Personal connected)
 
 Notes:
 - Org-page posts are ALWAYS created as a DRAFT; personal-profile posts are ALWAYS published live — choose the tool accordingly.
@@ -225,6 +225,34 @@ Notes:
           // Only PUBLIC visibility is supported for org-page posts here; default it.
           const visibility = args?.visibility ? String(args.visibility).toUpperCase() : 'PUBLIC';
           const author = `urn:li:organization:${id}`;
+
+          // DRY RUN — validate WHICH org the post would go to (+ preview the
+          // text) WITHOUT creating anything. Confirms the caller-passed org
+          // id/urn and best-effort resolves the org name via a READ-only call.
+          // Never hits /rest/posts, so nothing is created.
+          if (args?.dry_run === true) {
+            try {
+              let name = '';
+              try {
+                const org = (await linkedinApi(`/rest/organizations/${id}`, {}, 'linkedin_business')).body;
+                name = orgName(org);
+              } catch {
+                // Org name is best-effort — the caller explicitly passed this
+                // org id/urn, so it is the confirmed target regardless.
+              }
+              return JSON.stringify({
+                dryRun: true,
+                target: 'organization',
+                wouldPostAs: { name, id, urn: author },
+                visibility,
+                textPreview: text,
+                note: 'DRY RUN — nothing was posted',
+              });
+            } catch (e) {
+              return JSON.stringify({ dryRun: true, ok: false, error: e.message });
+            }
+          }
+
           const requestBody = {
             author,
             commentary: text,
@@ -271,6 +299,34 @@ Notes:
           }
           const visibility = args?.visibility ? String(args.visibility).toUpperCase() : 'PUBLIC';
           const author = `urn:li:person:${memberId}`;
+
+          // DRY RUN — validate WHICH member profile the post would publish to
+          // (+ preview the text) WITHOUT publishing. Proves WHO the configured
+          // token would post as via the READ-only OpenID /v2/userinfo endpoint
+          // (the personal provider is a "Sign In with LinkedIn using OpenID
+          // Connect" token, so `openid profile` is in scope). Never hits
+          // /rest/posts, so nothing is published.
+          if (args?.dry_run === true) {
+            try {
+              const info = (await linkedinApi('/v2/userinfo', {}, 'linkedin_personal')).body;
+              const name =
+                info?.name ||
+                [info?.given_name, info?.family_name].filter(Boolean).join(' ') ||
+                '';
+              const id = info?.sub ? String(info.sub) : memberId;
+              return JSON.stringify({
+                dryRun: true,
+                target: 'member',
+                wouldPostAs: { name, id, urn: `urn:li:person:${id}` },
+                visibility,
+                textPreview: text,
+                note: 'DRY RUN — nothing was posted',
+              });
+            } catch (e) {
+              return JSON.stringify({ dryRun: true, ok: false, error: e.message });
+            }
+          }
+
           const requestBody = {
             author,
             commentary: text,
@@ -322,7 +378,7 @@ Notes:
     },
     {
       name: 'linkedin_create_draft_post',
-      description: 'Create a DRAFT post on a LinkedIn Organization (company Page). The post is created in DRAFT state (never published automatically) so a human can review and publish it in LinkedIn. Returns the created post URN.',
+      description: 'Create a DRAFT post on a LinkedIn Organization (company Page). The post is created in DRAFT state (never published automatically) so a human can review and publish it in LinkedIn. Returns the created post URN. Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published.',
       input_schema: {
         type: 'object',
         properties: {
@@ -330,18 +386,20 @@ Notes:
           organizationUrn: { type: 'string', description: 'The organization URN, e.g. "urn:li:organization:12345". Alternative to organizationId.' },
           text: { type: 'string', description: 'The post commentary (the body text of the post).' },
           visibility: { type: 'string', enum: ['PUBLIC'], description: 'Post visibility. Defaults to PUBLIC.' },
+          dry_run: { type: 'boolean', description: 'Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published. Returns { dryRun, target, wouldPostAs, visibility, textPreview }. Defaults to false.' },
         },
         required: ['text'],
       },
     },
     {
       name: 'linkedin_publish_post',
-      description: 'PUBLISH a post to the authenticated member\'s OWN LinkedIn profile feed (personal). UNLIKE linkedin_create_draft_post (which only drafts on a company Page), this PUBLISHES the post IMMEDIATELY — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns the created post URN. Requires the LinkedIn Personal integration connected.',
+      description: 'PUBLISH a post to the authenticated member\'s OWN LinkedIn profile feed (personal). UNLIKE linkedin_create_draft_post (which only drafts on a company Page), this PUBLISHES the post IMMEDIATELY — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns the created post URN. Requires the LinkedIn Personal integration connected. Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published.',
       input_schema: {
         type: 'object',
         properties: {
           text: { type: 'string', description: 'The post body (the commentary text of the post).' },
           visibility: { type: 'string', enum: ['PUBLIC', 'CONNECTIONS'], description: 'Post visibility: PUBLIC (anyone) or CONNECTIONS (your connections only). Defaults to PUBLIC.' },
+          dry_run: { type: 'boolean', description: 'Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published. Returns { dryRun, target, wouldPostAs, visibility, textPreview }. Defaults to false.' },
         },
         required: ['text'],
       },
