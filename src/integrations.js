@@ -83,6 +83,12 @@ export const INTEGRATIONS = Object.freeze({
   // git-write. See linkedin.js + handlers/linkedin.js.
   LINKEDIN_PERSONAL: 'linkedin_personal',
   LINKEDIN_BUSINESS: 'linkedin_business',
+  // Discord — paste-token (static bot token + guild id) integration, same
+  // shape as linear/circleci (NOT OAuth). The discordSkill talks to the
+  // Discord REST API directly (Authorization: Bot <token>), resolved via
+  // resolveIntegrationToken('discord') with a DISCORD_BOT_TOKEN env fallback
+  // for self-host. See discord.js + backend handlers/discord.js.
+  DISCORD:           'discord',
 });
 
 /**
@@ -128,4 +134,5 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   open_design: { id: 'open_design', name: 'OpenDesign', connectPath: '/integrations?provider=open_design' },
   linkedin_personal: { id: 'linkedin_personal', name: 'LinkedIn (Personal)', connectPath: '/integrations?provider=linkedin_personal' },
   linkedin_business: { id: 'linkedin_business', name: 'LinkedIn (Business)', connectPath: '/integrations?provider=linkedin_business' },
+  discord: { id: 'discord', name: 'Discord', connectPath: '/integrations?provider=discord' },
 });

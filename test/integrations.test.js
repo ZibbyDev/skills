@@ -83,6 +83,9 @@ describe('INTEGRATIONS constant', () => {
         // linkedin_personal (Share on LinkedIn, member profile — PUBLISH a
         // post to the member's own feed). See linkedin.js + handlers/linkedin.js.
         'linkedin_personal', 'linkedin_business',
+        // Discord — paste-token (static bot token + guild id, NOT OAuth).
+        // See discord.js + backend handlers/discord.js.
+        'discord',
       ])
     );
   });
