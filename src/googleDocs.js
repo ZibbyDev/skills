@@ -83,11 +83,35 @@ export function senderIsNonOwner() {
   return String(process.env.ZIBBY_SENDER_IS_NON_OWNER || '').trim() === '1';
 }
 
-// The HARD-REFUSAL message for a non-owner sender with no Google of their own.
-// Deliberately does NOT contain the words "token"/"401"/"unauthorized" so the
-// googleApi retry heuristic never retries it.
+/**
+ * STRICT CHAT-TURN INVARIANT (fail-CLOSED) — ZIBBY_CHAT_STRICT_PERSONAL=1.
+ *
+ * Set UNCONDITIONALLY by the Copilot runtime for EVERY chat turn (Slack +
+ * Lark, owner or not). Under it, personal-tier providers (google here) must
+ * NEVER fall through to the PAT-resolved project-owner token: the ONLY
+ * accepted credential is the per-turn injected sender token
+ * (ZIBBY_INJECTED_GOOGLE_TOKEN — the runtime injects the OWNER's own Google
+ * through the same path, so the owner keeps working). No injected token →
+ * HARD REFUSE, for ANY sender: verified non-owners, same-account colleagues,
+ * UNVERIFIED senders (users.info failure / no email match — the exact class
+ * the old ZIBBY_SENDER_IS_NON_OWNER flag failed OPEN on), and even the owner
+ * when their own Google isn't connected. The non-owner flag stays as
+ * belt-and-braces; this strict flag is the primary gate.
+ *
+ * Absent both flags (Fargate workflows, self-host, direct tool use — no chat
+ * sender context) → the normal PAT chokepoint runs unchanged.
+ */
+export function chatStrictPersonal() {
+  return String(process.env.ZIBBY_CHAT_STRICT_PERSONAL || '').trim() === '1';
+}
+
+// The HARD-REFUSAL message when a chat turn has no injected Google of the
+// sender's own (sender-neutral: covers non-owners, unverified senders AND the
+// owner with no Google connected). Deliberately does NOT contain the words
+// "token"/"401"/"unauthorized" so the googleApi retry heuristic never retries
+// it. Exported as NON_OWNER_REFUSAL for backward compatibility.
 export const NON_OWNER_REFUSAL =
-  "You haven't connected your own Google account — connect it at https://studio.zibby.dev/integrations (Google Docs). For privacy, I can't use the project owner's Google on your behalf.";
+  "You haven't connected your own Google account — connect it at https://studio.zibby.dev/integrations (Google Docs). For privacy, I can't use anyone else's Google (including the project owner's) on your behalf.";
 
 // Cap on extracted text so a huge doc can't blow the prompt budget.
 const MAX_TEXT_CHARS = 20000;
@@ -121,17 +145,23 @@ export async function googleApi(url, opts = {}) {
   const makeRequest = async () => {
     // Bearer precedence (single chokepoint — every gdocs tool routes through
     // here BEFORE any network call):
-    //   1. injected sender token (Copilot per-turn injection) — the verified
-    //      sender's OWN Google; never the PAT account's.
-    //   2. non-owner gate — verified non-owner sender with NO injected token:
-    //      HARD REFUSE. NEVER fall through to the owner's PAT-resolved token.
-    //   3. owner/self or no sender-identity context (Fargate workflows,
-    //      self-host) — the existing resolveIntegrationToken path, unchanged.
+    //   1. injected sender token (Copilot per-turn injection) — the sender's
+    //      OWN Google (the runtime injects the owner's own Google through the
+    //      same path); never the PAT account's.
+    //   2. STRICT CHAT-TURN gate (primary, fail-CLOSED) — ANY chat turn
+    //      (ZIBBY_CHAT_STRICT_PERSONAL=1) with NO injected token: HARD REFUSE.
+    //      A chat turn must NEVER fall through to the PAT-resolved owner token
+    //      — not for non-owners, not for unverified senders, not even for the
+    //      owner (whose own Google arrives via injection when connected).
+    //   3. non-owner gate (belt-and-braces, legacy) — verified non-owner
+    //      sender with NO injected token: HARD REFUSE.
+    //   4. no chat-sender context (Fargate workflows, self-host, direct tool
+    //      use) — the existing resolveIntegrationToken path, unchanged.
     let token;
     const injected = injectedGoogleToken();
     if (injected) {
       token = injected.token;
-    } else if (senderIsNonOwner()) {
+    } else if (chatStrictPersonal() || senderIsNonOwner()) {
       throw new Error(NON_OWNER_REFUSAL);
     } else {
       ({ token } = await resolveIntegrationToken('google'));
@@ -415,7 +445,7 @@ These tools return { ok:false, error } on failure — treat an unavailable Googl
     // env-filtering spawner must never silently drop the SAFETY GATE flag —
     // that would fail open to the owner's token).
     const env = {};
-    for (const k of ['ZIBBY_INJECTED_GOOGLE_TOKEN', 'ZIBBY_INJECTED_GOOGLE_EMAIL', 'ZIBBY_SENDER_IS_NON_OWNER']) {
+    for (const k of ['ZIBBY_INJECTED_GOOGLE_TOKEN', 'ZIBBY_INJECTED_GOOGLE_EMAIL', 'ZIBBY_SENDER_IS_NON_OWNER', 'ZIBBY_CHAT_STRICT_PERSONAL']) {
       if (process.env[k]) env[k] = process.env[k];
     }
     return {

@@ -70,6 +70,50 @@ export function injectedPersonalToken() {
   return { token, memberId };
 }
 
+/**
+ * STRICT CHAT-TURN INVARIANT (fail-CLOSED) — ZIBBY_CHAT_STRICT_PERSONAL=1.
+ * Set UNCONDITIONALLY by the Copilot runtime for EVERY chat turn (Slack +
+ * Lark, owner or not). Under it, the PERSONAL-tier provider
+ * (linkedin_personal) must NEVER fall through to the PAT-resolved project-
+ * owner token: the ONLY accepted credential is the per-turn injected sender
+ * token (the runtime injects the OWNER's own LinkedIn through the same path,
+ * so the owner keeps working). No injected token → HARD REFUSE for ANY sender
+ * — verified non-owner, same-account colleague, UNVERIFIED sender (the class
+ * the old per-sender flags failed OPEN on), or the owner with no LinkedIn.
+ * The business/org provider (company Pages) is team-tier and unaffected.
+ * Absent the flag (Fargate workflows, self-host, direct tool use) → the
+ * normal PAT chokepoint runs unchanged.
+ */
+export function chatStrictPersonal() {
+  return String(process.env.ZIBBY_CHAT_STRICT_PERSONAL || '').trim() === '1';
+}
+
+/** Belt-and-braces legacy flag: this turn's verified sender ≠ the tenant owner. */
+export function senderIsNonOwner() {
+  return String(process.env.ZIBBY_SENDER_IS_NON_OWNER || '').trim() === '1';
+}
+
+// HARD-REFUSAL message when a chat turn has no injected LinkedIn of the
+// sender's own (sender-neutral: non-owners, unverified senders AND the owner
+// with no LinkedIn connected). Deliberately avoids "token"/"401"/
+// "unauthorized" so the linkedinApi retry heuristic never retries it.
+export const PERSONAL_REFUSAL =
+  "You haven't connected your own LinkedIn account — connect it at https://studio.zibby.dev/integrations (LinkedIn). For privacy, I can't post or act as anyone else's LinkedIn (including the project owner's) on your behalf.";
+
+/**
+ * The single PERSONAL-tier credential gate for linkedin_personal calls:
+ * injected sender token wins; otherwise a strict chat turn (or a flagged
+ * non-owner sender) HARD-REFUSES rather than falling through to the owner's
+ * PAT-resolved token. Returns the injected token/memberId or null (= caller
+ * may use the legacy PAT path). Throws PERSONAL_REFUSAL on the gated paths.
+ */
+export function personalTierCredentialGate() {
+  const injected = injectedPersonalToken();
+  if (injected) return injected;
+  if (chatStrictPersonal() || senderIsNonOwner()) throw new Error(PERSONAL_REFUSAL);
+  return null;
+}
+
 // LinkedIn versioned REST API. The LinkedIn-Version header is REQUIRED and
 // pins the request/response schema; use a recent stable YYYYMM month.
 const LINKEDIN_VERSION = '202506';
@@ -121,13 +165,20 @@ function readHeader(headers, key) {
  */
 export async function linkedinApi(path, opts = {}, provider = 'linkedin_business') {
   const makeRequest = async () => {
-    // INJECTED-TOKEN fast path (Copilot per-turn injection) — linkedin_personal
-    // ONLY. When the runtime injected the verified sender's own member token,
-    // use it VERBATIM (it takes precedence over the PAT-inferred account token),
-    // so the call is attributed to the sender, not the shared project owner.
+    // PERSONAL-TIER gate (linkedin_personal ONLY — single chokepoint, runs
+    // BEFORE any network call):
+    //   1. injected sender token (Copilot per-turn injection) — the sender's
+    //      OWN member token (the runtime injects the owner's own LinkedIn
+    //      through the same path); used VERBATIM, attributed to the sender.
+    //   2. STRICT CHAT-TURN gate (primary, fail-CLOSED) + non-owner flag
+    //      (belt-and-braces): no injected token → HARD REFUSE — never the
+    //      PAT-resolved owner token on a chat turn.
+    //   3. no chat-sender context (Fargate workflows, self-host) → the
+    //      existing resolveIntegrationToken path, unchanged.
+    // The business/org provider (company Pages, team-tier) is unaffected.
     let token;
     if (provider === 'linkedin_personal') {
-      const injected = injectedPersonalToken();
+      const injected = personalTierCredentialGate();
       if (injected) token = injected.token;
     }
     if (!token) ({ token } = await resolveIntegrationToken(provider));
@@ -209,15 +260,22 @@ Notes:
     // as an MCP tool and dispatches each call through handleToolCall — so the
     // model gets real mcp__linkedin__* tools. The module arg is resolved
     // RELATIVE TO bin/ at runtime → node_modules/@zibby/skills/dist/linkedin.js
-    // in a published install (mirrors notion.js / figma.js). No env to forward:
-    // linkedinApi resolves the token via the backend.
+    // in a published install (mirrors notion.js / figma.js). Token auth flows
+    // via the backend (PAT) — but the Copilot per-turn injection + fail-CLOSED
+    // gate vars are forwarded EXPLICITLY (belt-and-braces: stdio children
+    // inherit process.env today, but an env-filtering spawner must never
+    // silently drop the safety gate — that would fail open to the owner).
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
+    const env = {};
+    for (const k of ['ZIBBY_INJECTED_LINKEDIN_TOKEN', 'ZIBBY_INJECTED_LINKEDIN_MEMBER_ID', 'ZIBBY_SENDER_IS_NON_OWNER', 'ZIBBY_CHAT_STRICT_PERSONAL']) {
+      if (process.env[k]) env[k] = process.env[k];
+    }
     return {
       type: 'stdio',
       command: 'node',
       args: [bin, '../dist/linkedin.js', 'linkedinSkill'],
-      env: {},
+      env,
       description: this.description,
       // Force tools into the system prompt (see notion.js / figma.js resolve()).
       alwaysLoad: true,
@@ -331,7 +389,10 @@ Notes:
           // the personal token endpoint returns the resolved member id alongside
           // the token. linkedinApi resolves the token again for the POST (same
           // injected/PAT precedence) — that's fine, tokens are cached.
-          const injected = injectedPersonalToken();
+          // personalTierCredentialGate throws the PERSONAL_REFUSAL on a strict
+          // chat turn / flagged non-owner with no injection — same fail-CLOSED
+          // contract as linkedinApi (never the owner's PAT-resolved identity).
+          const injected = personalTierCredentialGate();
           const memberId = injected
             ? injected.memberId
             : (await resolveIntegrationToken('linkedin_personal')).memberId;

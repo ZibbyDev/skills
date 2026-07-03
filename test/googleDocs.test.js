@@ -391,11 +391,13 @@ describe('injected-token path + non-owner safety gate', () => {
   const T = 'ZIBBY_INJECTED_GOOGLE_TOKEN';
   const E = 'ZIBBY_INJECTED_GOOGLE_EMAIL';
   const F = 'ZIBBY_SENDER_IS_NON_OWNER';
+  const S = 'ZIBBY_CHAT_STRICT_PERSONAL';
 
   beforeEach(() => {
     delete process.env[T];
     delete process.env[E];
     delete process.env[F];
+    delete process.env[S];
     vi.mocked(resolveIntegrationToken).mockClear();
   });
 
@@ -403,6 +405,7 @@ describe('injected-token path + non-owner safety gate', () => {
     delete process.env[T];
     delete process.env[E];
     delete process.env[F];
+    delete process.env[S];
   });
 
   it('uses the INJECTED sender token — resolveIntegrationToken (the PAT/owner path) is NEVER called', async () => {
@@ -449,7 +452,7 @@ describe('injected-token path + non-owner safety gate', () => {
       expect(res.ok, tool).toBe(false);
       expect(res.error, tool).toContain("You haven't connected your own Google account");
       expect(res.error, tool).toContain('https://studio.zibby.dev/integrations');
-      expect(res.error, tool).toContain("can't use the project owner's Google");
+      expect(res.error, tool).toContain("including the project owner's");
     }
     // SECURITY: the PAT/owner token was never resolved and no API call was made.
     expect(resolveIntegrationToken).not.toHaveBeenCalled();
@@ -464,6 +467,63 @@ describe('injected-token path + non-owner safety gate', () => {
     expect(msg.includes('token')).toBe(false);
     expect(msg.includes('401')).toBe(false);
     expect(msg.includes('unauthorized')).toBe(false);
+  });
+
+  // ── STRICT CHAT-TURN INVARIANT (ZIBBY_CHAT_STRICT_PERSONAL=1) — the PRIMARY,
+  // fail-CLOSED gate: EVERY chat turn refuses without an injected token, for
+  // ANY sender (owner, non-owner, UNVERIFIED — the class the non-owner flag
+  // failed open on). ──────────────────────────────────────────────────────────
+
+  it('STRICT chat turn with NO injected token → EVERY tool hard-refuses; resolveIntegrationToken NEVER called (even without the non-owner flag — the unverified-sender / owner-no-google case)', async () => {
+    process.env[S] = '1'; // note: F deliberately NOT set — old gate would fail OPEN here
+    const fetchSpy = vi.fn(async () => fetchJson({}));
+    vi.stubGlobal('fetch', fetchSpy);
+    const attempts = [
+      ['gdocs_create_doc', { title: 'T', markdown: 'body' }],
+      ['gdocs_append', { documentId: '1AbC_dEf-GhIjKlMnOpQrStUvWxYz012345', text: 'x' }],
+      ['gdocs_get', { documentId: '1AbC_dEf-GhIjKlMnOpQrStUvWxYz012345' }],
+      ['gdocs_list_created', {}],
+    ];
+    for (const [tool, args] of attempts) {
+      const res = JSON.parse(await googleDocsSkill.handleToolCall(tool, args));
+      expect(res.ok, tool).toBe(false);
+      expect(res.error, tool).toContain("You haven't connected your own Google account");
+    }
+    // SECURITY: zero backend/token resolution, zero network.
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('STRICT chat turn WITH an injected token → works (owner + connected senders keep working through injection)', async () => {
+    process.env[S] = '1';
+    process.env[T] = 'ya29.injected-under-strict';
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), init });
+      return fetchJson({ documentId: 'docStrict' });
+    }));
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_create_doc', { title: 'T' }));
+    expect(res.ok).toBe(true);
+    expect(calls[0].init.headers.Authorization).toBe('Bearer ya29.injected-under-strict');
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+  });
+
+  it('strict flag ABSENT (Fargate workflows / self-host / direct tool use) → legacy PAT path intact', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      expect(init.headers.Authorization).toBe('Bearer ya29.test-token');
+      return fetchJson({ files: [] });
+    }));
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_list_created', {}));
+    expect(res.ok).toBe(true);
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('google');
+  });
+
+  it('resolve() forwards ZIBBY_CHAT_STRICT_PERSONAL to the MCP child (an env-filtering spawner must not drop the gate)', async () => {
+    process.env[S] = '1';
+    const { chatStrictPersonal } = await import('../src/googleDocs.js');
+    expect(chatStrictPersonal()).toBe(true);
+    const spec = googleDocsSkill.resolve();
+    expect(spec.env[S]).toBe('1');
   });
 
   it('owner/self (no injection, no flag) → the existing PAT path runs unchanged', async () => {

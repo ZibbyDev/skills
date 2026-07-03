@@ -464,3 +464,104 @@ describe('injected-token path — Copilot per-turn verified-sender injection', (
     expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_personal');
   });
 });
+
+// ───────── STRICT CHAT-TURN INVARIANT (fail-CLOSED) — ZIBBY_CHAT_STRICT_PERSONAL ─────────
+
+describe('strict chat-turn gate — personal tier never falls through to the owner token', () => {
+  const T = 'ZIBBY_INJECTED_LINKEDIN_TOKEN';
+  const M = 'ZIBBY_INJECTED_LINKEDIN_MEMBER_ID';
+  const F = 'ZIBBY_SENDER_IS_NON_OWNER';
+  const S = 'ZIBBY_CHAT_STRICT_PERSONAL';
+  afterEach(() => { for (const k of [T, M, F, S]) delete process.env[k]; });
+
+  it('STRICT + no injection → linkedin_publish_post hard-refuses; resolveIntegrationToken NEVER called, no network', async () => {
+    process.env[S] = '1'; // non-owner flag deliberately NOT set (unverified sender / owner-no-linkedin case)
+    const fetchSpy = vi.fn(async () => fetchJson({}));
+    globalThis.fetch = fetchSpy;
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', { text: 'x' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("You haven't connected your own LinkedIn account");
+    expect(result.error).toContain("including the project owner's");
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('STRICT + no injection → dry_run refuses too (identity read is also personal-tier)', async () => {
+    process.env[S] = '1';
+    const fetchSpy = vi.fn(async () => fetchJson({}));
+    globalThis.fetch = fetchSpy;
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', { text: 'x', dry_run: true }));
+    expect(result.ok).toBe(false);
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('NON-OWNER flag (belt-and-braces) + no injection → refuses the same way', async () => {
+    process.env[F] = '1';
+    const fetchSpy = vi.fn(async () => fetchJson({}));
+    globalThis.fetch = fetchSpy;
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', { text: 'x' }));
+    expect(result.ok).toBe(false);
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('STRICT + injected sender token → publish works, attributed to the sender', async () => {
+    process.env[S] = '1';
+    process.env[T] = 'sender-strict-token';
+    process.env[M] = 'sender-strict-member';
+    let posted;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      posted = { url, init };
+      return fetchJson('', { status: 201, headers: { 'x-restli-id': 'urn:li:share:STRICT' } });
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', { text: 'hi' }));
+    expect(result.ok).toBe(true);
+    expect(result.author).toBe('urn:li:person:sender-strict-member');
+    expect(posted.init.headers.Authorization).toBe('Bearer sender-strict-token');
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+  });
+
+  it('STRICT does NOT gate the team-tier business/org provider (owner status shared by design)', async () => {
+    process.env[S] = '1';
+    globalThis.fetch = vi.fn(async (url) => {
+      if (url.includes('/rest/organizationAcls')) {
+        return fetchJson({ elements: [{ organizationalTarget: 'urn:li:organization:999', state: 'APPROVED', role: 'ADMINISTRATOR' }] });
+      }
+      return fetchJson({ id: 999, localizedName: 'Acme', vanityName: 'acme' });
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_list_organizations', {}));
+    expect(result.ok).toBe(true);
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_business');
+  });
+
+  it('flags absent (Fargate / self-host) → legacy PAT path intact', async () => {
+    let posted;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      posted = { url, init };
+      return fetchJson('', { status: 201, headers: { 'x-restli-id': 'urn:li:share:LEGACY' } });
+    });
+    const result = JSON.parse(await linkedinSkill.handleToolCall('linkedin_publish_post', { text: 'x' }));
+    expect(result.ok).toBe(true);
+    expect(posted.init.headers.Authorization).toBe('Bearer secret_li');
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('linkedin_personal');
+  });
+
+  it('the refusal message never trips the transient-auth retry heuristic', async () => {
+    const { PERSONAL_REFUSAL } = await import('../src/linkedin.js');
+    const msg = PERSONAL_REFUSAL.toLowerCase();
+    expect(msg.includes('token')).toBe(false);
+    expect(msg.includes('401')).toBe(false);
+    expect(msg.includes('unauthorized')).toBe(false);
+  });
+
+  it('resolve() forwards the injection + gate env to the MCP child', async () => {
+    process.env[T] = 'tok';
+    process.env[M] = 'mem';
+    process.env[S] = '1';
+    const spec = linkedinSkill.resolve();
+    expect(spec.env[T]).toBe('tok');
+    expect(spec.env[M]).toBe('mem');
+    expect(spec.env[S]).toBe('1');
+  });
+});
