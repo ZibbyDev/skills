@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock backend-client BEFORE importing the skill so resolveIntegrationToken
 // is replaced at load time. Shape mirrors GET /integrations/token/google.
@@ -382,5 +382,122 @@ describe('unknown tool', () => {
     const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_nope', {}));
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/Unknown tool/);
+  });
+});
+
+// ───────── injected-token path + NON-OWNER safety gate (Copilot per-turn) ─────────
+
+describe('injected-token path + non-owner safety gate', () => {
+  const T = 'ZIBBY_INJECTED_GOOGLE_TOKEN';
+  const E = 'ZIBBY_INJECTED_GOOGLE_EMAIL';
+  const F = 'ZIBBY_SENDER_IS_NON_OWNER';
+
+  beforeEach(() => {
+    delete process.env[T];
+    delete process.env[E];
+    delete process.env[F];
+    vi.mocked(resolveIntegrationToken).mockClear();
+  });
+
+  afterEach(() => {
+    delete process.env[T];
+    delete process.env[E];
+    delete process.env[F];
+  });
+
+  it('uses the INJECTED sender token — resolveIntegrationToken (the PAT/owner path) is NEVER called', async () => {
+    process.env[T] = 'ya29.sender-injected';
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), init });
+      return fetchJson({ documentId: 'docX' });
+    }));
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_create_doc', { title: 'T' }));
+    expect(res.ok).toBe(true);
+    expect(res.documentId).toBe('docX');
+    // The Bearer is the injected sender token, not the PAT-account token.
+    expect(calls[0].init.headers.Authorization).toBe('Bearer ya29.sender-injected');
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+  });
+
+  it('injected token wins even when the non-owner flag is ALSO set (sender has their own Google)', async () => {
+    process.env[T] = 'ya29.sender-injected';
+    process.env[F] = '1';
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), init });
+      return fetchJson({ title: 'Doc', body: { content: [] } });
+    }));
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_get', { documentId: '1AbC_dEf-GhIjKlMnOpQrStUvWxYz012345' }));
+    expect(res.ok).toBe(true);
+    expect(calls[0].init.headers.Authorization).toBe('Bearer ya29.sender-injected');
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+  });
+
+  it('NON-OWNER with NO injected token → EVERY tool hard-refuses; no owner fallback, no network', async () => {
+    process.env[F] = '1';
+    const fetchSpy = vi.fn(async () => fetchJson({}));
+    vi.stubGlobal('fetch', fetchSpy);
+    const attempts = [
+      ['gdocs_create_doc', { title: 'T', markdown: 'body' }],
+      ['gdocs_append', { documentId: '1AbC_dEf-GhIjKlMnOpQrStUvWxYz012345', text: 'x' }],
+      ['gdocs_get', { documentId: '1AbC_dEf-GhIjKlMnOpQrStUvWxYz012345' }],
+      ['gdocs_list_created', {}],
+    ];
+    for (const [tool, args] of attempts) {
+      const res = JSON.parse(await googleDocsSkill.handleToolCall(tool, args));
+      expect(res.ok, tool).toBe(false);
+      expect(res.error, tool).toContain("You haven't connected your own Google account");
+      expect(res.error, tool).toContain('https://studio.zibby.dev/integrations');
+      expect(res.error, tool).toContain("can't use the project owner's Google");
+    }
+    // SECURITY: the PAT/owner token was never resolved and no API call was made.
+    expect(resolveIntegrationToken).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('the refusal message never trips the transient-auth retry heuristic', async () => {
+    // googleApi retries (via clearTokenCache) when the error message mentions
+    // token/401/unauthorized — the refusal must not be retried/masked.
+    const { NON_OWNER_REFUSAL } = await import('../src/googleDocs.js');
+    const msg = NON_OWNER_REFUSAL.toLowerCase();
+    expect(msg.includes('token')).toBe(false);
+    expect(msg.includes('401')).toBe(false);
+    expect(msg.includes('unauthorized')).toBe(false);
+  });
+
+  it('owner/self (no injection, no flag) → the existing PAT path runs unchanged', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      expect(init.headers.Authorization).toBe('Bearer ya29.test-token'); // the mocked PAT-resolved token
+      return fetchJson({ documentId: 'docOwner' });
+    }));
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_create_doc', { title: 'T' }));
+    expect(res.ok).toBe(true);
+    expect(resolveIntegrationToken).toHaveBeenCalledWith('google');
+  });
+
+  it('resolve() forwards the injection/gate env to the MCP child; helpers parse the env', async () => {
+    process.env[T] = 'tok';
+    process.env[E] = 'sunwuk@corp.com';
+    process.env[F] = '1';
+    const { injectedGoogleToken, senderIsNonOwner } = await import('../src/googleDocs.js');
+    expect(injectedGoogleToken()).toEqual({ token: 'tok', email: 'sunwuk@corp.com' });
+    expect(senderIsNonOwner()).toBe(true);
+    const spec = googleDocsSkill.resolve();
+    expect(spec.env[T]).toBe('tok');
+    expect(spec.env[E]).toBe('sunwuk@corp.com');
+    expect(spec.env[F]).toBe('1');
+    // …and stays empty when the turn carries no injection context.
+    delete process.env[T];
+    delete process.env[E];
+    delete process.env[F];
+    expect(googleDocsSkill.resolve().env).toEqual({});
+    expect(injectedGoogleToken()).toBeNull();
+    expect(senderIsNonOwner()).toBe(false);
+  });
+
+  it('promptFragment documents the per-user (per-teammate) Google model', () => {
+    expect(googleDocsSkill.promptFragment).toMatch(/PER-USER/i);
+    expect(googleDocsSkill.promptFragment).toMatch(/own Google/i);
   });
 });

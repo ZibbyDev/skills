@@ -45,6 +45,50 @@ function resolveSkillBin() {
 const DOCS_BASE = 'https://docs.googleapis.com/v1';
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 
+/**
+ * INJECTED-TOKEN fast path (Zibby Copilot per-turn credential injection) +
+ * NON-OWNER SAFETY GATE — the Google twin of linkedin.js injectedPersonalToken.
+ *
+ * The Zibby Copilot is ONE shared chat bot backed by ONE project's
+ * PROJECT_API_TOKEN. resolveIntegrationToken('google') authenticates with that
+ * PAT, so the account is inferred SERVER-SIDE from the PAT — meaning the shared
+ * bot would only ever see the PROJECT OWNER's Google (their readable Docs, their
+ * Drive), never the (different) person who actually sent the chat message.
+ *
+ * Two per-turn env signals, set + restored by the copilot-runtime (a TRUSTED
+ * backend service that already KMS-decrypts tenants' creds directly):
+ *   - ZIBBY_INJECTED_GOOGLE_TOKEN (+ _EMAIL): the EMAIL-VERIFIED sender's OWN
+ *     `google` integration access token (auto-refreshed server-side). When
+ *     present it takes PRECEDENCE over resolveIntegrationToken, so every gdocs
+ *     call runs against the SENDER's own Google.
+ *   - ZIBBY_SENDER_IS_NON_OWNER=1: the verified sender's account differs from
+ *     the PAT/tenant account. With NO injected token this is a HARD REFUSAL
+ *     gate: the skill must NEVER fall through to the owner's token on a
+ *     colleague's behalf (privacy: the owner's readable docs would be exposed
+ *     and created docs would land in the owner's Drive). Every tool returns
+ *     { ok:false, error } telling the sender to connect their own Google.
+ *
+ * Absent both (owner/self turns, Fargate workflows, self-host — no
+ * sender-identity context) → the normal PAT chokepoint runs unchanged.
+ */
+export function injectedGoogleToken() {
+  const token = String(process.env.ZIBBY_INJECTED_GOOGLE_TOKEN || '').trim();
+  if (!token) return null;
+  const email = String(process.env.ZIBBY_INJECTED_GOOGLE_EMAIL || '').trim();
+  return { token, email };
+}
+
+/** True when the runtime flagged this turn's verified sender as NOT the tenant owner. */
+export function senderIsNonOwner() {
+  return String(process.env.ZIBBY_SENDER_IS_NON_OWNER || '').trim() === '1';
+}
+
+// The HARD-REFUSAL message for a non-owner sender with no Google of their own.
+// Deliberately does NOT contain the words "token"/"401"/"unauthorized" so the
+// googleApi retry heuristic never retries it.
+export const NON_OWNER_REFUSAL =
+  "You haven't connected your own Google account — connect it at https://studio.zibby.dev/integrations (Google Docs). For privacy, I can't use the project owner's Google on your behalf.";
+
 // Cap on extracted text so a huge doc can't blow the prompt budget.
 const MAX_TEXT_CHARS = 20000;
 // Cap on rows returned by gdocs_list_created.
@@ -75,7 +119,23 @@ export function parseDocId(ref) {
  */
 export async function googleApi(url, opts = {}) {
   const makeRequest = async () => {
-    const { token } = await resolveIntegrationToken('google');
+    // Bearer precedence (single chokepoint — every gdocs tool routes through
+    // here BEFORE any network call):
+    //   1. injected sender token (Copilot per-turn injection) — the verified
+    //      sender's OWN Google; never the PAT account's.
+    //   2. non-owner gate — verified non-owner sender with NO injected token:
+    //      HARD REFUSE. NEVER fall through to the owner's PAT-resolved token.
+    //   3. owner/self or no sender-identity context (Fargate workflows,
+    //      self-host) — the existing resolveIntegrationToken path, unchanged.
+    let token;
+    const injected = injectedGoogleToken();
+    if (injected) {
+      token = injected.token;
+    } else if (senderIsNonOwner()) {
+      throw new Error(NON_OWNER_REFUSAL);
+    } else {
+      ({ token } = await resolveIntegrationToken('google'));
+    }
     if (typeof token !== 'string' || !token) {
       throw new Error(`Invalid google token type: ${typeof token}`);
     }
@@ -332,6 +392,7 @@ export const googleDocsSkill = {
 
   promptFragment: `## Google Docs (connected)
 You can create and edit Google Docs for the user. IMPORTANT visibility caveat: the integration uses Google's per-file drive.file scope, so you can only see docs this app CREATED (or the user explicitly picked) — not the user's whole Drive.
+Docs access is PER-USER: each teammate connects their OWN Google account (Integrations → Google Docs). In shared-chat contexts the runtime routes these tools to the SENDER's own Google; a teammate who hasn't connected their own Google gets { ok:false } with connect instructions — for privacy the project owner's Google is NEVER used on someone else's behalf. Relay those instructions rather than retrying.
 - gdocs_create_doc: create a new Google Doc from a title + markdown (headings/bold/bullets/links supported) or plain text; returns { documentId, url }. Share the url with the user.
 - gdocs_append: append markdown/text to the end of a doc you created earlier (pass the documentId or doc URL).
 - gdocs_get: read a doc back as plain text (works for app-created/user-picked docs; arbitrary docs need the extended documents.readonly connection).
@@ -349,11 +410,19 @@ These tools return { ok:false, error } on failure — treat an unavailable Googl
   resolve() {
     const bin = resolveSkillBin();
     if (!bin) return null;
+    // Forward the Copilot per-turn injection/gate env EXPLICITLY to the MCP
+    // child (belt-and-braces: stdio children inherit process.env today, but an
+    // env-filtering spawner must never silently drop the SAFETY GATE flag —
+    // that would fail open to the owner's token).
+    const env = {};
+    for (const k of ['ZIBBY_INJECTED_GOOGLE_TOKEN', 'ZIBBY_INJECTED_GOOGLE_EMAIL', 'ZIBBY_SENDER_IS_NON_OWNER']) {
+      if (process.env[k]) env[k] = process.env[k];
+    }
     return {
       type: 'stdio',
       command: 'node',
       args: [bin, '../dist/googleDocs.js', 'googleDocsSkill'],
-      env: {},
+      env,
       description: this.description,
       // Force tools into the system prompt instead of deferring behind the
       // SDK's ToolSearch (see github.js / sentry.js resolve()).
