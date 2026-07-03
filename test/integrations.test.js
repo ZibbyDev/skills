@@ -53,6 +53,10 @@ describe('INTEGRATIONS constant', () => {
         // any future report-producing template that targets Notion as
         // a destination.
         'notion',
+        // Google (Docs/Drive) OAuth — drive.file-scoped, refresh-token
+        // flow (backend auto-refreshes the ~1h access token). Powers the
+        // google-docs skill. See googleDocs.js + handlers/google.js.
+        'google',
         // Plane — api-key style (static API key + workspace slug +
         // overridable base URL), backed by the official Plane MCP server.
         // See plane.js. Supports Plane Cloud, self-hosted, and Zibby-hosted

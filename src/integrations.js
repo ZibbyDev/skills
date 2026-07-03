@@ -38,6 +38,12 @@ export const INTEGRATIONS = Object.freeze({
   CURSOR_ADMIN:      'cursor_admin',
   // Notion OAuth — multi-workspace integration. See handlers/notion.js.
   NOTION:            'notion',
+  // Google (Docs/Drive) OAuth — drive.file-scoped (per-file access to docs
+  // the app creates or the user picks; NO Google verification needed).
+  // Refresh-token flow: the backend auto-refreshes the ~1h access token in
+  // resolveIntegrationToken('google'). Powers the google-docs skill. See
+  // googleDocs.js + backend handlers/google.js.
+  GOOGLE:            'google',
   // Plane — api-key style (static API key + workspace slug + base URL),
   // NOT OAuth. Same paste-token shape as github/sentry. Backed by the
   // official Plane MCP server (see plane.js). baseUrl is user-overridable
@@ -115,6 +121,7 @@ export const INTEGRATION_REGISTRY = Object.freeze({
     connectPath: '/integrations?provider=cursor_admin',
   },
   notion: { id: 'notion', name: 'Notion', connectPath: '/integrations?provider=notion' },
+  google: { id: 'google', name: 'Google Docs', connectPath: '/integrations?provider=google' },
   plane:  { id: 'plane',  name: 'Plane',  connectPath: '/integrations?provider=plane'  },
   linear: { id: 'linear', name: 'Linear', connectPath: '/integrations?provider=linear' },
   figma:  { id: 'figma',  name: 'Figma',  connectPath: '/integrations?provider=figma'  },

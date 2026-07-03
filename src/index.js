@@ -19,6 +19,7 @@ import { slackSkill } from './slack.js';
 import { larkSkill } from './lark.js';
 import { notionSkill } from './notion.js';
 import { linkedinSkill } from './linkedin.js';
+import { googleDocsSkill } from './googleDocs.js';
 import { chatNotifySkill } from './chat-notify.js';
 import { memorySkill } from './memory.js';
 import { skillInstallerSkill } from './skill-installer.js';
@@ -51,6 +52,7 @@ registerSkill(slackSkill);
 registerSkill(larkSkill);
 registerSkill(notionSkill);
 registerSkill(linkedinSkill);
+registerSkill(googleDocsSkill);
 registerSkill(chatNotifySkill);
 registerSkill(sentrySkill);
 registerSkill(memorySkill);
@@ -95,6 +97,12 @@ export const SKILLS = {
   SLACK: 'slack',
   LARK: 'lark',
   NOTION: 'notion',
+  // `google-docs` — create/append/read Google Docs (googleDocsSkill, served
+  // over MCP via bin/mcp-skill.mjs as mcp__gdocs__* tools). Backed by the
+  // drive.file-scoped 'google' OAuth integration; backend
+  // REQUIRED_INTEGRATION_MAP maps 'google-docs' → INTEGRATIONS.GOOGLE.
+  // Mirrored in @zibby/agent-workflow's SKILLS map.
+  GOOGLE_DOCS: 'google-docs',
   LINKEDIN: 'linkedin',
   CHAT_NOTIFY: 'chat_notify',
   SENTRY: 'sentry',
@@ -140,7 +148,7 @@ export const SKILLS = {
   TRIGGER_AGENT: 'trigger-agent',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, notionSkill, linkedinSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, notionSkill, linkedinSkill, googleDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
