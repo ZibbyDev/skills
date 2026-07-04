@@ -21,6 +21,7 @@ import { discordSkill } from './discord.js';
 import { notionSkill } from './notion.js';
 import { linkedinSkill } from './linkedin.js';
 import { googleDocsSkill } from './googleDocs.js';
+import { larkDocsSkill } from './larkDocs.js';
 import { chatNotifySkill } from './chat-notify.js';
 import { memorySkill } from './memory.js';
 import { skillInstallerSkill } from './skill-installer.js';
@@ -55,6 +56,7 @@ registerSkill(discordSkill);
 registerSkill(notionSkill);
 registerSkill(linkedinSkill);
 registerSkill(googleDocsSkill);
+registerSkill(larkDocsSkill);
 registerSkill(chatNotifySkill);
 registerSkill(sentrySkill);
 registerSkill(memorySkill);
@@ -110,6 +112,19 @@ export const SKILLS = {
   // REQUIRED_INTEGRATION_MAP maps 'google-docs' → INTEGRATIONS.GOOGLE.
   // Mirrored in @zibby/agent-workflow's SKILLS map.
   GOOGLE_DOCS: 'google-docs',
+  // `lark-docs` — read/create/append Lark/Feishu documents (larkDocsSkill,
+  // served over MCP via bin/mcp-skill.mjs as mcp__larkdocs__* tools). REUSES
+  // the connected Lark app (integration 'lark' — same app as messaging), so
+  // backend REQUIRED_INTEGRATION_MAP maps 'lark-docs' → INTEGRATIONS.LARK.
+  // Mirrored in @zibby/agent-workflow's SKILLS map.
+  LARK_DOCS: 'lark-docs',
+  // `doc_source` — INTEGRATION-GATE MARKER (like `circleci`), not a runtime MCP
+  // skill: no skill object registers under this id (the runtime tool-resolver
+  // warns + skips it). Declaring it on a node's `skills` makes the backend gate
+  // deploy on a document source being connected via the OR-group
+  // {any:[google, notion, lark]} (google-docs / notion / lark-docs all read a
+  // PRD). Used by the prd-review template. Mirrored in @zibby/agent-workflow.
+  DOC_SOURCE: 'doc_source',
   LINKEDIN: 'linkedin',
   CHAT_NOTIFY: 'chat_notify',
   SENTRY: 'sentry',
@@ -155,7 +170,7 @@ export const SKILLS = {
   TRIGGER_AGENT: 'trigger-agent',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
