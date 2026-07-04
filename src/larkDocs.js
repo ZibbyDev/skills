@@ -235,6 +235,55 @@ async function appendBlocks(documentId, blocks) {
   return host;
 }
 
+// ── Comments (drive v1) ──────────────────────────────────────────────────────
+// Lark's file-comment API is SEPARATE from the docx block API and is keyed on
+// the drive `file_token` (for a docx the file_token == the document_id) plus a
+// `file_type` query param. A docx document's file_type is 'docx'.
+//   Create a NEW comment on a file:
+//     POST /open-apis/drive/v1/files/{file_token}/comments?file_type=docx
+//       { reply_list: { replies: [{ content: { elements: [text_run…] } }] } }
+//   Reply to an EXISTING comment (thread):
+//     POST /open-apis/drive/v1/files/{file_token}/comments/{comment_id}/replies?file_type=docx
+//       { content: { elements: [text_run…] } }
+//   List comments:
+//     GET  /open-apis/drive/v1/files/{file_token}/comments?file_type=docx&page_size=50
+const DEFAULT_FILE_TYPE = 'docx';
+const MAX_COMMENTS = 50;
+
+/** Build a Lark comment content element array from plain text. */
+function larkCommentElements(text) {
+  return [{ type: 'text_run', text_run: { text: String(text ?? '') } }];
+}
+
+/** Flatten a Lark comment content.elements array → plain text. */
+function larkElementsToText(elements) {
+  if (!Array.isArray(elements)) return '';
+  return elements
+    .map((e) => e?.text_run?.text ?? e?.docs_link?.url ?? (e?.person ? `@${e.person.user_id || ''}` : ''))
+    .join('');
+}
+
+/** Summarize a Lark file comment (with its replies) for agent thread context. */
+function larkCommentSummary(c) {
+  const replies = Array.isArray(c?.reply_list?.replies) ? c.reply_list.replies : [];
+  return {
+    commentId: c?.comment_id || '',
+    resolved: Boolean(c?.is_solved),
+    replies: replies.map((r) => ({
+      replyId: r?.reply_id || '',
+      author: r?.user_id || '',
+      text: larkElementsToText(r?.content?.elements),
+      createTime: r?.create_time || '',
+    })),
+  };
+}
+
+/** The file_type query value — defaults to docx (our doc surface). */
+function fileTypeArg(args) {
+  const t = typeof args?.fileType === 'string' && args.fileType.trim() ? args.fileType.trim() : DEFAULT_FILE_TYPE;
+  return t;
+}
+
 export const larkDocsSkill = {
   id: 'lark-docs',
   serverName: 'larkdocs',
@@ -248,6 +297,9 @@ You can read, create, and append Lark/Feishu documents (docx). This reuses the s
 - larkdoc_get: pass a Lark doc id OR a full doc URL (a /docx/ or /wiki/ link); returns { ok, documentId, title, url, text } where text is the doc as plain text (truncated to ~20k chars). Use it as reference context.
 - larkdoc_create: create a new doc from a title + markdown/text (#/##/### headings, - bullets, 1. ordered supported); returns { ok, documentId, url }. Share the url.
 - larkdoc_append: append markdown/text to the end of an existing doc (pass the documentId or doc URL).
+- larkdoc_list_comments: list the comment threads on a doc (pass the documentId or doc URL); returns { ok, comments:[{ commentId, replies:[{ replyId, author, text }] }] }. Use to read the thread you are replying to.
+- larkdoc_reply_comment: reply INSIDE an existing comment thread — pass { documentId, commentId, text }. Use this to answer a user who @mentioned Zibby in a doc comment (reply in the SAME commentId).
+- larkdoc_add_comment: post a NEW top-level comment on a doc — pass { documentId, text }.
 These tools return { ok:false, error } on failure — treat an unavailable Lark connection as "cannot read/deliver to Lark Docs" and continue rather than blocking the task.`,
 
   /**
@@ -352,6 +404,59 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           return JSON.stringify({ ok: true, documentId, url: docWebUrl(host, documentId) });
         }
 
+        case 'larkdoc_list_comments': {
+          const ref = args?.documentId || args?.url || args?.id || args?.fileToken;
+          const parsed = parseLarkDocRef(ref);
+          if (!parsed) return JSON.stringify({ ok: false, error: 'A valid Lark doc id or URL is required' });
+          const documentId = await resolveDocumentId(parsed);
+          const fileType = fileTypeArg(args);
+
+          const qs = new URLSearchParams({ file_type: fileType, page_size: String(MAX_COMMENTS) });
+          const { data } = await larkDocsApi(
+            'GET',
+            `/open-apis/drive/v1/files/${documentId}/comments?${qs.toString()}`,
+          );
+          const items = Array.isArray(data?.items) ? data.items : [];
+          const comments = items.map(larkCommentSummary);
+          return JSON.stringify({ ok: true, documentId, count: comments.length, comments });
+        }
+
+        case 'larkdoc_add_comment': {
+          const ref = args?.documentId || args?.url || args?.id || args?.fileToken;
+          const parsed = parseLarkDocRef(ref);
+          if (!parsed) return JSON.stringify({ ok: false, error: 'A valid Lark doc id or URL is required' });
+          const text = contentArg({ text: args?.text ?? args?.body });
+          if (!text || !text.trim()) return JSON.stringify({ ok: false, error: 'text is required' });
+
+          const documentId = await resolveDocumentId(parsed);
+          const fileType = fileTypeArg(args);
+          const { data } = await larkDocsApi(
+            'POST',
+            `/open-apis/drive/v1/files/${documentId}/comments?file_type=${encodeURIComponent(fileType)}`,
+            { reply_list: { replies: [{ content: { elements: larkCommentElements(text) } }] } },
+          );
+          return JSON.stringify({ ok: true, documentId, commentId: data?.comment_id || '' });
+        }
+
+        case 'larkdoc_reply_comment': {
+          const ref = args?.documentId || args?.url || args?.id || args?.fileToken;
+          const parsed = parseLarkDocRef(ref);
+          if (!parsed) return JSON.stringify({ ok: false, error: 'A valid Lark doc id or URL is required' });
+          const commentId = args?.commentId || args?.comment_id;
+          if (!commentId) return JSON.stringify({ ok: false, error: 'commentId is required' });
+          const text = contentArg({ text: args?.text ?? args?.body });
+          if (!text || !text.trim()) return JSON.stringify({ ok: false, error: 'text is required' });
+
+          const documentId = await resolveDocumentId(parsed);
+          const fileType = fileTypeArg(args);
+          const { data } = await larkDocsApi(
+            'POST',
+            `/open-apis/drive/v1/files/${documentId}/comments/${encodeURIComponent(commentId)}/replies?file_type=${encodeURIComponent(fileType)}`,
+            { content: { elements: larkCommentElements(text) } },
+          );
+          return JSON.stringify({ ok: true, documentId, commentId: String(commentId), replyId: data?.reply_id || '' });
+        }
+
         default:
           return JSON.stringify({ ok: false, error: `Unknown tool: ${name}` });
       }
@@ -398,6 +503,45 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           text: { type: 'string', description: 'Content to append, as plain text (used when markdown is absent).' },
         },
         required: ['documentId'],
+      },
+    },
+    {
+      name: 'larkdoc_list_comments',
+      description: 'List the comment threads on a Lark/Feishu document. Accepts a documentId or full doc URL. Returns { ok, comments:[{ commentId, replies:[{ replyId, author, text }] }] }. Use to read the thread you are replying to.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          documentId: { type: 'string', description: 'Lark doc id (docx token) OR a full Lark/Feishu doc URL.' },
+          fileType: { type: 'string', description: "Drive file type — defaults to 'docx'. Only change for non-docx files (doc/sheet/bitable/file/slides)." },
+        },
+        required: ['documentId'],
+      },
+    },
+    {
+      name: 'larkdoc_add_comment',
+      description: 'Post a NEW top-level comment on a Lark/Feishu document. Accepts a documentId or full doc URL plus text. Returns { ok, documentId, commentId }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          documentId: { type: 'string', description: 'Lark doc id (docx token) OR a full Lark/Feishu doc URL.' },
+          text: { type: 'string', description: 'The comment body (plain text).' },
+          fileType: { type: 'string', description: "Drive file type — defaults to 'docx'." },
+        },
+        required: ['documentId', 'text'],
+      },
+    },
+    {
+      name: 'larkdoc_reply_comment',
+      description: 'Reply INSIDE an existing comment thread on a Lark/Feishu document. Pass { documentId, commentId, text }. Use to answer a user who @mentioned Zibby in a doc comment (reply in the same commentId). Returns { ok, documentId, commentId, replyId }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          documentId: { type: 'string', description: 'Lark doc id (docx token) OR a full Lark/Feishu doc URL.' },
+          commentId: { type: 'string', description: 'The comment_id of the thread to reply into (from larkdoc_list_comments or the webhook event).' },
+          text: { type: 'string', description: 'The reply body (plain text).' },
+          fileType: { type: 'string', description: "Drive file type — defaults to 'docx'." },
+        },
+        required: ['documentId', 'commentId', 'text'],
       },
     },
   ],

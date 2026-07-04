@@ -297,6 +297,36 @@ function pageTitle(page) {
 }
 
 /**
+ * Build a Notion rich_text array from a plain string. Notion caps a single
+ * rich_text text object at 2000 chars, so we chunk longer bodies across
+ * multiple objects (the API concatenates them). This is the inverse of
+ * richTextToString — used by notion_add_comment to post a reply body.
+ */
+function stringToRichText(text) {
+  const s = String(text ?? '');
+  if (!s) return [{ type: 'text', text: { content: '' } }];
+  const chunks = [];
+  for (let i = 0; i < s.length; i += 2000) {
+    chunks.push({ type: 'text', text: { content: s.slice(i, i + 2000) } });
+  }
+  return chunks;
+}
+
+/**
+ * Flatten a Notion comment object → a small { id, discussionId, text, author }
+ * summary for the agent's thread context.
+ */
+function commentSummary(c) {
+  return {
+    id: c?.id || '',
+    discussionId: c?.discussion_id || '',
+    text: richTextToString(c?.rich_text).trim(),
+    author: c?.created_by?.id || '',
+    createdTime: c?.created_time || '',
+  };
+}
+
+/**
  * Reduce a database-row property to a short scalar string for the row summary.
  */
 function propToString(prop) {
@@ -330,6 +360,8 @@ export const notionSkill = {
 You can pull a referenced Notion page in as extra context. This is OPTIONAL — only use it when the task references a Notion page/URL (e.g. an engineering-standards or design doc to review against).
 - notion_get_page: pass a Notion page id OR a full Notion URL; returns { id, title, url, text } where text is the page flattened to markdown (truncated to ~20k chars). Use the text as reference context.
 - notion_query_database: pass a database id/URL; returns a small list of rows ({ id, title, url, props }). Use to find a specific page, then notion_get_page it.
+- notion_list_comments: pass a page/block id OR URL; returns the open comment discussions on it ({ id, discussionId, text, author }). Use to read the comment thread you are replying to.
+- notion_add_comment: post a comment. To REPLY in an existing discussion pass { discussionId, text }; to start a NEW top-level comment on a page pass { pageId, text }. Returns { ok, id, discussionId }. Use this to answer a user who @mentioned Zibby in a Notion comment — reply in the SAME discussionId.
 Do not block the task if Notion is unavailable — these tools return { ok:false, error } on failure; treat a missing page as "no extra context" and continue.`,
 
   /**
@@ -410,6 +442,53 @@ Do not block the task if Notion is unavailable — these tools return { ok:false
           return JSON.stringify({ ok: true, id, count: rows.length, hasMore: !!data.has_more, rows });
         }
 
+        case 'notion_list_comments': {
+          // Notion lists comments per BLOCK (a page IS a block). Accept a page
+          // id, block id, or URL. Returns the open (unresolved) comment
+          // discussions so the agent can read the thread it's replying to.
+          const ref = args?.blockId || args?.pageId || args?.block || args?.page || args?.url || args?.id;
+          const id = parseNotionId(ref);
+          if (!id) return JSON.stringify({ ok: false, error: 'A valid Notion page/block id or URL is required' });
+
+          const qs = new URLSearchParams({ block_id: id, page_size: '100' });
+          const data = await notionApi(`/comments?${qs.toString()}`);
+          const results = Array.isArray(data.results) ? data.results : [];
+          const comments = results.map(commentSummary);
+          return JSON.stringify({ ok: true, id, count: comments.length, comments });
+        }
+
+        case 'notion_add_comment': {
+          // Two modes (Notion's POST /v1/comments):
+          //   - reply in a thread   → { discussion_id, rich_text }
+          //   - new comment on page → { parent: { page_id }, rich_text }
+          // discussionId wins when both are present (a reply is more specific).
+          const text = typeof args?.text === 'string' ? args.text
+            : (typeof args?.body === 'string' ? args.body : '');
+          if (!text || !text.trim()) {
+            return JSON.stringify({ ok: false, error: 'text is required' });
+          }
+
+          const discussionId = args?.discussionId || args?.discussion_id || null;
+          let body;
+          if (discussionId) {
+            body = { discussion_id: String(discussionId), rich_text: stringToRichText(text) };
+          } else {
+            const pageRef = args?.pageId || args?.page || args?.url || args?.id;
+            const pageId = parseNotionId(pageRef);
+            if (!pageId) {
+              return JSON.stringify({ ok: false, error: 'Either discussionId (to reply) or a valid pageId (to start a comment) is required' });
+            }
+            body = { parent: { page_id: pageId }, rich_text: stringToRichText(text) };
+          }
+
+          const created = await notionApi('/comments', { method: 'POST', body });
+          return JSON.stringify({
+            ok: true,
+            id: created?.id || '',
+            discussionId: created?.discussion_id || discussionId || '',
+          });
+        }
+
         default:
           return JSON.stringify({ ok: false, error: `Unknown tool: ${name}` });
       }
@@ -442,6 +521,30 @@ Do not block the task if Notion is unavailable — these tools return { ok:false
           maxResults: { type: 'number', description: 'Max rows to return (default 25, max 25).' },
         },
         required: ['databaseId'],
+      },
+    },
+    {
+      name: 'notion_list_comments',
+      description: 'List the open comment discussions on a Notion page/block. Accepts a page/block id OR a full Notion URL. Returns { ok, comments:[{ id, discussionId, text, author }] }. Use to read the comment thread you are replying to.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          blockId: { type: 'string', description: 'Notion page or block id (dashed UUID or 32-char) OR a full Notion URL.' },
+        },
+        required: ['blockId'],
+      },
+    },
+    {
+      name: 'notion_add_comment',
+      description: 'Post a comment on Notion. To REPLY within an existing discussion, pass { discussionId, text }. To start a NEW top-level comment on a page, pass { pageId, text }. Returns { ok, id, discussionId }. Use this to answer a user who @mentioned Zibby in a Notion comment (reply in the same discussionId).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          discussionId: { type: 'string', description: 'The discussion_id to reply into (from notion_list_comments). Preferred for replies.' },
+          pageId: { type: 'string', description: 'Page id/URL to start a NEW top-level comment on (used when discussionId is absent).' },
+          text: { type: 'string', description: 'The comment body (plain text).' },
+        },
+        required: ['text'],
       },
     },
   ],

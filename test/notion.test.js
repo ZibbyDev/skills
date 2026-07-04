@@ -28,9 +28,11 @@ describe('notionSkill structure', () => {
     expect(notionSkill.requiresIntegration).toBe('notion');
   });
 
-  it('exposes notion_get_page + notion_query_database', () => {
+  it('exposes the read + comment tools', () => {
     const names = notionSkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['notion_get_page', 'notion_query_database']);
+    expect(names).toEqual([
+      'notion_add_comment', 'notion_get_page', 'notion_list_comments', 'notion_query_database',
+    ]);
   });
 
   it('resolve() spawns the generic skill MCP server so the AGENT can call notion tools', () => {
@@ -209,5 +211,79 @@ describe('notion_query_database', () => {
     const result = JSON.parse(await notionSkill.handleToolCall('notion_query_database', {}));
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/valid Notion database id/i);
+  });
+});
+
+describe('notion_list_comments', () => {
+  it('lists open comment discussions on a page/block', async () => {
+    const id = '1a2b3c4d5e6f70819203a4b5c6d7e8f9';
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({
+      results: [
+        { id: 'c1', discussion_id: 'd1', rich_text: [{ plain_text: '@zibby please review' }], created_by: { id: 'u1' }, created_time: 't1' },
+      ],
+    }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_list_comments', { blockId: id }));
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(1);
+    expect(result.comments[0]).toMatchObject({ id: 'c1', discussionId: 'd1', text: '@zibby please review', author: 'u1' });
+    // Hit the /comments?block_id= endpoint.
+    const url = globalThis.fetch.mock.calls[0][0];
+    expect(url).toContain('/comments?');
+    expect(url).toContain('block_id=');
+  });
+
+  it('rejects a missing block reference', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_list_comments', {}));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/valid Notion page\/block id/i);
+  });
+});
+
+describe('notion_add_comment', () => {
+  it('replies into an existing discussion (discussion_id body)', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({ id: 'newc', discussion_id: 'd1' }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_add_comment', {
+      discussionId: 'd1', text: 'On it — reviewing now.',
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.id).toBe('newc');
+    expect(result.discussionId).toBe('d1');
+    const [url, opts] = globalThis.fetch.mock.calls[0];
+    expect(url).toContain('/comments');
+    expect(opts.method).toBe('POST');
+    const body = JSON.parse(opts.body);
+    expect(body.discussion_id).toBe('d1');
+    expect(body.rich_text[0].text.content).toBe('On it — reviewing now.');
+    expect(body.parent).toBeUndefined();
+  });
+
+  it('starts a new top-level page comment (parent.page_id body)', async () => {
+    const id = '1a2b3c4d5e6f70819203a4b5c6d7e8f9';
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({ id: 'newc2', discussion_id: 'd2' }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_add_comment', { pageId: id, text: 'FYI' }));
+    expect(result.ok).toBe(true);
+    const body = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
+    expect(body.parent.page_id).toBe('1a2b3c4d-5e6f-7081-9203-a4b5c6d7e8f9');
+    expect(body.discussion_id).toBeUndefined();
+  });
+
+  it('requires text', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_add_comment', { discussionId: 'd1' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/text is required/i);
+  });
+
+  it('requires discussionId or a valid pageId', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_add_comment', { text: 'hi' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/discussionId .* or a valid pageId/i);
+  });
+
+  it('fail-softs on an API error (never throws)', async () => {
+    // Use a non-retryable status (notionApi retries once on token/401/unauthorized).
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({ message: 'server error' }, false, 500));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_add_comment', { discussionId: 'd1', text: 'hi' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/500/);
   });
 });

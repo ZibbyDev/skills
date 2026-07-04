@@ -46,9 +46,12 @@ describe('larkDocsSkill structure', () => {
     expect(larkDocsSkill.requiresIntegration).toBe('lark');
   });
 
-  it('exposes the three docx tools', () => {
+  it('exposes the docx + comment tools', () => {
     const names = larkDocsSkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['larkdoc_append', 'larkdoc_create', 'larkdoc_get']);
+    expect(names).toEqual([
+      'larkdoc_add_comment', 'larkdoc_append', 'larkdoc_create',
+      'larkdoc_get', 'larkdoc_list_comments', 'larkdoc_reply_comment',
+    ]);
   });
 
   it('resolve() spawns the generic skill MCP server', () => {
@@ -215,5 +218,95 @@ describe('larkdoc_append', () => {
     const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_append', { documentId: 'DocOneReal1' }));
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/content is required/);
+  });
+});
+
+// ───────────────────────── comments ─────────────────────────
+
+describe('larkdoc_list_comments', () => {
+  it('lists comment threads with their replies', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({
+        items: [
+          { comment_id: 'cmt1', is_solved: false, reply_list: { replies: [
+            { reply_id: 'r1', user_id: 'ou_a', content: { elements: [{ type: 'text_run', text_run: { text: '@Zibby thoughts?' } }] }, create_time: '111' },
+          ] } },
+        ],
+      }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_list_comments', { documentId: 'DocOneReal1' }));
+    expect(res.ok).toBe(true);
+    expect(res.count).toBe(1);
+    expect(res.comments[0].commentId).toBe('cmt1');
+    expect(res.comments[0].replies[0]).toMatchObject({ replyId: 'r1', author: 'ou_a', text: '@Zibby thoughts?' });
+    const url = globalThis.fetch.mock.calls[1][0];
+    expect(url).toContain('/drive/v1/files/DocOneReal1/comments');
+    expect(url).toContain('file_type=docx');
+  });
+
+  it('requires a doc id/url', async () => {
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_list_comments', {}));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/valid Lark doc/);
+  });
+});
+
+describe('larkdoc_add_comment', () => {
+  it('creates a new top-level comment', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ comment_id: 'newcmt' }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_add_comment', {
+      documentId: 'DocOneReal1', text: 'Looks good to me.',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.commentId).toBe('newcmt');
+    const [url, opts] = globalThis.fetch.mock.calls[1];
+    expect(url).toContain('/drive/v1/files/DocOneReal1/comments?file_type=docx');
+    expect(opts.method).toBe('POST');
+    const body = JSON.parse(opts.body);
+    expect(body.reply_list.replies[0].content.elements[0].text_run.text).toBe('Looks good to me.');
+  });
+
+  it('requires text', async () => {
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_add_comment', { documentId: 'DocOneReal1' }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/text is required/);
+  });
+});
+
+describe('larkdoc_reply_comment', () => {
+  it('replies inside an existing comment thread', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ reply_id: 'rr1' }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_reply_comment', {
+      documentId: 'DocOneReal1', commentId: 'cmt1', text: 'On it — reviewing now.',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.commentId).toBe('cmt1');
+    expect(res.replyId).toBe('rr1');
+    const [url, opts] = globalThis.fetch.mock.calls[1];
+    expect(url).toContain('/drive/v1/files/DocOneReal1/comments/cmt1/replies?file_type=docx');
+    expect(opts.method).toBe('POST');
+    const body = JSON.parse(opts.body);
+    expect(body.content.elements[0].text_run.text).toBe('On it — reviewing now.');
+  });
+
+  it('requires a commentId', async () => {
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_reply_comment', { documentId: 'DocOneReal1', text: 'x' }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/commentId is required/);
+  });
+
+  it('fail-softs on an API error', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(errReply('permission denied'));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_reply_comment', {
+      documentId: 'DocOneReal1', commentId: 'cmt1', text: 'hi',
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/permission denied/);
   });
 });
