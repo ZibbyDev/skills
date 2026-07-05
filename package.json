@@ -69,6 +69,10 @@
     "./sentry": {
       "types": "./dist/sentry.d.ts",
       "default": "./dist/sentry.js"
+    },
+    "./review": {
+      "types": "./dist/review.d.ts",
+      "default": "./dist/review.js"
     }
   },
   "scripts": {
