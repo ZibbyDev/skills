@@ -56,22 +56,28 @@ AFTER completing the test, you MUST call memory_save_insight at least once:
 - Be specific — future runs will read your insights.`,
 
   resolve() {
+    // SOFT-GATE (self-host tolerance): when the memory backend is absent
+    // (no @zibby/ui-memory, no `.dolt` DB dir, or no `dolt` binary) this
+    // resolve() returns null → the strategy simply registers no memory MCP
+    // server (see claude-strategy `if (resolved)` guard) and the node runs
+    // WITHOUT memory tools. It must NOT throw: a throw crashes any node that
+    // declares SKILLS.MEMORY, and on self-host nothing initializes the DB
+    // (slim images are built WITH_DOLT=0 and have no dolt binary; even a
+    // WITH_DOLT=1 self-host image never runs the cloud entrypoint's
+    // initMemory()). CLOUD IS UNCHANGED: it pulls ui-memory and the container
+    // entrypoint (egress-tunnel/entrypoint.sh) inits `.dolt` BEFORE the run,
+    // so the DB-present path below is always taken there and returns the
+    // exact same server spec as before — byte-identical.
     const bin = resolveMemoryBin();
     if (!bin) {
-      throw new Error(
-        '❌ Memory MCP server not found\n\n' +
-        '  Install @zibby/ui-memory:\n' +
-        '    npm install @zibby/ui-memory'
-      );
+      console.warn('[memory] @zibby/ui-memory not found — memory tools disabled for this run');
+      return null;
     }
 
     const dbPath = join(process.cwd(), '.zibby', 'memory');
     if (!existsSync(join(dbPath, '.dolt'))) {
-      throw new Error(
-        '❌ Memory database not initialized\n\n' +
-        '  Run:\n' +
-        '    zibby init --mem'
-      );
+      console.warn('[memory] DB/dolt unavailable — memory tools disabled for this run');
+      return null;
     }
 
     try {
@@ -84,13 +90,8 @@ AFTER completing the test, you MUST call memory_save_insight at least once:
         return null;
       }
     } catch (err) {
-      throw new Error(
-        '❌ Dolt not found or memory database error\n\n' +
-        '  Install Dolt:\n' +
-        '    https://docs.dolthub.com/introduction/installation\n\n' +
-        `  Error: ${err.message}`,
-        { cause: err }
-      );
+      console.warn(`[memory] DB/dolt unavailable — memory tools disabled for this run (${err.message})`);
+      return null;
     }
 
     return {
