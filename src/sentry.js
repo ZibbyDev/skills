@@ -134,15 +134,47 @@ export async function sentryListIssues({ query = 'is:unresolved', sort = 'date',
 }
 
 /**
+ * Resolve an issue REFERENCE (numeric id OR shortId) to its NUMERIC issue
+ * (group) id. The global `/issues/<id>/` endpoints used by get/update/comment
+ * accept ONLY the numeric id — a shortId (e.g. `PROJECT-ABC`) 404s there. So a
+ * caller that hands us the shortId (which is what Sentry surfaces everywhere,
+ * and what our workflow input schemas advertise as "numeric or shortId") would
+ * silently fail. Sentry's shortId→group resolver is ORG-scoped:
+ * `GET /organizations/<org>/shortids/<shortId>/` → { groupId }.
+ *
+ * A purely-numeric ref returns immediately with NO API call, so the common path
+ * (callers already holding the numeric id from a fetched issue) is free.
+ */
+export async function resolveSentryIssueId(issueRef) {
+  const ref = String(issueRef == null ? '' : issueRef).trim();
+  if (!ref) throw new Error('resolveSentryIssueId: issueRef is required');
+  if (/^\d+$/.test(ref)) return ref; // already numeric — no lookup needed
+  const { token, organizationSlug, baseUrl } = await resolveIntegrationToken('sentry');
+  const res = await fetch(
+    `${sentryBaseUrl(baseUrl)}/api/0/organizations/${sentryOrg(organizationSlug)}/shortids/${encodeURIComponent(ref)}/`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Sentry API ${res.status} resolving shortId "${ref}": ${err.slice(0, 200)}`);
+  }
+  const j = await res.json();
+  const numeric = j.groupId || (j.group && j.group.id);
+  if (!numeric) throw new Error(`Sentry shortId "${ref}" did not resolve to a numeric issue id`);
+  return String(numeric);
+}
+
+/**
  * Fetch one Sentry issue's details. Uses the global `/issues/<id>/`
  * endpoint (NOT under /organizations/<slug>/) — Sentry routes issue
  * details by ID without an org scope. Auth still uses the connected
- * integration's token.
+ * integration's token. Accepts a numeric id OR a shortId (resolved first).
  */
 export async function sentryGetIssue(issueId) {
   if (!issueId) throw new Error('sentryGetIssue: issueId is required');
+  const numericId = await resolveSentryIssueId(issueId);
   const { token, baseUrl } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${issueId}/`, {
+  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
@@ -185,8 +217,9 @@ export async function sentryUpdateIssue(issueId, update = {}) {
   if (Object.keys(body).length === 0) {
     throw new Error('sentryUpdateIssue: nothing to update (pass status / statusDetails / assignedTo / isBookmarked / hasSeen)');
   }
+  const numericId = await resolveSentryIssueId(issueId); // accept numeric id OR shortId
   const { token, baseUrl } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${issueId}/`, {
+  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -217,8 +250,9 @@ export async function sentryUpdateIssue(issueId, update = {}) {
 export async function sentryAddComment(issueId, text) {
   if (!issueId) throw new Error('sentryAddComment: issueId is required');
   if (!text || !String(text).trim()) throw new Error('sentryAddComment: text is required');
+  const numericId = await resolveSentryIssueId(issueId); // accept numeric id OR shortId
   const { token, baseUrl } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${issueId}/comments/`, {
+  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/comments/`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: String(text) }),

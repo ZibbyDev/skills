@@ -11,7 +11,7 @@ vi.mock('@zibby/core/backend-client.js', () => ({
 }));
 
 const { resolveIntegrationToken } = await import('@zibby/core/backend-client.js');
-const { sentrySkill, sentryUpdateIssue, sentryAddComment, sentryFetch } = await import('../src/sentry.js');
+const { sentrySkill, sentryUpdateIssue, sentryAddComment, sentryFetch, sentryGetIssue, resolveSentryIssueId } = await import('../src/sentry.js');
 
 // Build a fetch Response-like object (res.ok + res.json()/res.text()).
 function fetchJson(payload, ok = true, status = 200) {
@@ -45,6 +45,53 @@ describe('sentry write tools — registration', () => {
   it('documents both write tools in the prompt fragment', () => {
     expect(sentrySkill.promptFragment).toContain('sentry_update_issue');
     expect(sentrySkill.promptFragment).toContain('sentry_add_comment');
+  });
+});
+
+describe('resolveSentryIssueId — numeric passthrough + shortId resolution', () => {
+  it('numeric id → returned unchanged, NO API call', async () => {
+    const f = vi.fn();
+    vi.stubGlobal('fetch', f);
+    expect(await resolveSentryIssueId('7595370169')).toBe('7595370169');
+    expect(f).not.toHaveBeenCalled(); // the numeric fast-path never hits the network
+  });
+
+  it('shortId → org-scoped /shortids/ resolver → numeric groupId', async () => {
+    const f = vi.fn(async (url) => {
+      expect(url).toBe('https://sentry.io/api/0/organizations/acme/shortids/ZIBBY-BACKEND-LAMBDA-V/');
+      return fetchJson({ shortId: 'ZIBBY-BACKEND-LAMBDA-V', groupId: '7595370169' });
+    });
+    vi.stubGlobal('fetch', f);
+    expect(await resolveSentryIssueId('ZIBBY-BACKEND-LAMBDA-V')).toBe('7595370169');
+  });
+
+  it('shortId resolver 404 → clear error naming the shortId', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => fetchJson('not found', false, 404)));
+    await expect(resolveSentryIssueId('NOPE-1')).rejects.toThrow(/resolving shortId "NOPE-1"/);
+  });
+});
+
+describe('sentryGetIssue — accepts numeric id OR shortId', () => {
+  it('shortId → resolves to numeric, then GETs the global /issues/<numeric>/', async () => {
+    const f = vi.fn(async (url) => {
+      if (url.includes('/shortids/')) return fetchJson({ groupId: '7595370169' });
+      expect(url).toBe('https://sentry.io/api/0/issues/7595370169/');
+      return fetchJson({ id: '7595370169', shortId: 'ZIBBY-BACKEND-LAMBDA-V' });
+    });
+    vi.stubGlobal('fetch', f);
+    const issue = await sentryGetIssue('ZIBBY-BACKEND-LAMBDA-V');
+    expect(issue.id).toBe('7595370169');
+    expect(f).toHaveBeenCalledTimes(2); // resolve + fetch
+  });
+
+  it('numeric id → single GET, no resolver call', async () => {
+    const f = vi.fn(async (url) => {
+      expect(url).toBe('https://sentry.io/api/0/issues/42/');
+      return fetchJson({ id: '42' });
+    });
+    vi.stubGlobal('fetch', f);
+    await sentryGetIssue('42');
+    expect(f).toHaveBeenCalledTimes(1); // numeric fast-path: no /shortids/ call
   });
 });
 
