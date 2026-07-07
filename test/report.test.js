@@ -19,6 +19,7 @@ import {
   reportToBlockKit,
   reportToLarkCard,
   reportToNotionBlocks,
+  reportToMarkdown,
   SEVERITIES,
 } from '../src/report.js';
 
@@ -683,5 +684,174 @@ describe('reportToNotionBlocks', () => {
   it('throws on invalid input (schema parse error surfaces)', () => {
     expect(() => reportToNotionBlocks({})).toThrow();
     expect(() => reportToNotionBlocks({ title: 'x' })).toThrow();
+  });
+});
+
+// ─────────────────────── reportToMarkdown ───────────────────────
+
+describe('reportToMarkdown', () => {
+  it('returns a string starting with the # title and the subtitle line', () => {
+    const md = reportToMarkdown(baseReport());
+    expect(typeof md).toBe('string');
+    expect(md.startsWith('# Weekly AI Spend\n')).toBe(true);
+    expect(md).toContain('\nMay 13 — May 20\n');
+  });
+
+  it('omits the subtitle line when absent', () => {
+    const r = baseReport();
+    delete r.subtitle;
+    const md = reportToMarkdown(r);
+    expect(md).not.toContain('May 13');
+    expect(md.startsWith('# Weekly AI Spend\n')).toBe(true);
+  });
+
+  it('renders the headline: bold primary + delta arrow + severity emoji + summary', () => {
+    const md = reportToMarkdown(baseReport());
+    expect(md).toContain('**$8,240**');
+    expect(md).toContain('↑ +12% wow 🟠');
+    expect(md).toContain('Anthropic +47%, /api/agent-run after PR #4214.');
+  });
+
+  it('headline without delta/summary renders just the bold primary', () => {
+    const md = reportToMarkdown(baseReport({ headline: { primary: '$100' } }));
+    expect(md).toContain('**$100**');
+    expect(md).not.toContain('↑');
+  });
+
+  it('trend section: fenced code block with the same unicodeBar lines', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [{
+        kind: 'trend',
+        title: '4-Week Trend',
+        labels: ['Week-3', 'Week-2', 'Week-1', 'This wk'],
+        values: [6200, 7100, 7400, 8240],
+        highlight: 'last',
+        severity: 'warn',
+      }],
+    }));
+    expect(md).toContain('## 4-Week Trend');
+    expect(md).toMatch(/```\n[\s\S]*```/);
+    expect(md).toContain('▓');
+    // Last bucket highlighted with severity emoji.
+    expect(md).toMatch(/This wk.*🟠/);
+    // Same padded layout as the chat-card renderers.
+    expect(md).toMatch(/Week-3\s+6,200\s+[▓░]+/);
+  });
+
+  it('table section: a REAL markdown pipe table (header + separator + rows)', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [{
+        kind: 'table',
+        title: 'Top Projects',
+        headers: ['Project', 'Cost', 'wow'],
+        rows: [
+          ['acme-prod', '$2,140', '+12%'],
+          ['globex-stg', '$1,820', '+3%'],
+        ],
+      }],
+    }));
+    expect(md).toContain('## Top Projects');
+    expect(md).toContain('| Project | Cost | wow |');
+    expect(md).toContain('| --- | --- | --- |');
+    expect(md).toContain('| acme-prod | $2,140 | +12% |');
+    expect(md).toContain('| globex-stg | $1,820 | +3% |');
+  });
+
+  it('table section: escapes literal pipes in cells and stringifies numbers', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [{
+        kind: 'table',
+        headers: ['a|b', 'n'],
+        rows: [['x|y', 42]],
+      }],
+    }));
+    expect(md).toContain('| a\\|b | n |');
+    expect(md).toContain('| x\\|y | 42 |');
+  });
+
+  it('callouts section: severity-emoji bullets', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [{ kind: 'callouts', tone: 'warn', items: ['acme +320% — investigate', 'spike-tests +180%'] }],
+    }));
+    expect(md).toContain('- 🟠 acme +320% — investigate');
+    expect(md).toContain('- 🟠 spike-tests +180%');
+  });
+
+  it('callouts default to the info tone', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [{ kind: 'callouts', items: ['x'] }],
+    }));
+    expect(md).toContain('- 🔵 x');
+  });
+
+  it('breakdown section: bold-label bullets with italic sub + severity emoji', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [{
+        kind: 'breakdown',
+        rows: [
+          { label: 'OpenAI', value: '$3,200', sub: '-3% wow', severity: 'ok' },
+          { label: 'Anthropic', value: '$4,200' },
+        ],
+      }],
+    }));
+    expect(md).toContain('- **OpenAI**: $3,200  _-3% wow_ 🟢');
+    expect(md).toContain('- **Anthropic**: $4,200');
+  });
+
+  it('paragraph section: text passes through as-is', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [{ kind: 'paragraph', title: 'Notes', text: 'Hello **world**' }],
+    }));
+    expect(md).toContain('## Notes');
+    expect(md).toContain('Hello **world**');
+  });
+
+  it('sections are separated by --- rules', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [
+        { kind: 'paragraph', text: 'one' },
+        { kind: 'paragraph', text: 'two' },
+      ],
+    }));
+    const rules = md.split('\n').filter((l) => l === '---');
+    expect(rules).toHaveLength(2); // one before each section (no footer)
+  });
+
+  it('footer: markdown links for viewUrl + rerunUrl', () => {
+    const md = reportToMarkdown(baseReport({
+      footer: { viewUrl: 'https://zibby.dev/x', rerunUrl: 'https://zibby.dev/x/rerun' },
+    }));
+    expect(md).toContain('[View in Zibby](https://zibby.dev/x)');
+    expect(md).toContain('[Run again](https://zibby.dev/x/rerun)');
+  });
+
+  it('omits the footer block entirely when absent', () => {
+    const md = reportToMarkdown(baseReport());
+    expect(md).not.toContain('View in Zibby');
+    expect(md).not.toContain('---');
+  });
+
+  it('full kitchen-sink renders every section kind', () => {
+    const md = reportToMarkdown(baseReport({
+      sections: [
+        { kind: 'paragraph', text: 'Intro paragraph' },
+        { kind: 'trend', labels: ['A', 'B'], values: [1, 2] },
+        { kind: 'table', headers: ['x'], rows: [['y']] },
+        { kind: 'callouts', items: ['note 1'] },
+        { kind: 'breakdown', rows: [{ label: 'k', value: 'v' }] },
+      ],
+      footer: { viewUrl: 'https://a.com' },
+    }));
+    expect(md).toContain('Intro paragraph');
+    expect(md).toContain('```');
+    expect(md).toContain('| x |');
+    expect(md).toContain('- 🔵 note 1');
+    expect(md).toContain('- **k**: v');
+    expect(md).toContain('[View in Zibby](https://a.com)');
+  });
+
+  it('throws on invalid input (schema parse error surfaces)', () => {
+    expect(() => reportToMarkdown({})).toThrow();
+    expect(() => reportToMarkdown({ title: 'x' })).toThrow();
   });
 });

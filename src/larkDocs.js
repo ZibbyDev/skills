@@ -29,9 +29,9 @@
  *   GET  /open-apis/wiki/v2/spaces/get_node?token={t}          → { node:{obj_token,obj_type} }
  */
 
-import { existsSync } from 'fs';
+import { existsSync, statSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname, resolve as resolvePath } from 'path';
+import { basename, dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 
@@ -51,6 +51,10 @@ function resolveSkillBin() {
 const MAX_TEXT_CHARS = 20000;
 // Lark's blocks/children create endpoint accepts at most 50 children/request.
 const MAX_BLOCK_CHILDREN = 50;
+// Cap on uploaded image size. Lark's drive upload_all hard cap is 20MB
+// (validation max 20971520 bytes); we stay at 10MB so a report chart can
+// never bump the platform limit.
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 // Lark's tenant_access_token TTL is ~2h. Cache slightly under that. This is a
 // SEPARATE cache from lark.js (each module gets its own) — same pattern as
@@ -235,6 +239,73 @@ async function appendBlocks(documentId, blocks) {
   return host;
 }
 
+// ── Images (docx image block + drive media upload) ──────────────────────────
+// Inserting a LOCAL image into a docx is a 3-step dance (verified against
+// Lark's open docs: docx-v1 document-block/create + patch, drive-v1
+// media/upload_all):
+//   1. create an EMPTY image block as a child of the doc root:
+//        POST /open-apis/docx/v1/documents/{id}/blocks/{id}/children
+//        { children: [{ block_type: 27, image: {} }] }
+//      → data.children[0].block_id (block_type 27 == image)
+//   2. upload the file bytes to drive, parented on that block:
+//        POST /open-apis/drive/v1/medias/upload_all  (multipart/form-data:
+//        file_name, parent_type='docx_image', parent_node=<block_id>,
+//        size=<bytes>, file=<binary>; ≤20MB) → data.file_token
+//   3. bind the token to the block:
+//        PATCH /open-apis/docx/v1/documents/{id}/blocks/{block_id}
+//              ?document_revision_id=-1
+//        { replace_image: { token, width?, height? } }  (width/height in px)
+
+/**
+ * Validate + read a local image file for upload. Throws a clear error
+ * (caught + fail-softed by handleToolCall) on a missing path, a non-file,
+ * an unsupported extension, or an oversize file.
+ */
+function readImageBytes(imagePath) {
+  const p = typeof imagePath === 'string' ? imagePath.trim() : '';
+  if (!p) throw new Error('imagePath is required');
+  if (!existsSync(p) || !statSync(p).isFile()) {
+    throw new Error(`imagePath not found (or not a file): ${p}`);
+  }
+  if (!/\.(png|jpe?g)$/i.test(p)) {
+    throw new Error('imagePath must be a .png or .jpg/.jpeg file');
+  }
+  const bytes = readFileSync(p);
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    throw new Error(`image is ${(bytes.length / (1024 * 1024)).toFixed(1)}MB — max 10MB`);
+  }
+  return bytes;
+}
+
+/**
+ * Upload image bytes to Lark drive as a docx image (multipart/form-data).
+ * A SEPARATE helper from larkDocsApi (which is JSON-only), but auth still
+ * routes through getTenantAccessToken — the single chokepoint. Uses the
+ * global FormData + Blob (Node 18+); fetch sets the multipart boundary.
+ * Returns the drive file_token.
+ */
+async function larkUploadDocxImage({ fileName, parentNode, bytes }) {
+  const { token, host } = await getTenantAccessToken();
+  const form = new FormData();
+  form.set('file_name', fileName);
+  form.set('parent_type', 'docx_image');
+  form.set('parent_node', parentNode);
+  form.set('size', String(bytes.length));
+  form.set('file', new Blob([bytes]), fileName);
+  const res = await fetch(`${host}/open-apis/drive/v1/medias/upload_all`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  const data = await res.json();
+  if (data.code !== 0) {
+    throw new Error(`Lark media upload_all error: ${data.msg || data.code}`);
+  }
+  const fileToken = data.data?.file_token;
+  if (!fileToken) throw new Error('Lark media upload_all returned no file_token');
+  return fileToken;
+}
+
 // ── Comments (drive v1) ──────────────────────────────────────────────────────
 // Lark's file-comment API is SEPARATE from the docx block API and is keyed on
 // the drive `file_token` (for a docx the file_token == the document_id) plus a
@@ -289,7 +360,7 @@ export const larkDocsSkill = {
   serverName: 'larkdocs',
   allowedTools: ['mcp__larkdocs__*'],
   requiresIntegration: INTEGRATIONS.LARK, // reuses the connected Lark app (docx scopes)
-  description: 'Lark / Feishu Docs — read, create, and append Lark documents (docx).',
+  description: 'Lark / Feishu Docs — read, create, append, and insert images into Lark documents (docx).',
   envKeys: [],
 
   promptFragment: `## Lark Docs (connected)
@@ -297,6 +368,7 @@ You can read, create, and append Lark/Feishu documents (docx). This reuses the s
 - larkdoc_get: pass a Lark doc id OR a full doc URL (a /docx/ or /wiki/ link); returns { ok, documentId, title, url, text } where text is the doc as plain text (truncated to ~20k chars). Use it as reference context.
 - larkdoc_create: create a new doc from a title + markdown/text (#/##/### headings, - bullets, 1. ordered supported); returns { ok, documentId, url }. Share the url.
 - larkdoc_append: append markdown/text to the end of an existing doc (pass the documentId or doc URL).
+- larkdoc_insert_image: append a LOCAL image file (png/jpg, ≤10MB) to the end of a doc — pass { documentId, imagePath, width?, height? } (width/height in px, optional). Returns { ok, documentId, blockId, url }. Use this to deliver a rendered chart/report image into the doc.
 - larkdoc_list_comments: list the comment threads on a doc (pass the documentId or doc URL); returns { ok, comments:[{ commentId, replies:[{ replyId, author, text }] }] }. Use to read the thread you are replying to.
 - larkdoc_reply_comment: reply INSIDE an existing comment thread — pass { documentId, commentId, text }. Use this to answer a user who @mentioned Zibby in a doc comment (reply in the SAME commentId).
 - larkdoc_add_comment: post a NEW top-level comment on a doc — pass { documentId, text }.
@@ -404,6 +476,50 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           return JSON.stringify({ ok: true, documentId, url: docWebUrl(host, documentId) });
         }
 
+        case 'larkdoc_insert_image': {
+          const ref = args?.documentId || args?.url || args?.id;
+          const parsed = parseLarkDocRef(ref);
+          if (!parsed) return JSON.stringify({ ok: false, error: 'A valid Lark doc id or URL is required' });
+          if (!args?.imagePath || typeof args.imagePath !== 'string' || !args.imagePath.trim()) {
+            return JSON.stringify({ ok: false, error: 'imagePath is required' });
+          }
+
+          const documentId = await resolveDocumentId(parsed);
+          const imagePath = args.imagePath.trim();
+          const bytes = readImageBytes(imagePath);
+          const fileName = basename(imagePath);
+
+          // 1. Empty image block appended at the end of the doc root.
+          const created = await larkDocsApi(
+            'POST',
+            `/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/children?document_revision_id=-1`,
+            { children: [{ block_type: 27, image: {} }] },
+          );
+          const blockId = created.data?.children?.[0]?.block_id;
+          if (!blockId) {
+            return JSON.stringify({ ok: false, error: 'Lark image block create returned no block_id' });
+          }
+
+          // 2. Upload the bytes, parented on the new block.
+          const fileToken = await larkUploadDocxImage({ fileName, parentNode: blockId, bytes });
+
+          // 3. Bind the uploaded file to the block (optional px dimensions).
+          const replaceImage = { token: fileToken };
+          const width = Number(args?.width);
+          const height = Number(args?.height);
+          if (Number.isFinite(width) && width > 0) replaceImage.width = Math.round(width);
+          if (Number.isFinite(height) && height > 0) replaceImage.height = Math.round(height);
+          const { host } = await larkDocsApi(
+            'PATCH',
+            `/open-apis/docx/v1/documents/${documentId}/blocks/${blockId}?document_revision_id=-1`,
+            { replace_image: replaceImage },
+          );
+
+          return JSON.stringify({
+            ok: true, documentId, blockId, fileToken, url: docWebUrl(host, documentId),
+          });
+        }
+
         case 'larkdoc_list_comments': {
           const ref = args?.documentId || args?.url || args?.id || args?.fileToken;
           const parsed = parseLarkDocRef(ref);
@@ -503,6 +619,20 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           text: { type: 'string', description: 'Content to append, as plain text (used when markdown is absent).' },
         },
         required: ['documentId'],
+      },
+    },
+    {
+      name: 'larkdoc_insert_image',
+      description: 'Append a LOCAL image file (png/jpg, max 10MB) to the END of an existing Lark/Feishu document (docx). Accepts a documentId or full doc URL plus a local file path. Optional width/height in pixels. Returns { ok, documentId, blockId, fileToken, url }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          documentId: { type: 'string', description: 'Lark doc id (docx token) OR a full Lark/Feishu doc URL.' },
+          imagePath: { type: 'string', description: 'Local filesystem path to a .png or .jpg/.jpeg image (max 10MB).' },
+          width: { type: 'number', description: 'Optional display width in pixels.' },
+          height: { type: 'number', description: 'Optional display height in pixels.' },
+        },
+        required: ['documentId', 'imagePath'],
       },
     },
     {

@@ -24,9 +24,9 @@
  *   code path serves both phases; only the granted scope differs.
  */
 
-import { existsSync } from 'fs';
+import { existsSync, statSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname, resolve as resolvePath } from 'path';
+import { basename, dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 
@@ -44,6 +44,11 @@ function resolveSkillBin() {
 
 const DOCS_BASE = 'https://docs.googleapis.com/v1';
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
+const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
+
+// Drive's uploadType=multipart cap is 5MB total request — plenty for a
+// rendered chart, and it keeps the upload a single request.
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /**
  * INJECTED-TOKEN fast path (Zibby Copilot per-turn credential injection) +
@@ -141,43 +146,57 @@ export function parseDocId(ref) {
  *
  * Keep this the single auth chokepoint — don't resolve tokens at call sites.
  */
+/**
+ * Resolve the Google bearer for THIS call — the ONE place the credential
+ * precedence lives (factored out so googleApi and any raw-body sibling can
+ * share it without duplicating the gates):
+ *   1. injected sender token (Copilot per-turn injection) — the sender's
+ *      OWN Google (the runtime injects the owner's own Google through the
+ *      same path); never the PAT account's.
+ *   2. STRICT CHAT-TURN gate (primary, fail-CLOSED) — ANY chat turn
+ *      (ZIBBY_CHAT_STRICT_PERSONAL=1) with NO injected token: HARD REFUSE.
+ *      A chat turn must NEVER fall through to the PAT-resolved owner token
+ *      — not for non-owners, not for unverified senders, not even for the
+ *      owner (whose own Google arrives via injection when connected).
+ *   3. non-owner gate (belt-and-braces, legacy) — verified non-owner
+ *      sender with NO injected token: HARD REFUSE.
+ *   4. no chat-sender context (Fargate workflows, self-host, direct tool
+ *      use) — the existing resolveIntegrationToken path, unchanged.
+ */
+async function resolveGoogleBearer() {
+  let token;
+  const injected = injectedGoogleToken();
+  if (injected) {
+    token = injected.token;
+  } else if (chatStrictPersonal() || senderIsNonOwner()) {
+    throw new Error(NON_OWNER_REFUSAL);
+  } else {
+    ({ token } = await resolveIntegrationToken('google'));
+  }
+  if (typeof token !== 'string' || !token) {
+    throw new Error(`Invalid google token type: ${typeof token}`);
+  }
+  return token;
+}
+
 export async function googleApi(url, opts = {}) {
   const makeRequest = async () => {
-    // Bearer precedence (single chokepoint — every gdocs tool routes through
-    // here BEFORE any network call):
-    //   1. injected sender token (Copilot per-turn injection) — the sender's
-    //      OWN Google (the runtime injects the owner's own Google through the
-    //      same path); never the PAT account's.
-    //   2. STRICT CHAT-TURN gate (primary, fail-CLOSED) — ANY chat turn
-    //      (ZIBBY_CHAT_STRICT_PERSONAL=1) with NO injected token: HARD REFUSE.
-    //      A chat turn must NEVER fall through to the PAT-resolved owner token
-    //      — not for non-owners, not for unverified senders, not even for the
-    //      owner (whose own Google arrives via injection when connected).
-    //   3. non-owner gate (belt-and-braces, legacy) — verified non-owner
-    //      sender with NO injected token: HARD REFUSE.
-    //   4. no chat-sender context (Fargate workflows, self-host, direct tool
-    //      use) — the existing resolveIntegrationToken path, unchanged.
-    let token;
-    const injected = injectedGoogleToken();
-    if (injected) {
-      token = injected.token;
-    } else if (chatStrictPersonal() || senderIsNonOwner()) {
-      throw new Error(NON_OWNER_REFUSAL);
-    } else {
-      ({ token } = await resolveIntegrationToken('google'));
-    }
-    if (typeof token !== 'string' || !token) {
-      throw new Error(`Invalid google token type: ${typeof token}`);
-    }
+    // Single auth chokepoint — every gdocs tool routes through
+    // resolveGoogleBearer() (injection + refusal gates) BEFORE any network
+    // call. `opts.rawBody` + `opts.contentType` carry a non-JSON body (the
+    // Drive multipart/related upload) through the SAME chokepoint + retry.
+    const token = await resolveGoogleBearer();
     const res = await fetch(url, {
       method: opts.method || 'GET',
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/json',
-        ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(opts.rawBody && opts.contentType
+          ? { 'Content-Type': opts.contentType }
+          : (opts.body ? { 'Content-Type': 'application/json' } : {})),
         ...opts.headers,
       },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.rawBody ? opts.rawBody : (opts.body ? JSON.stringify(opts.body) : undefined),
     });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
@@ -406,6 +425,53 @@ export function extractPlainText(body) {
 
 const docUrl = (id) => `https://docs.google.com/document/d/${id}/edit`;
 
+/**
+ * Validate + read a local image file for the Drive multipart upload.
+ * Throws a clear error (caught + fail-softed by handleToolCall). Returns
+ * { bytes, fileName, mimeType }.
+ */
+function readImageFile(imagePath) {
+  const p = typeof imagePath === 'string' ? imagePath.trim() : '';
+  if (!p) throw new Error('imagePath is required');
+  if (!existsSync(p) || !statSync(p).isFile()) {
+    throw new Error(`imagePath not found (or not a file): ${p}`);
+  }
+  if (!/\.(png|jpe?g)$/i.test(p)) {
+    throw new Error('imagePath must be a .png or .jpg/.jpeg file');
+  }
+  const bytes = readFileSync(p);
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    throw new Error(`image is ${(bytes.length / (1024 * 1024)).toFixed(1)}MB — max 5MB (Drive multipart upload cap)`);
+  }
+  return {
+    bytes,
+    fileName: basename(p),
+    mimeType: /\.png$/i.test(p) ? 'image/png' : 'image/jpeg',
+  };
+}
+
+/**
+ * Build the multipart/related body for Drive's uploadType=multipart
+ * (VERIFIED contract: metadata JSON part first, then the media part —
+ * RFC 2387; ≤5MB). Returns { rawBody, contentType } for googleApi.
+ */
+function buildDriveMultipart(metadata, bytes, mimeType) {
+  const boundary = `zibby-gdocs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const rawBody = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n`
+      + 'Content-Type: application/json; charset=UTF-8\r\n\r\n'
+      + `${JSON.stringify(metadata)}\r\n`
+      + `--${boundary}\r\n`
+      + `Content-Type: ${mimeType}\r\n\r\n`,
+      'utf8',
+    ),
+    bytes,
+    Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'),
+  ]);
+  return { rawBody, contentType: `multipart/related; boundary=${boundary}` };
+}
+
 /** The markdown OR text content arg — markdown wins when both are present. */
 const contentArg = (args) => {
   const md = typeof args?.markdown === 'string' ? args.markdown : null;
@@ -418,13 +484,14 @@ export const googleDocsSkill = {
   serverName: 'gdocs',
   allowedTools: ['mcp__gdocs__*'],
   requiresIntegration: INTEGRATIONS.GOOGLE, // see jiraSkill.requiresIntegration for semantics
-  description: 'Google Docs — create, append to, and read Google Docs (drive.file scoped)',
+  description: 'Google Docs — create, append to, insert images into, and read Google Docs (drive.file scoped)',
 
   promptFragment: `## Google Docs (connected)
 You can create and edit Google Docs for the user. IMPORTANT visibility caveat: the integration uses Google's per-file drive.file scope, so you can only see docs this app CREATED (or the user explicitly picked) — not the user's whole Drive.
 Docs access is PER-USER: each teammate connects their OWN Google account (Integrations → Google Docs). In shared-chat contexts the runtime routes these tools to the SENDER's own Google; a teammate who hasn't connected their own Google gets { ok:false } with connect instructions — for privacy the project owner's Google is NEVER used on someone else's behalf. Relay those instructions rather than retrying.
 - gdocs_create_doc: create a new Google Doc from a title + markdown (headings/bold/bullets/links supported) or plain text; returns { documentId, url }. Share the url with the user.
 - gdocs_append: append markdown/text to the end of a doc you created earlier (pass the documentId or doc URL).
+- gdocs_insert_image: append a LOCAL image file (png/jpg, ≤5MB) to the end of a doc — pass { documentId, imagePath, width?, height? } (width/height in PT, optional). The image is uploaded to the user's Drive and made link-readable (anyone with the link) so Docs can render it. Returns { ok, documentId, fileId, url }.
 - gdocs_get: read a doc back as plain text (works for app-created/user-picked docs; arbitrary docs need the extended documents.readonly connection).
 - gdocs_list_created: list the Google Docs visible to this app (drive.file → only docs it created or the user picked).
 These tools return { ok:false, error } on failure — treat an unavailable Google connection as "cannot deliver to Docs" and report it rather than blocking the task.`,
@@ -529,6 +596,57 @@ These tools return { ok:false, error } on failure — treat an unavailable Googl
           return JSON.stringify({ ok: true, documentId: id, url: docUrl(id) });
         }
 
+        case 'gdocs_insert_image': {
+          const id = parseDocId(args?.documentId || args?.url || args?.id);
+          if (!id) return JSON.stringify({ ok: false, error: 'A valid Google Docs documentId or URL is required' });
+          if (!args?.imagePath || typeof args.imagePath !== 'string' || !args.imagePath.trim()) {
+            return JSON.stringify({ ok: false, error: 'imagePath is required' });
+          }
+          const { bytes, fileName, mimeType } = readImageFile(args.imagePath);
+
+          // 1. Upload the file to Drive (multipart/related: metadata + media).
+          const { rawBody, contentType } = buildDriveMultipart({ name: fileName, mimeType }, bytes, mimeType);
+          const uploaded = await googleApi(`${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id`, {
+            method: 'POST', rawBody, contentType,
+          });
+          const fileId = uploaded?.id;
+          if (!fileId) return JSON.stringify({ ok: false, error: 'Drive upload returned no file id' });
+
+          // 2. Make the file link-readable: the Docs render service fetches
+          // insertInlineImage URIs anonymously, so the image must be publicly
+          // fetchable (anyone-with-link reader).
+          await googleApi(`${DRIVE_BASE}/files/${fileId}/permissions`, {
+            method: 'POST',
+            body: { role: 'reader', type: 'anyone' },
+          });
+
+          // 3. Insert at end-of-body — same end-index logic as gdocs_append.
+          const doc = await googleApi(`${DOCS_BASE}/documents/${id}`);
+          const contentArr = Array.isArray(doc?.body?.content) ? doc.body.content : [];
+          const endIndex = contentArr.length
+            ? contentArr[contentArr.length - 1].endIndex || 2
+            : 2;
+          const insertAt = Math.max(1, endIndex - 1);
+
+          const insertInlineImage = {
+            location: { index: insertAt },
+            uri: `https://drive.google.com/uc?export=download&id=${fileId}`,
+          };
+          const width = Number(args?.width);
+          const height = Number(args?.height);
+          if ((Number.isFinite(width) && width > 0) || (Number.isFinite(height) && height > 0)) {
+            insertInlineImage.objectSize = {
+              ...(Number.isFinite(width) && width > 0 ? { width: { magnitude: width, unit: 'PT' } } : {}),
+              ...(Number.isFinite(height) && height > 0 ? { height: { magnitude: height, unit: 'PT' } } : {}),
+            };
+          }
+          await googleApi(`${DOCS_BASE}/documents/${id}:batchUpdate`, {
+            method: 'POST',
+            body: { requests: [{ insertInlineImage }] },
+          });
+          return JSON.stringify({ ok: true, documentId: id, fileId, url: docUrl(id) });
+        }
+
         case 'gdocs_get': {
           const id = parseDocId(args?.documentId || args?.url || args?.id);
           if (!id) return JSON.stringify({ ok: false, error: 'A valid Google Docs documentId or URL is required' });
@@ -596,6 +714,20 @@ These tools return { ok:false, error } on failure — treat an unavailable Googl
           text: { type: 'string', description: 'Content to append, as plain text (used when markdown is absent).' },
         },
         required: ['documentId'],
+      },
+    },
+    {
+      name: 'gdocs_insert_image',
+      description: 'Append a LOCAL image file (png/jpg, max 5MB) to the END of an existing Google Doc. The image is uploaded to the user\'s Drive, made link-readable (role reader / type anyone — required: the Docs API only renders publicly fetchable image URIs, <2KB URI length, image <50MB and <25 megapixels), then inserted inline. Optional width/height in points (PT). Returns { ok, documentId, fileId, url }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          documentId: { type: 'string', description: 'Google Docs documentId OR a full https://docs.google.com/document/d/... URL.' },
+          imagePath: { type: 'string', description: 'Local filesystem path to a .png or .jpg/.jpeg image (max 5MB).' },
+          width: { type: 'number', description: 'Optional display width in points (PT).' },
+          height: { type: 'number', description: 'Optional display height in points (PT).' },
+        },
+        required: ['documentId', 'imagePath'],
       },
     },
     {

@@ -1,10 +1,11 @@
 /**
- * Notion (read-only CONTEXT skill).
+ * Notion skill — read context + write pages/blocks/images.
  *
- * Unlike the notify skills (slack/lark/chat-notify), this skill PULLS
- * content: it fetches a Notion page (or database) and flattens it into
- * readable markdown so a downstream agent — e.g. a code-review agent —
- * can use a referenced engineering-standards page as extra context.
+ * Historically read-only (pull a page/database as markdown context for a
+ * downstream agent, e.g. a code-review agent reading an
+ * engineering-standards page). It now ALSO delivers content: create pages,
+ * append blocks, and insert images — the Notion twin of googleDocs.js /
+ * larkDocs.js for the report-delivery channels.
  *
  * Modelled on jira.js:
  *   - resolveIntegrationToken('notion') is the SINGLE auth chokepoint
@@ -17,14 +18,14 @@
  *   { provider:'notion', token, workspaceId, workspaceName, botId, expiresInSec }
  * We only need `token` here — it's a long-lived Notion bearer (no refresh).
  *
- * This is a context-only, in-process skill: there is no MCP server, so
- * resolve() returns null (no MCP spawn spec) — the agent calls the tools
- * via handleToolCall, same as the in-process path for jira/slack.
+ * Served over MCP via the generic bin/mcp-skill.mjs (resolve() below) so
+ * the agent gets real mcp__notion__* tools; deterministic node code can
+ * also call handleToolCall directly, same as jira/slack.
  */
 
-import { existsSync } from 'fs';
+import { existsSync, statSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname, resolve as resolvePath } from 'path';
+import { basename, dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 
@@ -42,6 +43,9 @@ function resolveSkillBin() {
 
 // Current stable Notion API version. Notion requires this header on every
 // request; the value pins the response schema (block/property shapes).
+// VERIFIED: the File Upload API (POST /v1/file_uploads + .../send) GA'd
+// May 2025 under this same version — contemporary examples used
+// Notion-Version 2022-06-28 — so image uploads work without bumping it.
 const NOTION_VERSION = '2022-06-28';
 const NOTION_BASE = 'https://api.notion.com/v1';
 
@@ -51,6 +55,13 @@ const MAX_TEXT_CHARS = 20000;
 const MAX_DB_ROWS = 25;
 // Hard ceiling on block-children pagination so a huge page can't loop forever.
 const MAX_BLOCK_PAGES = 25;
+// Notion caps `children` at 100 blocks per request (pages.create AND
+// blocks.children.append) — longer bodies are chunked across requests.
+const MAX_CHILDREN_PER_REQUEST = 100;
+// Hard bound on the total blocks accepted by one write call.
+const MAX_WRITE_BLOCKS = 500;
+// Notion's single_part file-upload cap is 20MB.
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 /**
  * Extract a 32-char Notion id from a raw id OR a Notion URL.
@@ -93,6 +104,9 @@ export function parseNotionId(ref) {
  * header, retries once on transient auth errors, and returns parsed JSON.
  *
  * Keep this the single auth chokepoint — don't resolve tokens at call sites.
+ * `opts.formData`: a FormData body (the file-upload send endpoint is
+ * multipart/form-data, not JSON) — fetch sets the multipart boundary itself,
+ * so no Content-Type is set for it.
  */
 export async function notionApi(path, opts = {}) {
   const makeRequest = async () => {
@@ -106,10 +120,10 @@ export async function notionApi(path, opts = {}) {
         Authorization: `Bearer ${token}`,
         'Notion-Version': NOTION_VERSION,
         Accept: 'application/json',
-        ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(opts.body && !opts.formData ? { 'Content-Type': 'application/json' } : {}),
         ...opts.headers,
       },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.formData ? opts.formData : (opts.body ? JSON.stringify(opts.body) : undefined),
     });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
@@ -349,20 +363,142 @@ function propToString(prop) {
   }
 }
 
+// ── Write path (create/append pages, blocks, images) ────────────────────────
+
+/** Canonical Notion page URL from a dashed page id. */
+function notionPageUrl(id) {
+  return `https://www.notion.so/${String(id || '').replace(/-/g, '')}`;
+}
+
+/**
+ * Map a small, common subset of markdown into Notion block objects.
+ * Each block is a single line: headings (#/##/### → heading_1/2/3), bullets
+ * (- / *), ordered (1.) — everything else a paragraph. Inline marks are kept
+ * as literal text (content preserved; no annotation parsing — honest +
+ * robust). Empty lines are skipped. Mirrors larkDocs.js markdownToLarkBlocks.
+ */
+export function markdownToNotionBlocks(markdown) {
+  const source = String(markdown ?? '').replace(/\r\n/g, '\n');
+  const blocks = [];
+  for (const rawLine of source.split('\n')) {
+    const line = rawLine.replace(/\s+$/, '');
+    if (!line.trim()) continue;
+
+    const h = /^(#{1,3})\s+(.*)$/.exec(line);
+    const ul = /^\s*[-*]\s+(.*)$/.exec(line);
+    const ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+
+    let type;
+    let content;
+    if (h) {
+      type = `heading_${h[1].length}`;
+      content = h[2];
+    } else if (ul) {
+      type = 'bulleted_list_item';
+      content = ul[1];
+    } else if (ol) {
+      type = 'numbered_list_item';
+      content = ol[1];
+    } else {
+      type = 'paragraph';
+      content = line;
+    }
+
+    blocks.push({ object: 'block', type, [type]: { rich_text: stringToRichText(content) } });
+  }
+  return blocks;
+}
+
+/**
+ * The write-body arg: raw `blocks` (bounded pass-through) win over
+ * `markdown` (converted). Returns null when neither is usable.
+ */
+function writeBlocksArg(args) {
+  if (Array.isArray(args?.blocks) && args.blocks.length) {
+    return args.blocks.slice(0, MAX_WRITE_BLOCKS);
+  }
+  if (typeof args?.markdown === 'string' && args.markdown.trim()) {
+    return markdownToNotionBlocks(args.markdown).slice(0, MAX_WRITE_BLOCKS);
+  }
+  return null;
+}
+
+/**
+ * Append children to a block/page in ≤100-block chunks (Notion's
+ * per-request cap) via PATCH /v1/blocks/{id}/children.
+ */
+async function appendChildrenChunked(blockId, blocks) {
+  for (let i = 0; i < blocks.length; i += MAX_CHILDREN_PER_REQUEST) {
+    await notionApi(`/blocks/${blockId}/children`, {
+      method: 'PATCH',
+      body: { children: blocks.slice(i, i + MAX_CHILDREN_PER_REQUEST) },
+    });
+  }
+}
+
+/**
+ * Validate + read a local image file for the Notion File Upload API.
+ * Throws a clear error (caught + fail-softed by handleToolCall).
+ */
+function readImageBytes(imagePath) {
+  const p = typeof imagePath === 'string' ? imagePath.trim() : '';
+  if (!p) throw new Error('imagePath is required');
+  if (!existsSync(p) || !statSync(p).isFile()) {
+    throw new Error(`imagePath not found (or not a file): ${p}`);
+  }
+  if (!/\.(png|jpe?g)$/i.test(p)) {
+    throw new Error('imagePath must be a .png or .jpg/.jpeg file');
+  }
+  const bytes = readFileSync(p);
+  if (bytes.length > MAX_UPLOAD_BYTES) {
+    throw new Error(`image is ${(bytes.length / (1024 * 1024)).toFixed(1)}MB — max 20MB (Notion single_part upload cap)`);
+  }
+  return bytes;
+}
+
+/**
+ * Upload a local image via Notion's File Upload API (VERIFIED contract,
+ * GA'd 2025, works under the pinned 2022-06-28 version header):
+ *   1. POST /v1/file_uploads { mode:'single_part', filename } → { id }
+ *   2. POST /v1/file_uploads/{id}/send — multipart/form-data, field `file`
+ * Returns the file_upload id, referenced from an image block as
+ * { type:'file_upload', file_upload:{ id } }. Single-part cap: 20MB.
+ */
+async function uploadImageFile(imagePath) {
+  const bytes = readImageBytes(imagePath);
+  const fileName = basename(imagePath.trim());
+  const contentType = /\.png$/i.test(fileName) ? 'image/png' : 'image/jpeg';
+
+  const created = await notionApi('/file_uploads', {
+    method: 'POST',
+    body: { mode: 'single_part', filename: fileName },
+  });
+  const uploadId = created?.id;
+  if (!uploadId) throw new Error('Notion file upload create returned no id');
+
+  const form = new FormData();
+  form.set('file', new Blob([bytes], { type: contentType }), fileName);
+  await notionApi(`/file_uploads/${uploadId}/send`, { method: 'POST', formData: form });
+  return uploadId;
+}
+
 export const notionSkill = {
   id: 'notion',
   serverName: 'notion',
   allowedTools: ['mcp__notion__*'],
   requiresIntegration: INTEGRATIONS.NOTION, // see jiraSkill.requiresIntegration for semantics
-  description: 'Notion read-only context (pull a page/database as markdown)',
+  description: 'Notion — read pages/databases as context + create pages, append blocks, and insert images',
 
-  promptFragment: `## Notion (connected, read-only context)
-You can pull a referenced Notion page in as extra context. This is OPTIONAL — only use it when the task references a Notion page/URL (e.g. an engineering-standards or design doc to review against).
+  promptFragment: `## Notion (connected)
+You can read Notion content as context AND write to Notion (create pages, append blocks, insert images).
 - notion_get_page: pass a Notion page id OR a full Notion URL; returns { id, title, url, text } where text is the page flattened to markdown (truncated to ~20k chars). Use the text as reference context.
 - notion_query_database: pass a database id/URL; returns a small list of rows ({ id, title, url, props }). Use to find a specific page, then notion_get_page it.
+- notion_create_page: create a page under a parent page ({ parentPageId, title, markdown }) or in a database ({ databaseId, title, markdown }) — one parent is required. Body from markdown (#/##/### headings, - bullets, 1. ordered) or raw Notion blocks. Returns { ok, pageId, url } — share the url.
+- notion_append_blocks: append markdown (or raw blocks) to the end of an existing page — pass { pageId, markdown }. Returns { ok, pageId, url }.
+- notion_insert_image: append an image block to a page. Pass { pageId, imagePath } for a LOCAL png/jpg file (≤20MB, uploaded via Notion's File Upload API) or { pageId, imageUrl } for an external, publicly reachable image URL. Optional caption. Returns { ok, pageId, url }.
 - notion_list_comments: pass a page/block id OR URL; returns the open comment discussions on it ({ id, discussionId, text, author }). Use to read the comment thread you are replying to.
 - notion_add_comment: post a comment. To REPLY in an existing discussion pass { discussionId, text }; to start a NEW top-level comment on a page pass { pageId, text }. Returns { ok, id, discussionId }. Use this to answer a user who @mentioned Zibby in a Notion comment — reply in the SAME discussionId.
-Do not block the task if Notion is unavailable — these tools return { ok:false, error } on failure; treat a missing page as "no extra context" and continue.`,
+Do not block the task if Notion is unavailable — these tools return { ok:false, error } on failure; treat a missing page as "no extra context" / "cannot deliver to Notion" and continue.`,
 
   /**
    * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -440,6 +576,89 @@ Do not block the task if Notion is unavailable — these tools return { ok:false
             };
           });
           return JSON.stringify({ ok: true, id, count: rows.length, hasMore: !!data.has_more, rows });
+        }
+
+        case 'notion_create_page': {
+          const title = typeof args?.title === 'string' && args.title.trim()
+            ? args.title.trim()
+            : null;
+          if (!title) return JSON.stringify({ ok: false, error: 'title is required' });
+
+          // Exactly one parent: a page OR a database. When both are somehow
+          // present, the database wins (a database row is the more specific
+          // destination).
+          const databaseId = args?.databaseId ? parseNotionId(args.databaseId) : null;
+          const parentPageId = args?.parentPageId
+            ? parseNotionId(args.parentPageId)
+            : parseNotionId(args?.parent || args?.pageId);
+          if (!databaseId && !parentPageId) {
+            return JSON.stringify({ ok: false, error: 'A valid parentPageId or databaseId is required' });
+          }
+          const parent = databaseId ? { database_id: databaseId } : { page_id: parentPageId };
+
+          // 'title' is the ID of the title property on EVERY page/database
+          // (regardless of the property's display name), so keying by id
+          // works for both parent kinds.
+          const properties = { title: { title: stringToRichText(title) } };
+
+          const blocks = writeBlocksArg(args) || [];
+          const first = blocks.slice(0, MAX_CHILDREN_PER_REQUEST);
+          const page = await notionApi('/pages', {
+            method: 'POST',
+            body: { parent, properties, ...(first.length ? { children: first } : {}) },
+          });
+          const pageId = page?.id;
+          if (!pageId) return JSON.stringify({ ok: false, error: 'Notion page create returned no id' });
+
+          // Notion caps children at 100 per request — append the remainder.
+          const rest = blocks.slice(MAX_CHILDREN_PER_REQUEST);
+          if (rest.length) await appendChildrenChunked(pageId, rest);
+
+          return JSON.stringify({ ok: true, pageId, url: page?.url || notionPageUrl(pageId) });
+        }
+
+        case 'notion_append_blocks': {
+          const pageId = parseNotionId(args?.pageId || args?.blockId || args?.url || args?.id);
+          if (!pageId) return JSON.stringify({ ok: false, error: 'A valid Notion page id or URL is required' });
+
+          const blocks = writeBlocksArg(args);
+          if (!blocks || !blocks.length) {
+            return JSON.stringify({ ok: false, error: 'markdown or blocks content is required' });
+          }
+          await appendChildrenChunked(pageId, blocks);
+          return JSON.stringify({ ok: true, pageId, url: notionPageUrl(pageId) });
+        }
+
+        case 'notion_insert_image': {
+          const pageId = parseNotionId(args?.pageId || args?.url || args?.id);
+          if (!pageId) return JSON.stringify({ ok: false, error: 'A valid Notion page id or URL is required' });
+
+          const caption = typeof args?.caption === 'string' && args.caption.trim()
+            ? stringToRichText(args.caption.trim())
+            : null;
+
+          // Two sources: a LOCAL file (uploaded via the File Upload API,
+          // attached as type:'file_upload') or an EXTERNAL public URL.
+          let image;
+          let fileUploadId;
+          if (typeof args?.imagePath === 'string' && args.imagePath.trim()) {
+            fileUploadId = await uploadImageFile(args.imagePath);
+            image = { type: 'file_upload', file_upload: { id: fileUploadId } };
+          } else if (typeof args?.imageUrl === 'string' && args.imageUrl.trim()) {
+            image = { type: 'external', external: { url: args.imageUrl.trim() } };
+          } else {
+            return JSON.stringify({ ok: false, error: 'imagePath (local png/jpg) or imageUrl is required' });
+          }
+          if (caption) image.caption = caption;
+
+          await notionApi(`/blocks/${pageId}/children`, {
+            method: 'PATCH',
+            body: { children: [{ object: 'block', type: 'image', image }] },
+          });
+          return JSON.stringify({
+            ok: true, pageId, url: notionPageUrl(pageId),
+            ...(fileUploadId ? { fileUploadId } : {}),
+          });
         }
 
         case 'notion_list_comments': {
@@ -521,6 +740,48 @@ Do not block the task if Notion is unavailable — these tools return { ok:false
           maxResults: { type: 'number', description: 'Max rows to return (default 25, max 25).' },
         },
         required: ['databaseId'],
+      },
+    },
+    {
+      name: 'notion_create_page',
+      description: 'Create a new Notion page under a parent page (parentPageId) OR in a database (databaseId) — exactly one parent is required. Body from markdown (#/##/### headings, - bullets, 1. ordered lists; inline marks kept as literal text) or raw Notion block objects. Long bodies are chunked automatically (Notion caps 100 blocks/request). Returns { ok, pageId, url } — share the url with the user.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          parentPageId: { type: 'string', description: 'Parent PAGE id/URL to create the page under (used when databaseId is absent).' },
+          databaseId: { type: 'string', description: 'Parent DATABASE id/URL to create the page in (title goes into the title property).' },
+          title: { type: 'string', description: 'Page title.' },
+          markdown: { type: 'string', description: 'Page body as markdown (preferred).' },
+          blocks: { type: 'array', description: 'Raw Notion block objects (advanced; used instead of markdown, max 500).', items: { type: 'object', additionalProperties: true } },
+        },
+        required: ['title'],
+      },
+    },
+    {
+      name: 'notion_append_blocks',
+      description: 'Append markdown (or raw Notion blocks) to the END of an existing Notion page. Accepts a page id or full Notion URL. Chunks automatically at Notion\'s 100-blocks-per-request cap. Returns { ok, pageId, url }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          pageId: { type: 'string', description: 'Notion page id (dashed UUID or 32-char) OR a full Notion page URL.' },
+          markdown: { type: 'string', description: 'Content to append, as markdown (preferred).' },
+          blocks: { type: 'array', description: 'Raw Notion block objects (advanced; used instead of markdown, max 500).', items: { type: 'object', additionalProperties: true } },
+        },
+        required: ['pageId'],
+      },
+    },
+    {
+      name: 'notion_insert_image',
+      description: "Append an image block to a Notion page. Pass imagePath for a LOCAL .png/.jpg file (max 20MB — uploaded via Notion's File Upload API, stored by Notion) or imageUrl for an external publicly-reachable image URL. Optional caption. Returns { ok, pageId, url }.",
+      input_schema: {
+        type: 'object',
+        properties: {
+          pageId: { type: 'string', description: 'Notion page id (dashed UUID or 32-char) OR a full Notion page URL.' },
+          imagePath: { type: 'string', description: 'Local filesystem path to a .png or .jpg/.jpeg image (max 20MB). Preferred for locally rendered charts.' },
+          imageUrl: { type: 'string', description: 'External image URL (must be publicly reachable; used when imagePath is absent).' },
+          caption: { type: 'string', description: 'Optional image caption.' },
+        },
+        required: ['pageId'],
       },
     },
     {

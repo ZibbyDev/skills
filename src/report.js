@@ -808,3 +808,131 @@ export function reportToNotionBlocks(report) {
     icon,
   };
 }
+
+// ─────────────────────── Markdown renderer ───────────────────────
+
+/** Escape a table cell so a literal `|` can't break the pipe table. */
+function markdownPipeCell(value) {
+  return String(value ?? '').replace(/\|/g, '\\|');
+}
+
+/**
+ * Convert a report-object → a single markdown string.
+ *
+ * This is the SHARED path for the document channels (Google Docs / Lark
+ * Docs / Notion via their create/append tools, which all accept markdown):
+ * one renderer, three destinations, each destination's own
+ * markdown-to-native converter does the final mapping. Layout mirrors the
+ * chat-card renderers 1:1 so a report reads the same everywhere:
+ *   - title as `#`, subtitle as a plain line under it
+ *   - headline: bold primary + delta arrow + severity emoji + summary
+ *   - trend: fenced code block with the same unicodeBar lines
+ *   - table: a real markdown pipe table
+ *   - callouts: severity-emoji bullets
+ *   - breakdown: bold-label bullets
+ *   - paragraph: text as-is
+ *   - footer: markdown links
+ *
+ * Pure function: input → output, no I/O. Throws on invalid input
+ * (zod parse error) — same contract as the other renderers.
+ *
+ * @param {z.infer<typeof reportObjectSchema>} report
+ * @returns {string} full markdown document
+ */
+export function reportToMarkdown(report) {
+  const parsed = reportObjectSchema.parse(report);
+  const out = [];
+
+  // Title + subtitle
+  out.push(`# ${parsed.title}`);
+  if (parsed.subtitle) {
+    out.push('', parsed.subtitle);
+  }
+
+  // Headline (primary + delta + summary) — same composition as the
+  // Slack/Lark renderers (bold primary, arrow + value + severity emoji).
+  const headlineParts = [`**${parsed.headline.primary}**`];
+  if (parsed.headline.delta) {
+    const arrow = DELTA_ARROW[parsed.headline.delta.direction] || '';
+    const sev = parsed.headline.delta.severity
+      ? SEVERITY_EMOJI[parsed.headline.delta.severity]
+      : '';
+    headlineParts.push(`${arrow} ${parsed.headline.delta.value} ${sev}`.trim());
+  }
+  out.push('', headlineParts.join('   '));
+  if (parsed.headline.summary) {
+    out.push('', parsed.headline.summary);
+  }
+
+  // Sections
+  for (const section of parsed.sections) {
+    out.push('', '---', '');
+    if (section.title) {
+      out.push(`## ${section.title}`, '');
+    }
+
+    switch (section.kind) {
+      case 'trend': {
+        // Same unicodeBar lines as the chat-card renderers, in a fence so
+        // every destination renders them monospace.
+        const max = Math.max(...section.values);
+        const minVal = Math.min(...section.values);
+        const lines = section.labels.map((label, i) => {
+          const value = section.values[i];
+          const bar = unicodeBar(value, max);
+          const highlight = (
+            (section.highlight === 'last' && i === section.labels.length - 1)
+            || (section.highlight === 'max' && value === max)
+            || (section.highlight === 'min' && value === minVal)
+          );
+          const tag = highlight && section.severity
+            ? ` ${SEVERITY_EMOJI[section.severity]}`
+            : '';
+          return `${padRight(label, 10)} ${padLeft(value.toLocaleString(), 8)}  ${bar}${tag}`;
+        });
+        out.push('```', ...lines, '```');
+        break;
+      }
+      case 'table': {
+        // A REAL markdown pipe table (the document converters map these to
+        // native tables) — not the monospace grid the chat cards use.
+        out.push(`| ${section.headers.map(markdownPipeCell).join(' | ')} |`);
+        out.push(`| ${section.headers.map(() => '---').join(' | ')} |`);
+        for (const row of section.rows) {
+          out.push(`| ${row.map(markdownPipeCell).join(' | ')} |`);
+        }
+        break;
+      }
+      case 'callouts': {
+        const tone = SEVERITY_EMOJI[section.tone || 'info'];
+        for (const item of section.items) {
+          out.push(`- ${tone} ${item}`);
+        }
+        break;
+      }
+      case 'breakdown': {
+        for (const row of section.rows) {
+          const sub = row.sub ? `  _${row.sub}_` : '';
+          const sev = row.severity ? ` ${SEVERITY_EMOJI[row.severity]}` : '';
+          out.push(`- **${row.label}**: ${row.value}${sub}${sev}`);
+        }
+        break;
+      }
+      case 'paragraph': {
+        out.push(section.text);
+        break;
+      }
+      // exhaustive by zod discriminatedUnion — no default needed
+    }
+  }
+
+  // Footer links
+  if (parsed.footer && (parsed.footer.viewUrl || parsed.footer.rerunUrl)) {
+    const links = [];
+    if (parsed.footer.viewUrl) links.push(`[View in Zibby](${parsed.footer.viewUrl})`);
+    if (parsed.footer.rerunUrl) links.push(`[Run again](${parsed.footer.rerunUrl})`);
+    out.push('', '---', '', links.join(' · '));
+  }
+
+  return out.join('\n');
+}

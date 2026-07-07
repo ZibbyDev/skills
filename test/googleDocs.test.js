@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // Mock backend-client BEFORE importing the skill so resolveIntegrationToken
 // is replaced at load time. Shape mirrors GET /integrations/token/google.
@@ -43,9 +46,9 @@ describe('googleDocsSkill structure', () => {
     expect(googleDocsSkill.requiresIntegration).toBe('google');
   });
 
-  it('exposes the four gdocs tools', () => {
+  it('exposes the five gdocs tools', () => {
     const names = googleDocsSkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['gdocs_append', 'gdocs_create_doc', 'gdocs_get', 'gdocs_list_created']);
+    expect(names).toEqual(['gdocs_append', 'gdocs_create_doc', 'gdocs_get', 'gdocs_insert_image', 'gdocs_list_created']);
   });
 
   it('resolve() spawns the generic skill MCP server', () => {
@@ -374,6 +377,150 @@ describe('gdocs_list_created', () => {
     expect(parsed.origin + parsed.pathname).toBe('https://www.googleapis.com/drive/v3/files');
     expect(parsed.searchParams.get('q')).toContain("mimeType='application/vnd.google-apps.document'");
     expect(parsed.searchParams.get('q')).toContain("'me' in owners");
+  });
+});
+
+describe('gdocs_insert_image', () => {
+  // A real temp file — the tool readFileSync's it before any network call.
+  const dir = mkdtempSync(join(tmpdir(), 'gdocs-img-'));
+  const imagePath = join(dir, 'chart.png');
+  const imageBytes = Buffer.from('fake-png-bytes-for-drive');
+  writeFileSync(imagePath, imageBytes);
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const DOC = '1AbC_dEf-GhIjKlMnOpQrStUvWxYz012345';
+
+  it('uploads to Drive (multipart/related), grants anyone-reader, inserts inline at end-of-body', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, opts) => {
+      calls.push({ url: String(url), opts });
+      if (String(url).includes('/upload/drive/v3/files')) return fetchJson({ id: 'file-777' });
+      if (String(url).includes('/permissions')) return fetchJson({ id: 'perm-1' });
+      if (String(url).includes(':batchUpdate')) return fetchJson({});
+      // documents.get → last structural element ends at 25.
+      return fetchJson({ documentId: DOC, body: { content: [{ endIndex: 25 }] } });
+    }));
+
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_insert_image', {
+      documentId: DOC, imagePath, width: 480, height: 270,
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.documentId).toBe(DOC);
+    expect(res.fileId).toBe('file-777');
+    expect(res.url).toBe(`https://docs.google.com/document/d/${DOC}/edit`);
+    expect(calls).toHaveLength(4);
+
+    // 1. Drive multipart upload: metadata JSON part + media part (RFC 2387).
+    const upload = calls[0];
+    expect(upload.url).toContain('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart');
+    expect(upload.opts.method).toBe('POST');
+    expect(upload.opts.headers.Authorization).toBe('Bearer ya29.test-token');
+    expect(upload.opts.headers['Content-Type']).toMatch(/^multipart\/related; boundary=/);
+    const raw = upload.opts.body.toString();
+    expect(raw).toContain('Content-Type: application/json; charset=UTF-8');
+    expect(raw).toContain('{"name":"chart.png","mimeType":"image/png"}');
+    expect(raw).toContain('Content-Type: image/png');
+    expect(raw).toContain('fake-png-bytes-for-drive');
+
+    // 2. anyone-with-link reader so the Docs render service can fetch it.
+    const perm = calls[1];
+    expect(perm.url).toBe('https://www.googleapis.com/drive/v3/files/file-777/permissions');
+    expect(JSON.parse(perm.opts.body)).toEqual({ role: 'reader', type: 'anyone' });
+
+    // 3+4. documents.get then insertInlineImage at endIndex-1 with PT size.
+    expect(calls[2].url).toBe(`https://docs.googleapis.com/v1/documents/${DOC}`);
+    const { requests } = JSON.parse(calls[3].opts.body);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].insertInlineImage.location.index).toBe(24);
+    expect(requests[0].insertInlineImage.uri).toBe('https://drive.google.com/uc?export=download&id=file-777');
+    expect(requests[0].insertInlineImage.objectSize).toEqual({
+      width: { magnitude: 480, unit: 'PT' },
+      height: { magnitude: 270, unit: 'PT' },
+    });
+  });
+
+  it('omits objectSize when no width/height is given', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, opts) => {
+      calls.push({ url: String(url), opts });
+      if (String(url).includes('/upload/drive/v3/files')) return fetchJson({ id: 'f2' });
+      if (String(url).includes(':batchUpdate')) return fetchJson({});
+      if (String(url).includes('/permissions')) return fetchJson({});
+      return fetchJson({ body: { content: [{ endIndex: 2 }] } });
+    }));
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_insert_image', {
+      documentId: DOC, imagePath,
+    }));
+    expect(res.ok).toBe(true);
+    const { requests } = JSON.parse(calls[3].opts.body);
+    expect(requests[0].insertInlineImage.objectSize).toBeUndefined();
+    // Empty doc → insert at max(1, 2-1) = 1.
+    expect(requests[0].insertInlineImage.location.index).toBe(1);
+  });
+
+  it('requires imagePath', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_insert_image', { documentId: DOC }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/imagePath is required/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fail-softs on a missing image file (no network call)', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_insert_image', {
+      documentId: DOC, imagePath: join(dir, 'nope.png'),
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/not found/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-image extension', async () => {
+    const txtPath = join(dir, 'notes.txt');
+    writeFileSync(txtPath, 'hi');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_insert_image', {
+      documentId: DOC, imagePath: txtPath,
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/\.png or \.jpg/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('STRICT chat turn with NO injected token → hard-refuses before any upload (gate still applies)', async () => {
+    process.env.ZIBBY_CHAT_STRICT_PERSONAL = '1';
+    try {
+      vi.mocked(resolveIntegrationToken).mockClear();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_insert_image', {
+        documentId: DOC, imagePath,
+      }));
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain("You haven't connected your own Google account");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(resolveIntegrationToken).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.ZIBBY_CHAT_STRICT_PERSONAL;
+    }
+  });
+
+  it('fail-softs when the Drive upload fails (no permission grant, no batchUpdate)', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      calls.push(String(url));
+      return fetchJson({ error: { message: 'quota exceeded' } }, false, 403);
+    }));
+    const res = JSON.parse(await googleDocsSkill.handleToolCall('gdocs_insert_image', {
+      documentId: DOC, imagePath,
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/403/);
+    expect(calls.some((u) => u.includes('/permissions') || u.includes(':batchUpdate'))).toBe(false);
   });
 });
 

@@ -199,6 +199,8 @@ export {
   reportObjectSchema,
   reportToBlockKit,
   reportToLarkCard,
+  reportToNotionBlocks,
+  reportToMarkdown,
   SEVERITIES as REPORT_SEVERITIES,
 } from './report.js';
 export { skill, functionSkill } from './function-skill.js';

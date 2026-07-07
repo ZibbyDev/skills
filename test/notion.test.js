@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // Mock backend-client BEFORE importing the skill so resolveIntegrationToken
 // is replaced at load time. Shape mirrors GET /integrations/token/notion.
@@ -7,7 +10,7 @@ vi.mock('@zibby/core/backend-client.js', () => ({
   clearTokenCache: vi.fn(),
 }));
 
-const { notionSkill, parseNotionId } = await import('../src/notion.js');
+const { notionSkill, parseNotionId, markdownToNotionBlocks } = await import('../src/notion.js');
 
 // Build a fetch Response-like object. notionApi reads res.ok + res.text().
 function fetchJson(payload, ok = true, status = 200) {
@@ -28,11 +31,20 @@ describe('notionSkill structure', () => {
     expect(notionSkill.requiresIntegration).toBe('notion');
   });
 
-  it('exposes the read + comment tools', () => {
+  it('exposes the read + comment + write tools', () => {
     const names = notionSkill.tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      'notion_add_comment', 'notion_get_page', 'notion_list_comments', 'notion_query_database',
+      'notion_add_comment', 'notion_append_blocks', 'notion_create_page',
+      'notion_get_page', 'notion_insert_image', 'notion_list_comments',
+      'notion_query_database',
     ]);
+  });
+
+  it('promptFragment documents the write surface (no longer read-only)', () => {
+    expect(notionSkill.promptFragment).not.toMatch(/read-only context\)/);
+    expect(notionSkill.promptFragment).toMatch(/notion_create_page/);
+    expect(notionSkill.promptFragment).toMatch(/notion_append_blocks/);
+    expect(notionSkill.promptFragment).toMatch(/notion_insert_image/);
   });
 
   it('resolve() spawns the generic skill MCP server so the AGENT can call notion tools', () => {
@@ -285,5 +297,258 @@ describe('notion_add_comment', () => {
     const result = JSON.parse(await notionSkill.handleToolCall('notion_add_comment', { discussionId: 'd1', text: 'hi' }));
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/500/);
+  });
+});
+
+// ───────────────────────── markdownToNotionBlocks ─────────────────────────
+
+describe('markdownToNotionBlocks', () => {
+  it('maps headings, bullets, ordered, and text; skips blank lines', () => {
+    const blocks = markdownToNotionBlocks('# Title\n## Sub\n\n- one\n1. first\nbody line');
+    expect(blocks).toHaveLength(5);
+    expect(blocks[0].type).toBe('heading_1');
+    expect(blocks[0].heading_1.rich_text[0].text.content).toBe('Title');
+    expect(blocks[1].type).toBe('heading_2');
+    expect(blocks[2].type).toBe('bulleted_list_item');
+    expect(blocks[2].bulleted_list_item.rich_text[0].text.content).toBe('one');
+    expect(blocks[3].type).toBe('numbered_list_item');
+    expect(blocks[4].type).toBe('paragraph');
+    expect(blocks[4].paragraph.rich_text[0].text.content).toBe('body line');
+    // Every block carries object='block' (Notion API contract).
+    for (const b of blocks) expect(b.object).toBe('block');
+  });
+
+  it('returns an empty array for empty/whitespace input', () => {
+    expect(markdownToNotionBlocks('')).toEqual([]);
+    expect(markdownToNotionBlocks('\n  \n')).toEqual([]);
+  });
+});
+
+// ───────────────────────── notion_create_page ─────────────────────────
+
+describe('notion_create_page', () => {
+  const parentId = '1a2b3c4d5e6f70819203a4b5c6d7e8f9';
+  const parentDashed = '1a2b3c4d-5e6f-7081-9203-a4b5c6d7e8f9';
+
+  it('creates a page under a parent PAGE with markdown children', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({
+      id: 'pg-new', url: 'https://www.notion.so/Report-pgnew',
+    }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_create_page', {
+      parentPageId: parentId, title: 'Weekly Report', markdown: '# Head\n- a\nbody',
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.pageId).toBe('pg-new');
+    expect(result.url).toBe('https://www.notion.so/Report-pgnew');
+
+    const [url, opts] = globalThis.fetch.mock.calls[0];
+    expect(url).toBe('https://api.notion.com/v1/pages');
+    expect(opts.method).toBe('POST');
+    expect(opts.headers['Notion-Version']).toBe('2022-06-28');
+    const body = JSON.parse(opts.body);
+    expect(body.parent).toEqual({ page_id: parentDashed });
+    expect(body.properties.title.title[0].text.content).toBe('Weekly Report');
+    expect(body.children).toHaveLength(3);
+    expect(body.children[0].type).toBe('heading_1');
+  });
+
+  it('creates a page in a DATABASE (parent.database_id, title into the title property)', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({ id: 'row-new' }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_create_page', {
+      databaseId: parentId, title: 'Row title',
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.pageId).toBe('row-new');
+    // No page.url in the reply → canonical fallback URL (dashes stripped).
+    expect(result.url).toBe('https://www.notion.so/rownew');
+    const body = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
+    expect(body.parent).toEqual({ database_id: parentDashed });
+    expect(body.properties.title.title[0].text.content).toBe('Row title');
+    expect(body.children).toBeUndefined();
+  });
+
+  it('chunks >100 blocks: 100 into pages.create, the rest via PATCH /blocks/{id}/children', async () => {
+    const blocks = Array.from({ length: 150 }, (_, i) => ({
+      object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `p${i}` } }] },
+    }));
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, opts) => {
+      calls.push({ url: String(url), opts });
+      if (String(url).endsWith('/pages')) return fetchJson({ id: 'pg-big' });
+      return fetchJson({ results: [] });
+    });
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_create_page', {
+      parentPageId: parentId, title: 'Big', blocks,
+    }));
+    expect(result.ok).toBe(true);
+    expect(calls).toHaveLength(2);
+    const createBody = JSON.parse(calls[0].opts.body);
+    expect(createBody.children).toHaveLength(100);
+    expect(createBody.children[99].paragraph.rich_text[0].text.content).toBe('p99');
+    // Remainder appended in one PATCH chunk.
+    expect(calls[1].url).toContain('/blocks/pg-big/children');
+    expect(calls[1].opts.method).toBe('PATCH');
+    const appendBody = JSON.parse(calls[1].opts.body);
+    expect(appendBody.children).toHaveLength(50);
+    expect(appendBody.children[0].paragraph.rich_text[0].text.content).toBe('p100');
+  });
+
+  it('requires a title', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_create_page', { parentPageId: parentId }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/title is required/i);
+  });
+
+  it('requires a parentPageId or databaseId', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_create_page', { title: 'T' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/parentPageId or databaseId/i);
+  });
+});
+
+// ───────────────────────── notion_append_blocks ─────────────────────────
+
+describe('notion_append_blocks', () => {
+  const pageId = '1a2b3c4d5e6f70819203a4b5c6d7e8f9';
+  const pageDashed = '1a2b3c4d-5e6f-7081-9203-a4b5c6d7e8f9';
+
+  it('converts markdown and PATCHes the page children', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({ results: [] }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_append_blocks', {
+      pageId, markdown: '## Section\n- item',
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.pageId).toBe(pageDashed);
+    const [url, opts] = globalThis.fetch.mock.calls[0];
+    expect(url).toBe(`https://api.notion.com/v1/blocks/${pageDashed}/children`);
+    expect(opts.method).toBe('PATCH');
+    const body = JSON.parse(opts.body);
+    expect(body.children).toHaveLength(2);
+    expect(body.children[0].type).toBe('heading_2');
+    expect(body.children[1].type).toBe('bulleted_list_item');
+  });
+
+  it('chunks >100 blocks across multiple PATCH requests', async () => {
+    const blocks = Array.from({ length: 205 }, (_, i) => ({
+      object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `x${i}` } }] },
+    }));
+    globalThis.fetch = vi.fn(async () => fetchJson({ results: [] }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_append_blocks', { pageId, blocks }));
+    expect(result.ok).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3); // 100 + 100 + 5
+    const sizes = globalThis.fetch.mock.calls.map(([, o]) => JSON.parse(o.body).children.length);
+    expect(sizes).toEqual([100, 100, 5]);
+  });
+
+  it('requires markdown or blocks', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_append_blocks', { pageId }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/markdown or blocks/i);
+  });
+
+  it('rejects an invalid page reference', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_append_blocks', { pageId: 'junk', markdown: 'x' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/valid Notion page/i);
+  });
+});
+
+// ───────────────────────── notion_insert_image ─────────────────────────
+
+describe('notion_insert_image', () => {
+  const pageId = '1a2b3c4d5e6f70819203a4b5c6d7e8f9';
+  const pageDashed = '1a2b3c4d-5e6f-7081-9203-a4b5c6d7e8f9';
+
+  const dir = mkdtempSync(join(tmpdir(), 'notion-img-'));
+  const imagePath = join(dir, 'chart.png');
+  const imageBytes = Buffer.from('fake-png-bytes');
+  writeFileSync(imagePath, imageBytes);
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('LOCAL file: creates a file upload, sends the bytes, appends a file_upload image block', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url, opts) => {
+      calls.push({ url: String(url), opts });
+      if (String(url).endsWith('/file_uploads')) return fetchJson({ id: 'fu-1', status: 'pending' });
+      if (String(url).includes('/file_uploads/fu-1/send')) return fetchJson({ id: 'fu-1', status: 'uploaded' });
+      return fetchJson({ results: [] }); // append children
+    });
+
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_insert_image', {
+      pageId, imagePath, caption: 'Weekly trend',
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.pageId).toBe(pageDashed);
+    expect(result.fileUploadId).toBe('fu-1');
+    expect(calls).toHaveLength(3);
+
+    // 1. create the upload (single_part) — pinned Notion-Version works for it.
+    expect(calls[0].url).toBe('https://api.notion.com/v1/file_uploads');
+    expect(calls[0].opts.headers['Notion-Version']).toBe('2022-06-28');
+    expect(JSON.parse(calls[0].opts.body)).toEqual({ mode: 'single_part', filename: 'chart.png' });
+
+    // 2. send the bytes as multipart/form-data field `file` (no JSON content-type).
+    expect(calls[1].url).toBe('https://api.notion.com/v1/file_uploads/fu-1/send');
+    expect(calls[1].opts.method).toBe('POST');
+    expect(calls[1].opts.headers['Content-Type']).toBeUndefined();
+    const form = calls[1].opts.body;
+    expect(form).toBeInstanceOf(FormData);
+    const filePart = form.get('file');
+    expect(filePart).toBeInstanceOf(Blob);
+    expect(filePart.size).toBe(imageBytes.length);
+    expect(filePart.type).toBe('image/png');
+
+    // 3. append the image block referencing the upload id + caption.
+    expect(calls[2].url).toBe(`https://api.notion.com/v1/blocks/${pageDashed}/children`);
+    const body = JSON.parse(calls[2].opts.body);
+    expect(body.children).toHaveLength(1);
+    expect(body.children[0].type).toBe('image');
+    expect(body.children[0].image.type).toBe('file_upload');
+    expect(body.children[0].image.file_upload).toEqual({ id: 'fu-1' });
+    expect(body.children[0].image.caption[0].text.content).toBe('Weekly trend');
+  });
+
+  it('EXTERNAL url: appends an external image block (no upload calls)', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(fetchJson({ results: [] }));
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_insert_image', {
+      pageId, imageUrl: 'https://cdn.example.com/chart.png',
+    }));
+    expect(result.ok).toBe(true);
+    expect(result.fileUploadId).toBeUndefined();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
+    expect(body.children[0].image).toEqual({
+      type: 'external', external: { url: 'https://cdn.example.com/chart.png' },
+    });
+  });
+
+  it('fail-softs on a missing local file (no network call)', async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_insert_image', {
+      pageId, imagePath: join(dir, 'nope.png'),
+    }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not found/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requires imagePath or imageUrl', async () => {
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_insert_image', { pageId }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/imagePath .*or imageUrl/i);
+  });
+
+  it('fail-softs when the upload send fails (image block never appended)', async () => {
+    const calls = [];
+    globalThis.fetch = vi.fn(async (url) => {
+      calls.push(String(url));
+      if (String(url).endsWith('/file_uploads')) return fetchJson({ id: 'fu-2' });
+      return fetchJson({ message: 'upload failed' }, false, 400);
+    });
+    const result = JSON.parse(await notionSkill.handleToolCall('notion_insert_image', { pageId, imagePath }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/400/);
+    expect(calls.some((u) => u.includes('/blocks/'))).toBe(false);
   });
 });

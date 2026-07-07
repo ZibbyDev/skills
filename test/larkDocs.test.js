@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // Mock the backend-client BEFORE importing the skill so resolveIntegrationToken
 // is replaced at load time. Shape mirrors GET /integrations/token/lark.
@@ -46,11 +49,12 @@ describe('larkDocsSkill structure', () => {
     expect(larkDocsSkill.requiresIntegration).toBe('lark');
   });
 
-  it('exposes the docx + comment tools', () => {
+  it('exposes the docx + comment + image tools', () => {
     const names = larkDocsSkill.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       'larkdoc_add_comment', 'larkdoc_append', 'larkdoc_create',
-      'larkdoc_get', 'larkdoc_list_comments', 'larkdoc_reply_comment',
+      'larkdoc_get', 'larkdoc_insert_image', 'larkdoc_list_comments',
+      'larkdoc_reply_comment',
     ]);
   });
 
@@ -218,6 +222,114 @@ describe('larkdoc_append', () => {
     const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_append', { documentId: 'DocOneReal1' }));
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/content is required/);
+  });
+});
+
+// ───────────────────────── larkdoc_insert_image ─────────────────────────
+
+describe('larkdoc_insert_image', () => {
+  // A real temp file — the tool readFileSync's it before any network call.
+  const dir = mkdtempSync(join(tmpdir(), 'larkdoc-img-'));
+  const imagePath = join(dir, 'chart.png');
+  const imageBytes = Buffer.from('fake-png-bytes-for-upload');
+  writeFileSync(imagePath, imageBytes);
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('creates an empty image block, uploads the bytes, then binds the token', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ children: [{ block_id: 'blkImg1', block_type: 27 }] })) // block create
+      .mockResolvedValueOnce(dataReply({ file_token: 'ftok123' })) // upload_all
+      .mockResolvedValueOnce(dataReply({})); // replace_image patch
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_insert_image', {
+      documentId: 'https://acme.larksuite.com/docx/DocImg1', imagePath, width: 640, height: 360,
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.documentId).toBe('DocImg1');
+    expect(res.blockId).toBe('blkImg1');
+    expect(res.fileToken).toBe('ftok123');
+    expect(res.url).toBe('https://www.larksuite.com/docx/DocImg1');
+
+    const calls = globalThis.fetch.mock.calls;
+    // 1. empty image block appended at the doc root.
+    expect(calls[1][0]).toContain('/documents/DocImg1/blocks/DocImg1/children');
+    const createBody = JSON.parse(calls[1][1].body);
+    expect(createBody.children).toEqual([{ block_type: 27, image: {} }]);
+    // 2. multipart upload with the docx_image parenting fields.
+    expect(calls[2][0]).toContain('/open-apis/drive/v1/medias/upload_all');
+    const form = calls[2][1].body;
+    expect(form).toBeInstanceOf(FormData);
+    expect(form.get('file_name')).toBe('chart.png');
+    expect(form.get('parent_type')).toBe('docx_image');
+    expect(form.get('parent_node')).toBe('blkImg1');
+    expect(form.get('size')).toBe(String(imageBytes.length));
+    const filePart = form.get('file');
+    expect(filePart).toBeInstanceOf(Blob);
+    expect(filePart.size).toBe(imageBytes.length);
+    // auth still flows through the tenant token chokepoint.
+    expect(calls[2][1].headers.Authorization).toBe('Bearer t-xxx');
+    // 3. replace_image PATCH binds the token to the block (px dimensions).
+    expect(calls[3][0]).toContain('/documents/DocImg1/blocks/blkImg1?document_revision_id=-1');
+    expect(calls[3][1].method).toBe('PATCH');
+    const patchBody = JSON.parse(calls[3][1].body);
+    expect(patchBody).toEqual({ replace_image: { token: 'ftok123', width: 640, height: 360 } });
+  });
+
+  it('omits width/height from replace_image when not provided', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ children: [{ block_id: 'blk2' }] }))
+      .mockResolvedValueOnce(dataReply({ file_token: 'ftok2' }))
+      .mockResolvedValueOnce(dataReply({}));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_insert_image', {
+      documentId: 'DocImgTwo22', imagePath,
+    }));
+    expect(res.ok).toBe(true);
+    const patchBody = JSON.parse(globalThis.fetch.mock.calls[3][1].body);
+    expect(patchBody).toEqual({ replace_image: { token: 'ftok2' } });
+  });
+
+  it('fail-softs on a missing image file (no write happens)', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(tokenReply());
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_insert_image', {
+      documentId: 'DocImgTwo22', imagePath: join(dir, 'nope.png'),
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/not found/);
+    // The block create never fired — only the (cached-token) mint at most.
+    expect(globalThis.fetch.mock.calls.every(([u]) => !String(u).includes('/blocks/'))).toBe(true);
+  });
+
+  it('rejects a non-image extension', async () => {
+    const txtPath = join(dir, 'notes.txt');
+    writeFileSync(txtPath, 'hi');
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(tokenReply());
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_insert_image', {
+      documentId: 'DocImgTwo22', imagePath: txtPath,
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/\.png or \.jpg/);
+  });
+
+  it('requires imagePath', async () => {
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_insert_image', { documentId: 'DocImgTwo22' }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/imagePath is required/);
+  });
+
+  it('fail-softs when the media upload fails (block created, no bind)', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ children: [{ block_id: 'blk3' }] }))
+      .mockResolvedValueOnce(errReply('file size exceeded'));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_insert_image', {
+      documentId: 'DocImgTwo22', imagePath,
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/file size exceeded/);
+    // The replace_image PATCH never fired.
+    expect(globalThis.fetch.mock.calls).toHaveLength(3);
   });
 });
 
