@@ -33,6 +33,7 @@ import { gitWriteSkill } from './git-write.js';
 import { chatMemorySkill } from './chat-memory.js';
 import { kvMemorySkill } from './kvMemory.js';
 import { datasetStoreSkill } from './datasetStore.js';
+import { chartRenderSkill } from './chartRender.js';
 import { triggerAgentSkill } from './triggerAgent.js';
 import { codebaseMemorySkill } from './codebaseMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
@@ -68,6 +69,7 @@ registerSkill(coreToolsSkill);
 registerSkill(chatMemorySkill);
 registerSkill(kvMemorySkill);
 registerSkill(datasetStoreSkill);
+registerSkill(chartRenderSkill);
 registerSkill(triggerAgentSkill);
 registerSkill(codebaseMemorySkill);
 registerSkill(workflowBuilderSkill);
@@ -142,6 +144,15 @@ export const SKILLS = {
   // so existing agents are unaffected. The id MUST match the skill's registered
   // id ('dataset-store'). Backed by datasetStoreSkill.
   DATASET_STORE: 'dataset-store',
+  // `chart-render` — LOCAL server-side chart rendering (Apache ECharts pure-SVG
+  // SSR + @resvg/resvg-js PNG rasterization; bundled OFL Noto Sans so text
+  // renders in font-less containers). Tier ① (API-only/local): no browser, no
+  // external service — the data never leaves the box → UNGATED (no integration
+  // token; intentionally absent from backend skill-integrations maps). Opt-in:
+  // NOT auto-loaded — activates ONLY when a node declares it via skills:[...].
+  // The id MUST match the skill's registered id ('chart-render'). Backed by
+  // chartRenderSkill.
+  CHART_RENDER: 'chart-render',
   // `codebase-memory` — code-graph + semantic index over the checked-out repo,
   // backed by the DeusData/codebase-memory-mcp binary BAKED INTO the agent
   // image. Fully local → UNGATED (no integration token; intentionally absent
@@ -170,7 +181,7 @@ export const SKILLS = {
   TRIGGER_AGENT: 'trigger-agent',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, chartRenderSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
