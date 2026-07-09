@@ -225,45 +225,56 @@ function buildCardSvg(opts) {
   const stat = opts.stat ? String(opts.stat).trim() : '';
   const footer = opts.footer ? String(opts.footer).trim() : '';
 
-  // Auto-fit the headline: pick the largest candidate size whose wrap fits the
-  // width in <= maxLines lines.
   const scale = width / DEFAULT_WIDTH;
-  const candidates = [76, 66, 58, 50, 44, 38].map((s) => Math.round(s * scale));
-  const maxLines = 4;
-  let headFs = candidates[candidates.length - 1];
-  let headLines = wrapText(headline, availW, headFs, 0.6);
-  for (const fs of candidates) {
-    const lines = wrapText(headline, availW, fs, 0.6);
-    if (lines.length <= maxLines) { headFs = fs; headLines = lines; break; }
-  }
-  const headLH = Math.round(headFs * 1.16);
 
+  // Fixed-size pieces (independent of the headline font size).
   const eyebrowFs = Math.round(22 * scale);
   const subFs = Math.round(29 * scale);
   const subLines = subhead ? wrapText(subhead, availW, subFs, 0.52) : [];
   const subLH = Math.round(subFs * 1.28);
 
-  // Measure the vertically-centered stack.
   const ruleH = 4;
   const gapAfterRule = Math.round(26 * scale);
   const gapAfterEyebrow = Math.round(20 * scale);
   const gapAfterHead = Math.round(24 * scale);
   const gapBeforeDiagram = Math.round(30 * scale);
 
-  let stackH = ruleH + gapAfterRule;
-  if (eyebrow) stackH += eyebrowFs + gapAfterEyebrow;
-  stackH += headLines.length * headLH;
-  if (subLines.length) stackH += gapAfterHead + subLines.length * subLH;
-
-  // Diagram is measured after we know the stack top; reserve its band here.
-  const diagramProbe = buildDiagram(opts.diagram, cx, 0, pal, accent);
-  if (diagramProbe) stackH += gapBeforeDiagram + diagramProbe.height;
-
-  // Center the stack, reserving a bottom band for the footer row when present.
+  // The footer row occupies a reserved band at the very bottom; the centered
+  // content stack must fit ENTIRELY inside `region` (above that band). A taller
+  // headline shrinks to fit — it never overflows downward, which is what let a
+  // 4-line headline push the subhead's descenders into the footer text.
   const hasFooterRow = Boolean(stat || footer);
   const topSafe = pad;
-  const bottomSafe = hasFooterRow ? Math.round(96 * scale) : pad;
+  const bottomSafe = hasFooterRow ? Math.round(110 * scale) : pad;
   const region = height - topSafe - bottomSafe;
+
+  const diagramProbe = buildDiagram(opts.diagram, cx, 0, pal, accent);
+
+  // HEIGHT-AWARE auto-fit: largest headline size whose WHOLE stack (rule +
+  // eyebrow + wrapped headline + subhead + diagram) fits within `region` in
+  // <= maxLines lines. Falls back to the smallest candidate if nothing fits.
+  const measureStack = (fs, lines) => {
+    let h = ruleH + gapAfterRule;
+    if (eyebrow) h += eyebrowFs + gapAfterEyebrow;
+    h += lines.length * Math.round(fs * 1.16);
+    if (subLines.length) h += gapAfterHead + subLines.length * subLH;
+    if (diagramProbe) h += gapBeforeDiagram + diagramProbe.height;
+    return h;
+  };
+  const candidates = [76, 66, 58, 50, 44, 38].map((s) => Math.round(s * scale));
+  const maxLines = 4;
+  let headFs = candidates[candidates.length - 1];
+  let headLines = wrapText(headline, availW, headFs, 0.6);
+  for (const fs of candidates) {
+    const lines = wrapText(headline, availW, fs, 0.6);
+    if (lines.length <= maxLines && measureStack(fs, lines) <= region) {
+      headFs = fs; headLines = lines; break;
+    }
+  }
+  const headLH = Math.round(headFs * 1.16);
+  const stackH = measureStack(headFs, headLines);
+
+  // Center the stack within the region that sits above the footer band.
   let y = topSafe + Math.max(0, (region - stackH) / 2);
 
   const parts = [];

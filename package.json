@@ -1,6 +1,6 @@
 {
   "name": "@zibby/skills",
-  "version": "0.1.73",
+  "version": "0.1.75",
   "description": "Built-in skill definitions for the Zibby agent-workflow framework",
   "type": "module",
   "main": "dist/index.js",
@@ -121,12 +121,17 @@
     "zod": "^3.23.0 || ^4.0.0"
   },
   "peerDependencies": {
-    "@zibby/core": ">=0.1.44"
+    "@zibby/core": ">=0.1.44",
+    "better-sqlite3": "^12.6.2"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
   },
   "optionalDependencies": {
     "@zibby/mcp-browser": "^0.1.8",
-    "@zibby/mcp-memory": "*",
-    "better-sqlite3": "^12.6.2"
+    "@zibby/mcp-memory": "*"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
