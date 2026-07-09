@@ -1,4 +1,4 @@
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
@@ -221,6 +221,90 @@ export async function linkedinApi(path, opts = {}, provider = 'linkedin_business
   }
 }
 
+/**
+ * Resolve the OAuth bearer for `provider` using the EXACT SAME precedence
+ * linkedinApi's makeRequest() uses — so an image upload is authenticated with
+ * the identical credential (and fail-CLOSED personal-tier gate) as the post it
+ * attaches to. For linkedin_personal the injected sender token wins and a
+ * strict chat turn hard-refuses; otherwise resolveIntegrationToken(provider).
+ * Used for the raw PUT to the image upload URL (a different host than the REST
+ * base, so we can't route it through linkedinApi's versioned-header fetch).
+ */
+async function resolveProviderToken(provider) {
+  let token;
+  if (provider === 'linkedin_personal') {
+    const injected = personalTierCredentialGate();
+    if (injected) token = injected.token;
+  }
+  if (!token) ({ token } = await resolveIntegrationToken(provider));
+  if (typeof token !== 'string' || !token) {
+    throw new Error('LinkedIn is not connected: no access token available. Connect LinkedIn in Integrations.');
+  }
+  return token;
+}
+
+/** Best-effort image MIME from a file path; defaults to image/png. */
+function mimeForPath(p) {
+  const ext = String(p || '').toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
+  switch (ext) {
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg';
+    case 'gif': return 'image/gif';
+    case 'webp': return 'image/webp';
+    case 'png':
+    default: return 'image/png';
+  }
+}
+
+/**
+ * Upload a LOCAL image file to LinkedIn's Images API and return its
+ * `urn:li:image:...` URN, ready to attach to a post via
+ * requestBody.content.media = { id: <urn>, altText }.
+ *
+ * Uses the SAME provider/token/gate as the post (resolveProviderToken):
+ *   1. initializeUpload — POST /rest/images?action=initializeUpload with
+ *      { initializeUploadRequest: { owner: <author urn> } } (through linkedinApi,
+ *      so it carries the versioned-API headers + the personal-tier gate). Reads
+ *      value.uploadUrl + value.image from the response.
+ *   2. single-request upload — PUT the raw file bytes to uploadUrl with
+ *      Authorization: Bearer <same provider token> + the image Content-Type.
+ *   3. return value.image (the image URN).
+ *
+ * Throws on any non-2xx / missing field — handleToolCall catches it and returns
+ * { ok:false, error } so a bad image can't crash the run or cause a post.
+ */
+export async function uploadImage(provider, ownerUrn, imagePath, mimeType) {
+  if (typeof imagePath !== 'string' || !imagePath.trim()) {
+    throw new Error('imagePath (a local image file path) is required to upload an image');
+  }
+  // 1. initializeUpload (routed through the single auth chokepoint).
+  const { body } = await linkedinApi('/rest/images?action=initializeUpload', {
+    method: 'POST',
+    body: { initializeUploadRequest: { owner: ownerUrn } },
+  }, provider);
+  const uploadUrl = body?.value?.uploadUrl;
+  const imageUrn = body?.value?.image;
+  if (!uploadUrl || !imageUrn) {
+    throw new Error(`LinkedIn image initializeUpload returned no uploadUrl/image (got: ${JSON.stringify(body).slice(0, 200)})`);
+  }
+  // 2. read bytes + resolve the SAME provider token, then single-request PUT.
+  const bytes = readFileSync(imagePath);
+  const token = await resolveProviderToken(provider);
+  const res = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': mimeType || mimeForPath(imagePath),
+    },
+    body: bytes,
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`LinkedIn image upload ${res.status}: ${err.slice(0, 300)}`);
+  }
+  return imageUrn;
+}
+
 export const linkedinSkill = {
   id: 'linkedin',
   serverName: 'linkedin',
@@ -248,6 +332,9 @@ Business (company Page) — DRAFT only:
 
 Personal (your own profile) — PUBLISHES IMMEDIATELY:
 - linkedin_publish_post: PUBLISH a post to your OWN member profile feed. Pass text (the post body) + optional visibility ('PUBLIC' default, or 'CONNECTIONS'). UNLIKE the org draft tool, this PUBLISHES the post immediately — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns { postUrn }. Set dry_run:true to VALIDATE which member profile the post would publish to (and preview the text) WITHOUT publishing — nothing is posted; returns { dryRun, target, wouldPostAs, textPreview }. Use this to confirm the identity before an approved publish. (needs LinkedIn Personal connected)
+
+Attaching an image (optional, both tools):
+- Both linkedin_create_draft_post and linkedin_publish_post accept imagePath (a LOCAL image file path, e.g. a PNG returned by social_card_render) + optional imageAltText. When imagePath is set, the image is uploaded to LinkedIn's Images API (same connected account/token as the post) and attached to the post as its media. On a dry_run nothing is uploaded — the result just reports imageWouldAttach:true.
 
 Notes:
 - Org-page posts are ALWAYS created as a DRAFT; personal-profile posts are ALWAYS published live — choose the tool accordingly.
@@ -322,11 +409,14 @@ Notes:
           // Only PUBLIC visibility is supported for org-page posts here; default it.
           const visibility = args?.visibility ? String(args.visibility).toUpperCase() : 'PUBLIC';
           const author = `urn:li:organization:${id}`;
+          const imagePath = typeof args?.imagePath === 'string' ? args.imagePath.trim() : '';
+          const imageAltText = typeof args?.imageAltText === 'string' ? args.imageAltText : '';
 
           // DRY RUN — validate WHICH org the post would go to (+ preview the
           // text) WITHOUT creating anything. Confirms the caller-passed org
           // id/urn and best-effort resolves the org name via a READ-only call.
-          // Never hits /rest/posts, so nothing is created.
+          // Never hits /rest/posts, and NEVER uploads the image — so nothing is
+          // created; it only reports that an image WOULD attach.
           if (args?.dry_run === true) {
             try {
               let name = '';
@@ -343,6 +433,7 @@ Notes:
                 wouldPostAs: { name, id, urn: author },
                 visibility,
                 textPreview: text,
+                ...(imagePath ? { imageWouldAttach: true, imagePath } : {}),
                 note: 'DRY RUN — nothing was posted',
               });
             } catch (e) {
@@ -362,6 +453,13 @@ Notes:
             lifecycleState: 'DRAFT',
             isReshareDisabledByAuthor: false,
           };
+          // Optional image attachment — upload via the Images API (same
+          // business provider/token as the post) and attach the returned URN.
+          // Posts API (LinkedIn-Version 202506) shape: content.media = { id, altText }.
+          if (imagePath) {
+            const imageUrn = await uploadImage('linkedin_business', author, imagePath);
+            requestBody.content = { media: { id: imageUrn, altText: imageAltText || '' } };
+          }
           const res = await linkedinApi('/rest/posts', { method: 'POST', body: requestBody }, 'linkedin_business');
           // The created post URN comes back in the x-restli-id (or x-linkedin-id)
           // response header; fall back to the body id if present.
@@ -405,13 +503,16 @@ Notes:
           }
           const visibility = args?.visibility ? String(args.visibility).toUpperCase() : 'PUBLIC';
           const author = `urn:li:person:${memberId}`;
+          const imagePath = typeof args?.imagePath === 'string' ? args.imagePath.trim() : '';
+          const imageAltText = typeof args?.imageAltText === 'string' ? args.imageAltText : '';
 
           // DRY RUN — validate WHICH member profile the post would publish to
           // (+ preview the text) WITHOUT publishing. Proves WHO the configured
           // token would post as via the READ-only OpenID /v2/userinfo endpoint
           // (the personal provider is a "Sign In with LinkedIn using OpenID
           // Connect" token, so `openid profile` is in scope). Never hits
-          // /rest/posts, so nothing is published.
+          // /rest/posts, and NEVER uploads the image — so nothing is published;
+          // it only reports that an image WOULD attach.
           if (args?.dry_run === true) {
             try {
               const info = (await linkedinApi('/v2/userinfo', {}, 'linkedin_personal')).body;
@@ -426,6 +527,7 @@ Notes:
                 wouldPostAs: { name, id, urn: `urn:li:person:${id}` },
                 visibility,
                 textPreview: text,
+                ...(imagePath ? { imageWouldAttach: true, imagePath } : {}),
                 note: 'DRY RUN — nothing was posted',
               });
             } catch (e) {
@@ -446,6 +548,13 @@ Notes:
             lifecycleState: 'PUBLISHED',
             isReshareDisabledByAuthor: false,
           };
+          // Optional image attachment — upload via the Images API (same
+          // personal provider/token/gate as the post) and attach the returned
+          // URN. Posts API (LinkedIn-Version 202506): content.media = { id, altText }.
+          if (imagePath) {
+            const imageUrn = await uploadImage('linkedin_personal', author, imagePath);
+            requestBody.content = { media: { id: imageUrn, altText: imageAltText || '' } };
+          }
           const res = await linkedinApi('/rest/posts', { method: 'POST', body: requestBody }, 'linkedin_personal');
           // Same URN extraction as the draft tool: x-restli-id (or
           // x-linkedin-id) response header, then the body id.
@@ -484,7 +593,7 @@ Notes:
     },
     {
       name: 'linkedin_create_draft_post',
-      description: 'Create a DRAFT post on a LinkedIn Organization (company Page). The post is created in DRAFT state (never published automatically) so a human can review and publish it in LinkedIn. Returns the created post URN. Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published.',
+      description: 'Create a DRAFT post on a LinkedIn Organization (company Page). The post is created in DRAFT state (never published automatically) so a human can review and publish it in LinkedIn. Returns the created post URN. Optionally ATTACH an image: pass imagePath (a local PNG file path, e.g. one returned by social_card_render) and it is uploaded to LinkedIn and attached to the post. Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published or uploaded (a set imagePath is reported as imageWouldAttach:true).',
       input_schema: {
         type: 'object',
         properties: {
@@ -492,20 +601,24 @@ Notes:
           organizationUrn: { type: 'string', description: 'The organization URN, e.g. "urn:li:organization:12345". Alternative to organizationId.' },
           text: { type: 'string', description: 'The post commentary (the body text of the post).' },
           visibility: { type: 'string', enum: ['PUBLIC'], description: 'Post visibility. Defaults to PUBLIC.' },
-          dry_run: { type: 'boolean', description: 'Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published. Returns { dryRun, target, wouldPostAs, visibility, textPreview }. Defaults to false.' },
+          imagePath: { type: 'string', description: 'Optional. A LOCAL image file path (e.g. a PNG returned by social_card_render). When set, the image is uploaded to LinkedIn and attached to the post as its media. Not uploaded on a dry_run.' },
+          imageAltText: { type: 'string', description: 'Optional alt text for the attached image (accessibility). Only used when imagePath is set.' },
+          dry_run: { type: 'boolean', description: 'Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published or uploaded. Returns { dryRun, target, wouldPostAs, visibility, textPreview, imageWouldAttach? }. Defaults to false.' },
         },
         required: ['text'],
       },
     },
     {
       name: 'linkedin_publish_post',
-      description: 'PUBLISH a post to the authenticated member\'s OWN LinkedIn profile feed (personal). UNLIKE linkedin_create_draft_post (which only drafts on a company Page), this PUBLISHES the post IMMEDIATELY — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns the created post URN. Requires the LinkedIn Personal integration connected. Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published.',
+      description: 'PUBLISH a post to the authenticated member\'s OWN LinkedIn profile feed (personal). UNLIKE linkedin_create_draft_post (which only drafts on a company Page), this PUBLISHES the post IMMEDIATELY — LinkedIn has no DRAFT state for member profiles, so there is no human review step. Returns the created post URN. Requires the LinkedIn Personal integration connected. Optionally ATTACH an image: pass imagePath (a local PNG file path, e.g. one returned by social_card_render) and it is uploaded to LinkedIn and attached to the post. Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published or uploaded (a set imagePath is reported as imageWouldAttach:true).',
       input_schema: {
         type: 'object',
         properties: {
           text: { type: 'string', description: 'The post body (the commentary text of the post).' },
           visibility: { type: 'string', enum: ['PUBLIC', 'CONNECTIONS'], description: 'Post visibility: PUBLIC (anyone) or CONNECTIONS (your connections only). Defaults to PUBLIC.' },
-          dry_run: { type: 'boolean', description: 'Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published. Returns { dryRun, target, wouldPostAs, visibility, textPreview }. Defaults to false.' },
+          imagePath: { type: 'string', description: 'Optional. A LOCAL image file path (e.g. a PNG returned by social_card_render). When set, the image is uploaded to LinkedIn and attached to the post as its media. Not uploaded on a dry_run.' },
+          imageAltText: { type: 'string', description: 'Optional alt text for the attached image (accessibility). Only used when imagePath is set.' },
+          dry_run: { type: 'boolean', description: 'Set dry_run:true to VALIDATE which LinkedIn account/profile the post would go to (and preview the text) WITHOUT posting — nothing is published or uploaded. Returns { dryRun, target, wouldPostAs, visibility, textPreview, imageWouldAttach? }. Defaults to false.' },
         },
         required: ['text'],
       },
