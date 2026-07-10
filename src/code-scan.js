@@ -26,9 +26,10 @@
  * no changes to scan_code itself. scan_code runs EVERY scanner whose detect(dir)
  * is true, scoped to files matching its `langs`, and merges the results.
  *
- * ONLY oxlint IS WIRED + VERIFIED TODAY (it's an npm DEP of @zibby/skills, so it
- * installs with the skill — no image bake; see resolveOxlintBin). ruff (Python) +
- * staticcheck (Go) are
+ * ONLY oxlint IS WIRED + VERIFIED TODAY (via @zibby/bin-oxlint — Zibby's
+ * self-vendored, sha-pinned oxlint that's an npm DEP of @zibby/skills, so it
+ * installs with the skill — no image bake, no upstream-npm binary trust; see
+ * resolveOxlintBin). ruff (Python) + staticcheck (Go) are
  * SCAFFOLD entries (registry + parser present, clearly marked TODO) whose
  * binaries are NOT yet in the image — they simply skip with a "binary not
  * installed" note until baked. Best-effort throughout: a missing binary (spawn
@@ -41,28 +42,31 @@ import { existsSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'nod
 import { dirname, extname, join, relative, resolve as resolvePath } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
 import { SKILL_META } from '@zibby/skill-ids';
-
-const _requireFromHere = createRequire(import.meta.url);
+import { binPath as oxlintBinPath } from '@zibby/bin-oxlint';
 
 /**
  * Resolve the oxlint binary. Preference:
  *   1. OXLINT_BIN env (explicit override, or a baked binary if one exists).
- *   2. The npm-installed oxlint — `oxlint` is a DEPENDENCY of @zibby/skills, so
- *      after the run container's `[setup] npm install` it (+ its platform binary
- *      via the @oxlint/binding-* optional deps) is in node_modules. This is why
- *      oxlint does NOT need baking into the agent image: it rides in on the same
- *      npm install every run already does, from npm (an allowed egress host) —
- *      no CDN fetch, no image rebuild.
+ *   2. @zibby/bin-oxlint — Zibby's SELF-VENDORED, supply-chain-hardened oxlint.
+ *      `@zibby/bin-oxlint` is a DEPENDENCY of @zibby/skills; its host-matched
+ *      platform package (@zibby/bin-oxlint-<os>-<cpu>, installed via os/cpu-gated
+ *      optionalDependencies) carries the oxlint binary as a VENDORED file. The
+ *      binary was fetched from oxc's OFFICIAL GitHub release once — at Zibby's
+ *      publish time — sha256-verified against a Zibby-pinned digest, and vendored
+ *      in. So after the run container's `[setup] npm install`, oxlint is in
+ *      node_modules with NO upstream-npm binary trust and NO run-time fetch. This
+ *      REPLACES the old dependency on the upstream `oxlint` npm package (whose
+ *      @oxlint/binding-* platform binaries auto-update within a caret, outside
+ *      Zibby's control). binPath() returns null on an unsupported platform → we
+ *      fall through to PATH.
  *   3. `oxlint` on PATH (last resort).
  */
 function resolveOxlintBin() {
   if (process.env.OXLINT_BIN) return process.env.OXLINT_BIN;
   try {
-    const pkgJson = _requireFromHere.resolve('oxlint/package.json');
-    const bin = resolvePath(dirname(pkgJson), 'bin', 'oxlint');
-    if (existsSync(bin)) return bin;
+    const p = oxlintBinPath();
+    if (p && existsSync(p)) return p;
   } catch { /* not resolvable → PATH fallback */ }
   return 'oxlint';
 }
@@ -223,8 +227,9 @@ function parseStaticcheck(stdout) {
  */
 export const SCANNERS = [
   {
-    // JS/TS — oxlint (MIT, oxc). Resolved from node_modules (npm dep of
-    // @zibby/skills) via resolveOxlintBin; OXLINT_BIN overrides. No image bake.
+    // JS/TS — oxlint (MIT, oxc). Resolved from @zibby/bin-oxlint (Zibby's
+    // self-vendored, sha-pinned binary, an npm dep of @zibby/skills) via
+    // resolveOxlintBin; OXLINT_BIN overrides. No image bake.
     id: 'oxlint',
     detect: (dir) => existsSync(join(dir, 'package.json')),
     langs: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'],

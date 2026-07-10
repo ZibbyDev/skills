@@ -116,10 +116,10 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@resvg/resvg-js": "^2.6.2",
     "@zibby/agent-workflow": "^0.4.0",
+    "@zibby/bin-oxlint": "^1.73.0",
     "@zibby/skill-ids": "^0.2.0",
     "echarts": "^6.1.0",
     "mem0ai": "npm:@zibby/mem0ai@^3.0.5",
-    "oxlint": "^1.73.0",
     "zod": "^3.23.0 || ^4.0.0"
   },
   "peerDependencies": {
