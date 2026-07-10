@@ -16,3 +16,6 @@ docs/
 # reviewMemory sqlite test artifacts
 *.db
 memory.db
+
+# Zibby CLI scratch/output dir (social-card renders, etc.)
+.zibby/

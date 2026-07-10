@@ -20,7 +20,11 @@ function resolveSkillBin() {
   return existsSync(candidate) ? candidate : null;
 }
 
-async function ghFetch(path, opts = {}) {
+// Exported so a node (e.g. the code-review template's deterministic diff
+// prefetch) can reach GitHub endpoints the tools don't expose WITHOUT
+// re-implementing auth — this stays the single GitHub auth chokepoint (mirrors
+// @zibby/skills/gitlab glFetch).
+export async function ghFetch(path, opts = {}) {
   const { token } = await resolveIntegrationToken('github');
   const url = path.startsWith('https://') ? path : `https://api.github.com${path}`;
   const headers = {
