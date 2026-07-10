@@ -5,7 +5,7 @@ import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 
 /**
- * Figma skill — read-only design context over the Figma REST API.
+ * Figma skill — design context + dev-handoff over the Figma REST API.
  *
  * Mirrors github.js (the hand-written generic-bin skill: a `tools[]`
  * array + a `handleToolCall` switch, served over MCP by bin/mcp-skill.mjs).
@@ -54,6 +54,95 @@ async function figmaFetch(path, opts = {}) {
   return res.json();
 }
 
+// ── Figma URL / key / node-id helpers ────────────────────────────────────────
+// A Figma "file key" is the opaque id segment in a figma.com URL. These helpers
+// let every tool accept EITHER a raw key OR a full figma.com URL, and accept
+// node ids in URL form (`1-23`) or API form (`1:23`) interchangeably.
+
+/** Accept a raw file key OR a figma.com URL (/file/, /design/, /board/, /proto/) → the key. */
+export function fileKeyFrom(fileKeyOrUrl) {
+  const s = String(fileKeyOrUrl || '').trim();
+  const m = s.match(/figma\.com\/(?:file|design|board|proto)\/([A-Za-z0-9]+)/i);
+  return m ? m[1] : s;
+}
+
+/** Accept a comma-string OR array of node ids; map URL form `1-23` → API `1:23`; join with commas. */
+export function normalizeNodeIds(ids) {
+  if (ids == null) return undefined;
+  const arr = Array.isArray(ids) ? ids : String(ids).split(',');
+  return arr.map((x) => String(x).trim().replace(/-/g, ':')).filter(Boolean).join(',');
+}
+
+/** Extract the `node-id` query param from a Figma URL, dash→colon. */
+export function nodeIdFromUrl(url) {
+  const m = String(url || '').match(/[?&]node-id=([^&]+)/i);
+  return m ? decodeURIComponent(m[1]).replace(/-/g, ':') : undefined;
+}
+
+// ── Dev-handoff spec extraction (computed from the REST node tree) ────────────
+const round = (n) => (typeof n === 'number' ? Math.round(n * 100) / 100 : n);
+
+function rgbaToHex(c) {
+  if (!c) return null;
+  const to = (x) => Math.round((x ?? 0) * 255).toString(16).padStart(2, '0');
+  const out = { hex: `#${to(c.r)}${to(c.g)}${to(c.b)}`.toUpperCase() };
+  if (c.a != null && c.a < 1) out.opacity = round(c.a);
+  return out;
+}
+
+function paintSpec(p) {
+  if (!p || p.visible === false) return null;
+  if (p.type === 'SOLID') return { type: 'SOLID', ...rgbaToHex(p.color), ...(p.opacity != null ? { opacity: p.opacity } : {}) };
+  return {
+    type: p.type,
+    ...(p.opacity != null ? { opacity: p.opacity } : {}),
+    ...(p.gradientStops ? { stops: p.gradientStops.map((s) => ({ position: round(s.position), ...rgbaToHex(s.color) })) } : {}),
+  };
+}
+
+/**
+ * Dev-Mode-style spec for a REST node: size, position, opacity, cornerRadius,
+ * fills (hex), strokes, effects, auto-layout, and text style — recursing
+ * `depth` levels into children. Used by figma_get_node_specs.
+ */
+export function nodeSpec(n, depth) {
+  const bb = n.absoluteBoundingBox;
+  const s = { id: n.id, name: n.name, type: n.type };
+  if (bb) { s.size = { w: round(bb.width), h: round(bb.height) }; s.position = { x: round(bb.x), y: round(bb.y) }; }
+  if (n.opacity != null && n.opacity !== 1) s.opacity = n.opacity;
+  if (n.cornerRadius != null) s.cornerRadius = n.cornerRadius;
+  if (Array.isArray(n.rectangleCornerRadii)) s.cornerRadii = n.rectangleCornerRadii;
+  const fills = (n.fills || []).map(paintSpec).filter(Boolean);
+  if (fills.length) s.fills = fills;
+  const strokes = (n.strokes || []).map(paintSpec).filter(Boolean);
+  if (strokes.length) { s.strokes = strokes; if (n.strokeWeight != null) s.strokeWeight = n.strokeWeight; }
+  const effects = (n.effects || []).filter((e) => e.visible !== false)
+    .map((e) => ({ type: e.type, ...(e.radius != null ? { radius: e.radius } : {}), ...(e.offset ? { offset: { x: round(e.offset.x), y: round(e.offset.y) } } : {}), ...(e.spread ? { spread: e.spread } : {}), ...(e.color ? rgbaToHex(e.color) : {}) }));
+  if (effects.length) s.effects = effects;
+  if (n.layoutMode && n.layoutMode !== 'NONE') {
+    s.autoLayout = {
+      direction: n.layoutMode,
+      padding: { l: n.paddingLeft ?? 0, r: n.paddingRight ?? 0, t: n.paddingTop ?? 0, b: n.paddingBottom ?? 0 },
+      gap: n.itemSpacing ?? 0,
+      align: { primary: n.primaryAxisAlignItems, counter: n.counterAxisAlignItems },
+    };
+  }
+  if (n.type === 'TEXT') {
+    const st = n.style || {};
+    s.text = n.characters;
+    s.textStyle = {
+      fontFamily: st.fontFamily, fontWeight: st.fontWeight, fontSize: st.fontSize,
+      lineHeightPx: st.lineHeightPx != null ? round(st.lineHeightPx) : undefined,
+      letterSpacing: st.letterSpacing != null ? round(st.letterSpacing) : undefined,
+      align: st.textAlignHorizontal, case: st.textCase,
+    };
+  }
+  if (depth > 0 && Array.isArray(n.children) && n.children.length) {
+    s.children = n.children.map((c) => nodeSpec(c, depth - 1));
+  }
+  return s;
+}
+
 export const figmaSkill = {
   id: 'figma',
   serverName: 'figma',
@@ -68,27 +157,40 @@ export const figmaSkill = {
   // Token is resolved per-call via the backend (not injected as env), so
   // there are no env keys to forward to the MCP child.
   envKeys: [],
-  description: 'Figma — read files, nodes, comments, and render frames as PNGs',
+  description: 'Figma — read files, nodes and comments; extract dev-handoff specs (sizes/colors/fonts/auto-layout); list versions and image fills; render frames to PNG/JPG/SVG/PDF; browse team projects/files; and post comments',
 
   promptFragment: `## Figma (connected)
-You have read access to the user's Figma files via the Figma REST API. Tools:
+You have access to the user's Figma files via the Figma REST API. Every tool that takes a file accepts EITHER the raw file key OR a full figma.com URL (figma.com/file|design/<key>/...). Node ids accept URL form \`1-23\` or API form \`1:23\` interchangeably. Tools:
 
 ### Identity
-- figma_get_me: Get the authenticated Figma user (handle, email, id)
+- figma_get_me: Get the authenticated Figma user (handle, email, id) — confirms the token works.
 
 ### Files & nodes
-- figma_get_file: Get a file's document tree by fileKey. The fileKey is the token in a Figma URL: figma.com/file/<fileKey>/<name> (or /design/<fileKey>/). Pass an optional depth to limit how deep the node tree is returned (1-2 is usually enough to find frames/pages).
-- figma_get_nodes: Get specific nodes from a file by their node ids (comma-separated or array). Use this after figma_get_file to drill into a particular frame/component without re-fetching the whole tree.
+- figma_get_file: Get a file's document tree by key or URL. Optional depth (1-2) limits how deep the tree is returned — usually enough to find pages/frames.
+- figma_get_nodes: Get specific nodes by id (comma-separated or array). Use after figma_get_file to drill into a frame/component without re-fetching the whole file.
+
+### Dev handoff (build UI from a design)
+- figma_get_node_specs: THE dev-mode tool. For the given node ids returns a compact spec computed from the REST tree — size, position, colors (hex), fonts/text-style, spacing/auto-layout, corner radius, strokes and effects — recursing depth levels (default 2). Prefer this over raw figma_get_nodes when your job is to reproduce a design in code.
+- figma_get_image_fills: Map of imageRef → download URL for every image fill in a file.
 
 ### Rendering
-- figma_render_png: Render one or more nodes of a file to PNG and return the image URLs. Pass fileKey + node ids; optional scale (0.01-4, default 1). Returns a map of nodeId → image URL you can show the user or download.
+- figma_render_png: Render nodes to PNG/JPG/SVG/PDF and return image URLs (a map of nodeId → URL). Optional format (default png), scale 0.01–4 (raster only), svg_include_id, version. Despite the name it renders any of the four formats.
 
 ### Comments
 - figma_get_comments: Read the comments on a file.
+- figma_post_comment: Post a comment (WRITE — needs a PAT with comment-write scope). Optionally reply (comment_id) or pin to a node (node_id[+x/y]) or a canvas point (x/y).
+
+### Browse
+- figma_get_file_versions: List a file's saved version history; a version id can be passed to render a past version.
+- figma_get_team_projects: List the projects in a team (team_id from a team URL …/files/team/<TEAM_ID>/…).
+- figma_get_project_files: List the files in a project (from figma_get_team_projects).
+
+### Local helper
+- figma_parse_url: Extract { file_key, node_id } from a figma.com URL — no API call.
 
 ### Notes
-- The fileKey is NOT the file name — it's the opaque id segment in the URL.
-- Node ids look like "1:23" and come from figma_get_file / figma_get_nodes output.`,
+- The file key is NOT the file name — it's the opaque id segment in the URL (or just paste the URL).
+- Node ids look like "1:23" and come from figma_get_file / figma_get_nodes / figma_parse_url output.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it
@@ -130,9 +232,10 @@ You have read access to the user's Figma files via the Figma REST API. Tools:
         }
 
         case 'figma_get_file': {
-          const { fileKey, depth } = args || {};
-          if (!fileKey) return JSON.stringify({ error: 'fileKey is required' });
-          let path = `/v1/files/${encodeURIComponent(fileKey)}`;
+          const key = fileKeyFrom((args || {}).fileKey);
+          const { depth } = args || {};
+          if (!key) return JSON.stringify({ error: 'fileKey is required (a file key or a figma.com URL)' });
+          let path = `/v1/files/${encodeURIComponent(key)}`;
           if (depth != null) {
             const d = Number(depth);
             if (!Number.isNaN(d) && d > 0) path += `?depth=${d}`;
@@ -163,18 +266,18 @@ You have read access to the user's Figma files via the Figma REST API. Tools:
         }
 
         case 'figma_get_nodes': {
-          const { fileKey, ids, depth } = args || {};
-          if (!fileKey) return JSON.stringify({ error: 'fileKey is required' });
-          const idList = Array.isArray(ids) ? ids : (ids ? String(ids).split(',') : []);
-          const cleaned = idList.map((s) => String(s).trim()).filter(Boolean);
-          if (cleaned.length === 0) return JSON.stringify({ error: 'ids is required (comma-separated or array of node ids)' });
+          const key = fileKeyFrom((args || {}).fileKey);
+          const { ids, depth } = args || {};
+          if (!key) return JSON.stringify({ error: 'fileKey is required (a file key or a figma.com URL)' });
+          const normIds = normalizeNodeIds(ids);
+          if (!normIds) return JSON.stringify({ error: 'ids is required (comma-separated or array of node ids; `1-23` or `1:23`)' });
           const params = new URLSearchParams();
-          params.set('ids', cleaned.join(','));
+          params.set('ids', normIds);
           if (depth != null) {
             const d = Number(depth);
             if (!Number.isNaN(d) && d > 0) params.set('depth', String(d));
           }
-          const data = await figmaFetch(`/v1/files/${encodeURIComponent(fileKey)}/nodes?${params.toString()}`);
+          const data = await figmaFetch(`/v1/files/${encodeURIComponent(key)}/nodes?${params.toString()}`);
           // Figma returns { nodes: { "<id>": { document, components, ... } } }.
           const nodes = {};
           for (const [id, entry] of Object.entries(data.nodes || {})) {
@@ -185,30 +288,80 @@ You have read access to the user's Figma files via the Figma REST API. Tools:
           return JSON.stringify({ name: data.name, nodes });
         }
 
-        case 'figma_render_png': {
-          const { fileKey, ids, scale } = args || {};
-          if (!fileKey) return JSON.stringify({ error: 'fileKey is required' });
-          const idList = Array.isArray(ids) ? ids : (ids ? String(ids).split(',') : []);
-          const cleaned = idList.map((s) => String(s).trim()).filter(Boolean);
-          if (cleaned.length === 0) return JSON.stringify({ error: 'ids is required (comma-separated or array of node ids)' });
+        case 'figma_get_node_specs': {
+          const key = fileKeyFrom((args || {}).file);
+          const { ids, depth } = args || {};
+          if (!key) return JSON.stringify({ error: 'file is required (a file key or a figma.com URL)' });
+          const normIds = normalizeNodeIds(ids);
+          if (!normIds) return JSON.stringify({ error: 'ids is required (comma-separated or array of node ids; `1-23` or `1:23`)' });
+          let d = Number(depth);
+          if (Number.isNaN(d)) d = 2;
+          d = Math.min(6, Math.max(0, Math.trunc(d)));
           const params = new URLSearchParams();
-          params.set('ids', cleaned.join(','));
-          params.set('format', 'png');
-          // Figma accepts scale 0.01–4; clamp and default to 1.
-          let s = Number(scale);
-          if (Number.isNaN(s) || s <= 0) s = 1;
-          s = Math.min(4, Math.max(0.01, s));
-          params.set('scale', String(s));
-          const data = await figmaFetch(`/v1/images/${encodeURIComponent(fileKey)}?${params.toString()}`);
+          params.set('ids', normIds);
+          params.set('depth', String(d));
+          const data = await figmaFetch(`/v1/files/${encodeURIComponent(key)}/nodes?${params.toString()}`);
+          const out = {};
+          for (const [id, entry] of Object.entries(data.nodes || {})) {
+            out[id] = entry && entry.document ? nodeSpec(entry.document, d) : null;
+          }
+          return JSON.stringify(out);
+        }
+
+        case 'figma_render_png': {
+          const key = fileKeyFrom((args || {}).fileKey ?? (args || {}).file);
+          const { ids, scale, format, svg_include_id, version } = args || {};
+          if (!key) return JSON.stringify({ error: 'fileKey is required (a file key or a figma.com URL)' });
+          const normIds = normalizeNodeIds(ids);
+          if (!normIds) return JSON.stringify({ error: 'ids is required (comma-separated or array of node ids; `1-23` or `1:23`)' });
+          const fmt = ['png', 'jpg', 'svg', 'pdf'].includes(String(format || '').toLowerCase())
+            ? String(format).toLowerCase()
+            : 'png';
+          const params = new URLSearchParams();
+          params.set('ids', normIds);
+          params.set('format', fmt);
+          let s;
+          if (fmt === 'png' || fmt === 'jpg') {
+            // Figma accepts scale 0.01–4 for raster formats; clamp and default to 1.
+            s = Number(scale);
+            if (Number.isNaN(s) || s <= 0) s = 1;
+            s = Math.min(4, Math.max(0.01, s));
+            params.set('scale', String(s));
+          }
+          if (fmt === 'svg' && svg_include_id != null) params.set('svg_include_id', String(!!svg_include_id));
+          if (version) params.set('version', String(version));
+          const data = await figmaFetch(`/v1/images/${encodeURIComponent(key)}?${params.toString()}`);
           if (data.err) return JSON.stringify({ error: `Figma render error: ${data.err}` });
-          // data.images = { "<nodeId>": "<png url>" | null }
-          return JSON.stringify({ scale: s, format: 'png', images: data.images || {} });
+          // data.images = { "<nodeId>": "<url>" | null }
+          return JSON.stringify({ format: fmt, ...(s != null ? { scale: s } : {}), images: data.images || {} });
+        }
+
+        case 'figma_get_image_fills': {
+          const key = fileKeyFrom((args || {}).file);
+          if (!key) return JSON.stringify({ error: 'file is required (a file key or a figma.com URL)' });
+          const data = await figmaFetch(`/v1/files/${encodeURIComponent(key)}/images`);
+          // Figma returns { error, status, meta: { images: { <imageRef>: <url> } } }.
+          return JSON.stringify({ images: data.meta?.images ?? data.images ?? {} });
+        }
+
+        case 'figma_get_file_versions': {
+          const key = fileKeyFrom((args || {}).file);
+          if (!key) return JSON.stringify({ error: 'file is required (a file key or a figma.com URL)' });
+          const data = await figmaFetch(`/v1/files/${encodeURIComponent(key)}/versions`);
+          const versions = (data.versions || []).map((v) => ({
+            id: v.id,
+            label: v.label,
+            description: v.description,
+            createdAt: v.created_at,
+            user: v.user?.handle,
+          }));
+          return JSON.stringify({ count: versions.length, versions });
         }
 
         case 'figma_get_comments': {
-          const { fileKey } = args || {};
-          if (!fileKey) return JSON.stringify({ error: 'fileKey is required' });
-          const data = await figmaFetch(`/v1/files/${encodeURIComponent(fileKey)}/comments`);
+          const key = fileKeyFrom((args || {}).fileKey);
+          if (!key) return JSON.stringify({ error: 'fileKey is required (a file key or a figma.com URL)' });
+          const data = await figmaFetch(`/v1/files/${encodeURIComponent(key)}/comments`);
           const comments = (data.comments || []).map((c) => ({
             id: c.id,
             message: c.message,
@@ -218,6 +371,47 @@ You have read access to the user's Figma files via the Figma REST API. Tools:
             parentId: c.parent_id || null,
           }));
           return JSON.stringify({ count: comments.length, comments });
+        }
+
+        case 'figma_post_comment': {
+          const key = fileKeyFrom((args || {}).file);
+          const { message, comment_id, node_id, x, y } = args || {};
+          if (!key) return JSON.stringify({ error: 'file is required (a file key or a figma.com URL)' });
+          if (!message) return JSON.stringify({ error: 'message is required' });
+          const body = { message };
+          if (comment_id) body.comment_id = comment_id;
+          if (node_id) body.client_meta = { node_id: normalizeNodeIds(node_id), node_offset: { x: x ?? 0, y: y ?? 0 } };
+          else if (x != null || y != null) body.client_meta = { x: x ?? 0, y: y ?? 0 };
+          const data = await figmaFetch(`/v1/files/${encodeURIComponent(key)}/comments`, { method: 'POST', body });
+          return JSON.stringify({
+            id: data.id,
+            message: data.message,
+            fileKey: key,
+            createdAt: data.created_at,
+            parentId: data.parent_id || null,
+          });
+        }
+
+        case 'figma_get_team_projects': {
+          const { team_id } = args || {};
+          if (!team_id) return JSON.stringify({ error: 'team_id is required' });
+          const data = await figmaFetch(`/v1/teams/${encodeURIComponent(team_id)}/projects`);
+          return JSON.stringify({ name: data.name, projects: data.projects || [] });
+        }
+
+        case 'figma_get_project_files': {
+          const { project_id, branch_data } = args || {};
+          if (!project_id) return JSON.stringify({ error: 'project_id is required' });
+          const params = new URLSearchParams();
+          if (branch_data) params.set('branch_data', 'true');
+          const qs = params.toString();
+          const data = await figmaFetch(`/v1/projects/${encodeURIComponent(project_id)}/files${qs ? `?${qs}` : ''}`);
+          return JSON.stringify({ name: data.name, files: data.files || [] });
+        }
+
+        case 'figma_parse_url': {
+          const { url } = args || {};
+          return JSON.stringify({ file_key: fileKeyFrom(url), node_id: nodeIdFromUrl(url) ?? null });
         }
 
         default:
@@ -236,11 +430,11 @@ You have read access to the user's Figma files via the Figma REST API. Tools:
     },
     {
       name: 'figma_get_file',
-      description: 'Get a Figma file\'s document tree by fileKey (the opaque id segment in a figma.com/file/<fileKey>/ or /design/<fileKey>/ URL — NOT the file name). Returns a summarized map of pages and their top-level frames/nodes. Use figma_get_nodes to drill into a specific node.',
+      description: 'Get a Figma file\'s document tree. Accepts a file key OR a figma.com URL (figma.com/file|design/<key>/... — NOT the file name). Returns a summarized map of pages and their top-level frames/nodes. Use figma_get_nodes or figma_get_node_specs to drill into a specific node.',
       input_schema: {
         type: 'object',
         properties: {
-          fileKey: { type: 'string', description: 'The file key from the Figma URL (e.g. "aBcD1234" in figma.com/design/aBcD1234/My-File)' },
+          fileKey: { type: 'string', description: 'A file key OR a figma.com URL (e.g. "aBcD1234" or figma.com/design/aBcD1234/My-File)' },
           depth: { type: 'number', description: 'Optional: limit how deep the node tree is traversed (1-2 is usually enough to list pages/frames). Omit for the full tree.' },
         },
         required: ['fileKey'],
@@ -252,24 +446,62 @@ You have read access to the user's Figma files via the Figma REST API. Tools:
       input_schema: {
         type: 'object',
         properties: {
-          fileKey: { type: 'string', description: 'The file key from the Figma URL' },
-          ids: { type: 'array', items: { type: 'string' }, description: 'Node ids to fetch (e.g. ["1:23","4:56"]). A comma-separated string is also accepted.' },
+          fileKey: { type: 'string', description: 'A file key OR a figma.com URL' },
+          ids: { type: 'array', items: { type: 'string' }, description: 'Node ids to fetch. Accepts URL form ["1-23"] or API form ["1:23"]. A comma-separated string is also accepted.' },
           depth: { type: 'number', description: 'Optional: limit traversal depth within each node.' },
         },
         required: ['fileKey', 'ids'],
       },
     },
     {
-      name: 'figma_render_png',
-      description: 'Render one or more Figma nodes to PNG and return the image URLs (a map of nodeId → URL). Use this to show or download a visual of a frame/component.',
+      name: 'figma_get_node_specs',
+      description: 'Dev-Mode-style inspection computed from the REST tree: for the given nodes and their children returns size, position, colors (hex), fonts/text-style, spacing/auto-layout, corner radius, strokes and effects — a compact spec for reproducing a design in code. Prefer this over figma_get_nodes when your job is to build UI from a Figma file.',
       input_schema: {
         type: 'object',
         properties: {
-          fileKey: { type: 'string', description: 'The file key from the Figma URL' },
-          ids: { type: 'array', items: { type: 'string' }, description: 'Node ids to render (e.g. ["1:23"]). A comma-separated string is also accepted.' },
-          scale: { type: 'number', description: 'Render scale, 0.01–4 (default 1). 2 for retina/hi-dpi.' },
+          file: { type: 'string', description: 'A file key OR a figma.com URL' },
+          ids: { type: 'array', items: { type: 'string' }, description: 'Node ids to inspect (URL form "1-23" or API form "1:23"). A comma-separated string is also accepted.' },
+          depth: { type: 'number', description: 'How many levels of children to walk (0-6, default 2).' },
+        },
+        required: ['file', 'ids'],
+      },
+    },
+    {
+      name: 'figma_render_png',
+      description: 'Render one or more Figma nodes to an image and return the URLs (a map of nodeId → URL). Despite the name it renders PNG/JPG/SVG/PDF (default png). Use to show or download a visual of a frame/component.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          fileKey: { type: 'string', description: 'A file key OR a figma.com URL' },
+          ids: { type: 'array', items: { type: 'string' }, description: 'Node ids to render (URL form "1-23" or API form "1:23"). A comma-separated string is also accepted.' },
+          format: { type: 'string', enum: ['png', 'jpg', 'svg', 'pdf'], description: 'Output format (default png).' },
+          scale: { type: 'number', description: 'Render scale, 0.01–4 (raster formats only; default 1). 2 for retina/hi-dpi.' },
+          svg_include_id: { type: 'boolean', description: 'For SVG: include element ids as attributes.' },
+          version: { type: 'string', description: 'Render a specific file version id (from figma_get_file_versions).' },
         },
         required: ['fileKey', 'ids'],
+      },
+    },
+    {
+      name: 'figma_get_image_fills',
+      description: 'Get a map of imageRef → download URL for every image fill used in a Figma file.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          file: { type: 'string', description: 'A file key OR a figma.com URL' },
+        },
+        required: ['file'],
+      },
+    },
+    {
+      name: 'figma_get_file_versions',
+      description: 'List a Figma file\'s saved version history (version id, label, created_at, user). A version id can be passed to figma_render_png to render a past version.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          file: { type: 'string', description: 'A file key OR a figma.com URL' },
+        },
+        required: ['file'],
       },
     },
     {
@@ -278,9 +510,59 @@ You have read access to the user's Figma files via the Figma REST API. Tools:
       input_schema: {
         type: 'object',
         properties: {
-          fileKey: { type: 'string', description: 'The file key from the Figma URL' },
+          fileKey: { type: 'string', description: 'A file key OR a figma.com URL' },
         },
         required: ['fileKey'],
+      },
+    },
+    {
+      name: 'figma_post_comment',
+      description: 'Post a comment on a Figma file (WRITE — needs a PAT with comment-write scope). Optionally reply to a comment (comment_id), pin it to a node (node_id, with optional x/y offset), or pin to a canvas point (x/y).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          file: { type: 'string', description: 'A file key OR a figma.com URL' },
+          message: { type: 'string', description: 'The comment text.' },
+          comment_id: { type: 'string', description: 'Optional: reply to this parent comment id.' },
+          node_id: { type: 'string', description: 'Optional: pin the comment to this node ("1-23" or "1:23").' },
+          x: { type: 'number', description: 'Optional: x position (node offset if node_id given, else canvas point).' },
+          y: { type: 'number', description: 'Optional: y position (node offset if node_id given, else canvas point).' },
+        },
+        required: ['file', 'message'],
+      },
+    },
+    {
+      name: 'figma_get_team_projects',
+      description: 'List the projects in a Figma team. Get team_id from a Figma team URL (…/files/team/<TEAM_ID>/…).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          team_id: { type: 'string', description: 'The Figma team id.' },
+        },
+        required: ['team_id'],
+      },
+    },
+    {
+      name: 'figma_get_project_files',
+      description: 'List the files in a Figma project (from figma_get_team_projects). Returns file key, name, thumbnail, last_modified.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          project_id: { type: 'string', description: 'The Figma project id.' },
+          branch_data: { type: 'boolean', description: 'Optional: include branch metadata for each file.' },
+        },
+        required: ['project_id'],
+      },
+    },
+    {
+      name: 'figma_parse_url',
+      description: 'Local helper (no API call): extract the file key and node id (colon form) from a figma.com file/design URL. Returns { file_key, node_id }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'A full figma.com file/design URL.' },
+        },
+        required: ['url'],
       },
     },
   ],
