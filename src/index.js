@@ -35,6 +35,7 @@ import { kvMemorySkill } from './kvMemory.js';
 import { datasetStoreSkill } from './datasetStore.js';
 import { chartRenderSkill } from './chartRender.js';
 import { socialCardSkill } from './socialCard.js';
+import { codeScanSkill } from './code-scan.js';
 import { triggerAgentSkill } from './triggerAgent.js';
 import { codebaseMemorySkill } from './codebaseMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
@@ -72,6 +73,7 @@ registerSkill(kvMemorySkill);
 registerSkill(datasetStoreSkill);
 registerSkill(chartRenderSkill);
 registerSkill(socialCardSkill);
+registerSkill(codeScanSkill);
 registerSkill(triggerAgentSkill);
 registerSkill(codebaseMemorySkill);
 registerSkill(workflowBuilderSkill);
@@ -165,6 +167,16 @@ export const SKILLS = {
   // socialCardSkill. Pairs with the linkedin skill (returns a PNG `path` to
   // pass as a post's imagePath).
   SOCIAL_CARD: 'social-card',
+  // `code-scan` — AGENT-DRIVEN, stack-smart deterministic linter over a
+  // checked-out repo (auto-detects the stack: JS/TS→oxlint, more coming; runs
+  // every matching scanner from a NO-HARDCODING registry). Tier ① (fully local):
+  // no API/OAuth/browser — the code never leaves the box → UNGATED (no
+  // integration token; intentionally absent from backend skill-integrations
+  // maps). Opt-in: NOT auto-loaded — activates ONLY when a node declares it via
+  // skills:[...]. The id MUST match the skill's registered id ('code-scan').
+  // Backed by codeScanSkill. Used by the code-review templates (the passes that
+  // hold the on-disk clone) to get ground-truth linter candidates.
+  CODE_SCAN: 'code-scan',
   // `codebase-memory` — code-graph + semantic index over the checked-out repo,
   // backed by the DeusData/codebase-memory-mcp binary BAKED INTO the agent
   // image. Fully local → UNGATED (no integration token; intentionally absent
@@ -193,7 +205,7 @@ export const SKILLS = {
   TRIGGER_AGENT: 'trigger-agent',
 };
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, chartRenderSkill, socialCardSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, chartRenderSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
