@@ -35,8 +35,9 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve as resolvePath } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -59,6 +60,47 @@ const SKIP_DIRS = new Set([
 ]);
 // Bound a directory walk so a huge monorepo can't blow the argv / stall the run.
 const MAX_FILES_PER_SCANNER = 400;
+
+// Zibby's curated default oxlint ruleset — applied ONLY when the repo has no
+// oxlint config of its own (then we respect theirs). Empirically tuned for HIGH
+// SIGNAL / LOW NOISE on real code: correctness (default) + suspicious + the react
+// rules that catch ACTUAL bugs (jsx-key, no-unknown-property), with the
+// transform-dependent / stylistic noise turned OFF — `react/react-in-jsx-scope`
+// fires on EVERY JSX element under the modern automatic runtime (100% false
+// positives), and jsx-max-depth / no-array-index-key are opinionated. This is a
+// FLOOR, not a style enforcer; the reviewer covers judgment / a11y / design.
+// (Verified on a real React repo: bare oxlint = 0 findings, `-W all` = 193 noise,
+// this = 7 real bugs — 3 missing jsx-key, 3 unknown-property, 1 perf.)
+const CURATED_OXLINT_CONFIG = {
+  plugins: ['react', 'typescript', 'unicorn', 'oxc'],
+  categories: { correctness: 'error', suspicious: 'warn' },
+  rules: {
+    'react/react-in-jsx-scope': 'off',
+    'react/jsx-max-depth': 'off',
+    'react/no-array-index-key': 'off',
+    'react/jsx-key': 'error',
+    'react/no-unknown-property': 'error',
+    'no-unused-vars': 'warn',
+    eqeqeq: 'warn',
+  },
+};
+// A repo's OWN oxlint config → respect it (don't override with ours). oxlint
+// auto-discovers these, so we simply don't pass --config when one is present.
+const OXLINT_OWN_CONFIG_FILES = ['.oxlintrc.json', '.oxlintrc', 'oxlint.json'];
+
+let _curatedCfgPath = null;
+/** Write the curated config to a temp file ONCE; return its path (null → oxlint defaults). */
+function curatedOxlintConfigPath() {
+  if (_curatedCfgPath && existsSync(_curatedCfgPath)) return _curatedCfgPath;
+  try {
+    const dir = join(tmpdir(), 'zibby-code-scan');
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, 'oxlintrc.curated.json');
+    writeFileSync(p, JSON.stringify(CURATED_OXLINT_CONFIG), 'utf-8');
+    _curatedCfgPath = p;
+    return p;
+  } catch { return null; }
+}
 
 /**
  * Parse `oxlint --format json` output. oxlint emits ONE JSON object:
@@ -160,7 +202,16 @@ export const SCANNERS = [
     detect: (dir) => existsSync(join(dir, 'package.json')),
     langs: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'],
     bin: () => process.env.OXLINT_BIN || 'oxlint',
-    args: (files) => ['--format', 'json', ...files],
+    // Respect the repo's OWN oxlint config if it has one; otherwise apply Zibby's
+    // curated high-signal ruleset via --config (never bare defaults, which found
+    // 0 on clean React while missing real jsx-key/unknown-property bugs).
+    args: (files, ctx = {}) => {
+      const base = ctx.baseDir || '.';
+      const hasOwn = OXLINT_OWN_CONFIG_FILES.some((f) => existsSync(join(base, f)));
+      const cfgPath = hasOwn ? null : curatedOxlintConfigPath();
+      const cfg = cfgPath ? ['--config', cfgPath] : [];
+      return ['--format', 'json', ...cfg, ...files];
+    },
     parse: parseOxlint,
   },
   {
@@ -217,7 +268,7 @@ function runScanner(scanner, baseDir, absFiles) {
   const rel = absFiles.map((f) => relative(baseDir, f)).filter(Boolean);
   if (!rel.length) return { scanner: scanner.id, skipped: 'no matching files' };
   const bin = scanner.bin();
-  const res = spawnSync(bin, scanner.args(rel), {
+  const res = spawnSync(bin, scanner.args(rel, { baseDir }), {
     cwd: baseDir,
     encoding: 'utf-8',
     timeout: 3 * 60 * 1000,

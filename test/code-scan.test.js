@@ -55,7 +55,25 @@ describe('code-scan skill — shape + registry', () => {
     // The oxlint entry detects a JS/TS repo and covers the JS/TS extensions.
     const ox = SCANNERS.find((s) => s.id === 'oxlint');
     expect(ox.langs).toContain('.ts');
-    expect(ox.args(['a.ts'])).toEqual(['--format', 'json', 'a.ts']);
+    // No repo oxlint config → apply Zibby's curated ruleset via --config.
+    const a = ox.args(['a.ts'], { baseDir: '/no/such/repo/without/oxlint/config' });
+    expect(a[0]).toBe('--format');
+    expect(a[1]).toBe('json');
+    expect(a).toContain('--config');
+    expect(a[a.length - 1]).toBe('a.ts');
+  });
+
+  it('oxlint RESPECTS the repo\'s own oxlint config (no --config injected)', () => {
+    const ox = SCANNERS.find((s) => s.id === 'oxlint');
+    const dir = mkdtempSync(join(tmpdir(), 'oxown-'));
+    try {
+      writeFileSync(join(dir, '.oxlintrc.json'), '{}');
+      const a = ox.args(['a.ts'], { baseDir: dir });
+      expect(a).not.toContain('--config'); // repo owns its rules → we don't override
+      expect(a).toEqual(['--format', 'json', 'a.ts']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
