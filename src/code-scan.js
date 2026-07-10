@@ -26,7 +26,9 @@
  * no changes to scan_code itself. scan_code runs EVERY scanner whose detect(dir)
  * is true, scoped to files matching its `langs`, and merges the results.
  *
- * ONLY oxlint IS BAKED + VERIFIED TODAY. ruff (Python) + staticcheck (Go) are
+ * ONLY oxlint IS WIRED + VERIFIED TODAY (it's an npm DEP of @zibby/skills, so it
+ * installs with the skill — no image bake; see resolveOxlintBin). ruff (Python) +
+ * staticcheck (Go) are
  * SCAFFOLD entries (registry + parser present, clearly marked TODO) whose
  * binaries are NOT yet in the image — they simply skip with a "binary not
  * installed" note until baked. Best-effort throughout: a missing binary (spawn
@@ -39,7 +41,31 @@ import { existsSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'nod
 import { dirname, extname, join, relative, resolve as resolvePath } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { SKILL_META } from '@zibby/skill-ids';
+
+const _requireFromHere = createRequire(import.meta.url);
+
+/**
+ * Resolve the oxlint binary. Preference:
+ *   1. OXLINT_BIN env (explicit override, or a baked binary if one exists).
+ *   2. The npm-installed oxlint — `oxlint` is a DEPENDENCY of @zibby/skills, so
+ *      after the run container's `[setup] npm install` it (+ its platform binary
+ *      via the @oxlint/binding-* optional deps) is in node_modules. This is why
+ *      oxlint does NOT need baking into the agent image: it rides in on the same
+ *      npm install every run already does, from npm (an allowed egress host) —
+ *      no CDN fetch, no image rebuild.
+ *   3. `oxlint` on PATH (last resort).
+ */
+function resolveOxlintBin() {
+  if (process.env.OXLINT_BIN) return process.env.OXLINT_BIN;
+  try {
+    const pkgJson = _requireFromHere.resolve('oxlint/package.json');
+    const bin = resolvePath(dirname(pkgJson), 'bin', 'oxlint');
+    if (existsSync(bin)) return bin;
+  } catch { /* not resolvable → PATH fallback */ }
+  return 'oxlint';
+}
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -197,12 +223,12 @@ function parseStaticcheck(stdout) {
  */
 export const SCANNERS = [
   {
-    // JS/TS — oxlint (MIT, oxc). BAKED + VERIFIED. Binary at OXLINT_BIN ||
-    // /usr/local/bin/oxlint (see packages/Dockerfile).
+    // JS/TS — oxlint (MIT, oxc). Resolved from node_modules (npm dep of
+    // @zibby/skills) via resolveOxlintBin; OXLINT_BIN overrides. No image bake.
     id: 'oxlint',
     detect: (dir) => existsSync(join(dir, 'package.json')),
     langs: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'],
-    bin: () => process.env.OXLINT_BIN || 'oxlint',
+    bin: () => resolveOxlintBin(),
     // Respect the repo's OWN oxlint config if it has one; otherwise apply Zibby's
     // curated high-signal ruleset via --config (never bare defaults, which found
     // 0 on clean React while missing real jsx-key/unknown-property bugs).
