@@ -39,6 +39,7 @@ import { existsSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'nod
 import { dirname, extname, join, relative, resolve as resolvePath } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { SKILL_META } from '@zibby/skill-ids';
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -289,6 +290,10 @@ function runScanner(scanner, baseDir, absFiles) {
 export const codeScanSkill = {
   id: 'code-scan',
   serverName: 'code_scan',
+  // Static toggle metadata by REFERENCE to the single source of truth
+  // (@zibby/skill-ids SKILL_META) — the engine's toggle gate reads
+  // `skill.meta.toggleable` off this. See strategy/skills-platform-architecture.md.
+  meta: SKILL_META['code-scan'],
   allowedTools: ['mcp__code_scan__*'],
   description:
     'Code scan — run the RIGHT deterministic linter for a checked-out repo (auto-detects the stack: JS/TS→oxlint, etc.) and return structured findings. Fully local; the code never leaves the box.',

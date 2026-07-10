@@ -47,6 +47,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { SKILL_META } from '@zibby/skill-ids';
 
 /** Absolute path to the baked-in server binary (override for local dev/tests). */
 function binPath() {
@@ -94,6 +95,11 @@ function pathHash(p) {
 export const codebaseMemorySkill = {
   id: 'codebase-memory',
   serverName: 'codebase_memory',
+  // Static toggle metadata by REFERENCE to the single source of truth
+  // (@zibby/skill-ids SKILL_META). The engine's toggle gate (claude-strategy
+  // isToggleableOff) reads `skill.meta.toggleable` off this — no hardcoded list.
+  // See strategy/skills-platform-architecture.md (Phase 2).
+  meta: SKILL_META['codebase-memory'],
   allowedTools: ['mcp__codebase_memory__*'],
   description:
     'Codebase memory — code-graph + semantic index over the checked-out repo (architecture, graph search, dependency trace, change detection)',
