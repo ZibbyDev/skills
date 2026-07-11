@@ -1,6 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { hubspotSkill } from '../src/hubspot.js';
+const TOKEN = 'oauth-na1-secret-token';
+
+// Mock backend-client BEFORE importing the skill (same setup as figma-tools.test.js)
+// so hubspotFetch's resolveIntegrationToken('hubspot') yields a fixed access token.
+vi.mock('@zibby/core/backend-client.js', () => ({
+  resolveIntegrationToken: vi.fn(async () => ({ provider: 'hubspot', token: TOKEN })),
+  clearTokenCache: vi.fn(),
+}));
+
+const { resolveIntegrationToken } = await import('@zibby/core/backend-client.js');
+const { hubspotSkill, INTEGRATIONS } = await (async () => ({
+  hubspotSkill: (await import('../src/hubspot.js')).hubspotSkill,
+  INTEGRATIONS: (await import('../src/integrations.js')).INTEGRATIONS,
+}))();
 
 // A fetch Response-like object (mirrors the figma/linkedin tests).
 function fetchJson(payload, { ok = true, status = 200 } = {}) {
@@ -12,15 +25,13 @@ function fetchJson(payload, { ok = true, status = 200 } = {}) {
   };
 }
 
-const TOKEN = 'pat-na1-secret-token';
-
 beforeEach(() => {
   vi.clearAllMocks();
-  process.env.HUBSPOT_ACCESS_TOKEN = TOKEN;
+  // Default: the resolver hands back a valid token (individual tests override).
+  resolveIntegrationToken.mockResolvedValue({ provider: 'hubspot', token: TOKEN });
 });
 
 afterEach(() => {
-  delete process.env.HUBSPOT_ACCESS_TOKEN;
   delete globalThis.fetch;
 });
 
@@ -44,19 +55,20 @@ describe('hubspot tool surface', () => {
     }
   });
 
-  it('declares HUBSPOT_ACCESS_TOKEN as an env key and no requiresIntegration', () => {
-    expect(hubspotSkill.envKeys).toEqual(['HUBSPOT_ACCESS_TOKEN']);
-    expect(hubspotSkill.requiresIntegration).toBeUndefined();
+  it('declares no env keys and requires the hubspot integration', () => {
+    expect(hubspotSkill.envKeys).toEqual([]);
+    expect(hubspotSkill.requiresIntegration).toBe(INTEGRATIONS.HUBSPOT);
   });
 });
 
 describe('hubspot auth', () => {
-  it('(a) missing token → hubspot_whoami returns {error} mentioning HUBSPOT_ACCESS_TOKEN, no fetch', async () => {
-    delete process.env.HUBSPOT_ACCESS_TOKEN;
+  it('(a) resolver returns no token → hubspot_whoami returns {error} to Connect HubSpot, no fetch', async () => {
+    // Simulate the backend resolver returning no token (HubSpot not connected).
+    resolveIntegrationToken.mockResolvedValue({ provider: 'hubspot', token: undefined });
     globalThis.fetch = vi.fn(async () => { throw new Error('fetch must NOT be called without a token'); });
 
     const result = JSON.parse(await hubspotSkill.handleToolCall('hubspot_whoami', {}));
-    expect(result.error).toMatch(/HUBSPOT_ACCESS_TOKEN/);
+    expect(result.error).toMatch(/HubSpot not connected|Connect HubSpot/i);
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });

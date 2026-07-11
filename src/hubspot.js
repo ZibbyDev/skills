@@ -1,6 +1,8 @@
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
+import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
+import { INTEGRATIONS } from './integrations.js';
 
 /**
  * HubSpot CRM skill — search/read/create/update CRM objects (contacts,
@@ -10,13 +12,15 @@ import { dirname, resolve as resolvePath } from 'path';
  * Mirrors figma.js (the hand-written generic-bin skill: a `tools[]` array +
  * a `handleToolCall` switch, served over MCP by bin/mcp-skill.mjs).
  *
- * Auth: ENV-BASED, NOT a backend integration. The token is a HubSpot
- * "Private App" access token pasted onto the agent's Env tab as
- * HUBSPOT_ACCESS_TOKEN; resolve() forwards it to the MCP child (envKeys) and
- * hubspotFetch reads it from process.env. It authenticates with the standard
- * `Authorization: Bearer <token>` header. There is NO backend HubSpot
- * integration and therefore NO requiresIntegration — the skill activates
- * opt-in when a node declares it.
+ * Auth: HubSpot is a first-class OAuth 2.0 integration. The token is resolved
+ * per-call via resolveIntegrationToken('hubspot') — the backend
+ * (handlers/hubspot.js + integration-tokens.js) auto-refreshes the short-lived
+ * access token from the stored refresh token and returns a currently-valid
+ * bearer. It authenticates with the standard `Authorization: Bearer <token>`
+ * header. Declaring requiresIntegration gates deploy on a connected HubSpot
+ * integration (mirrored in backend skill-integrations.js → INTEGRATIONS.HUBSPOT).
+ * Identical to how figma.js resolves its token — the backend abstracts
+ * token-vs-OAuth, so the skill doesn't care.
  */
 
 function resolveSkillBin() {
@@ -27,18 +31,16 @@ function resolveSkillBin() {
 }
 
 /**
- * Single chokepoint for every HubSpot REST call. Reads the Private App access
- * token from the environment (HUBSPOT_ACCESS_TOKEN), issues the request with a
- * Bearer header, and throws a trimmed error on non-2xx so handleToolCall can
- * surface it as JSON. Tolerates an empty body (e.g. some association writes).
+ * Single chokepoint for every HubSpot REST call. Resolves a currently-valid
+ * OAuth access token via the backend (auto-refreshed on/near expiry), issues
+ * the request with a Bearer header, and throws a trimmed error on non-2xx so
+ * handleToolCall can surface it as JSON. Tolerates an empty body (e.g. some
+ * association writes).
  */
 async function hubspotFetch(path, opts = {}) {
-  const token = process.env.HUBSPOT_ACCESS_TOKEN;
+  const { token } = await resolveIntegrationToken('hubspot');
   if (!token) {
-    throw new Error(
-      'HubSpot not configured — set HUBSPOT_ACCESS_TOKEN on the agent\'s Env tab '
-      + '(a Private App access token from HubSpot → Settings → Integrations → Private Apps).',
-    );
+    throw new Error('HubSpot not connected — Connect HubSpot in Integrations.');
   }
   const url = path.startsWith('https://') ? path : `https://api.hubapi.com${path}`;
   const headers = {
@@ -94,14 +96,20 @@ export const hubspotSkill = {
   id: 'hubspot',
   serverName: 'hubspot',
   allowedTools: ['mcp__hubspot__*'],
-  // Env-token skill: no backend HubSpot integration, so NO requiresIntegration
-  // (activates opt-in when a node declares it). The token is injected as env
-  // and forwarded to the MCP child via envKeys below.
-  envKeys: ['HUBSPOT_ACCESS_TOKEN'],
-  description: 'HubSpot CRM — search/read/create/update contacts, companies, deals, tickets, notes and feedback submissions via the HubSpot REST API (Private App token).',
+  // HubSpot is a first-class OAuth integration. The backend connect handler
+  // (backend/src/handlers/hubspot.js) stores the OAuth tokens and the skill
+  // resolves a valid access token at runtime via
+  // resolveIntegrationToken('hubspot'). Declaring this gates deploy on a
+  // connected HubSpot integration (mirrored in
+  // backend/src/services/skill-integrations.js → INTEGRATIONS.HUBSPOT).
+  requiresIntegration: INTEGRATIONS.HUBSPOT,
+  // Token is resolved per-call via the backend (not injected as env), so there
+  // are no env keys to forward to the MCP child.
+  envKeys: [],
+  description: 'HubSpot CRM — search/read/create/update contacts, companies, deals, tickets, notes and feedback submissions via the HubSpot REST API.',
 
   promptFragment: `## HubSpot CRM
-You have access to the user's HubSpot CRM via the HubSpot REST API. Auth uses a **Private App access token** set as \`HUBSPOT_ACCESS_TOKEN\` on the agent's Env tab (HubSpot → Settings → Integrations → Private Apps → the token needs the CRM scopes for the objects you touch).
+You have access to the user's HubSpot CRM via the HubSpot REST API (OAuth — the user connects HubSpot in Integrations; the token is resolved and auto-refreshed for you). The connected app grants the CRM scopes for the objects you touch.
 
 HubSpot's object model is **uniform** — nearly every tool takes an \`objectType\` (\`contacts\`, \`companies\`, \`deals\`, \`tickets\`, \`notes\`, \`tasks\`, \`feedback_submissions\`, or a custom object). Records are \`{ id, properties }\`; you set/read named properties.
 
@@ -131,7 +139,7 @@ HubSpot's object model is **uniform** — nearly every tool takes an \`objectTyp
     // model gets real mcp__hubspot__* tools. The module arg is resolved
     // RELATIVE TO bin/ at runtime → node_modules/@zibby/skills/dist/hubspot.js
     // in a published install (mirrors figma.js importing ../dist/<mod>.js).
-    // Forward HUBSPOT_ACCESS_TOKEN to the child so hubspotFetch can read it.
+    // No env to forward: hubspotFetch resolves the token via the backend.
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env = {};

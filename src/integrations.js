@@ -60,6 +60,12 @@ export const INTEGRATIONS = Object.freeze({
   // resolveIntegrationToken('figma') (long-lived PAT, no refresh). See
   // figma.js + handlers/figma.js.
   FIGMA:             'figma',
+  // HubSpot — OAuth 2.0 integration (authorization-code + refresh, NOT a
+  // paste-token). The hubspotSkill talks to the HubSpot REST API directly with
+  // an `Authorization: Bearer <token>` header (no MCP server), resolved via
+  // resolveIntegrationToken('hubspot') — the backend auto-refreshes the
+  // short-lived access token. See hubspot.js + backend handlers/hubspot.js.
+  HUBSPOT:           'hubspot',
   // OpenDesign — paste-token + base URL integration (same { token, baseUrl }
   // shape as plane). The opendesignSkill talks to the OpenDesign REST API
   // directly (Authorization: Bearer <token>; all paths under `${baseUrl}/api`),
@@ -131,6 +137,7 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   plane:  { id: 'plane',  name: 'Plane',  connectPath: '/integrations?provider=plane'  },
   linear: { id: 'linear', name: 'Linear', connectPath: '/integrations?provider=linear' },
   figma:  { id: 'figma',  name: 'Figma',  connectPath: '/integrations?provider=figma'  },
+  hubspot: { id: 'hubspot', name: 'HubSpot', connectPath: '/integrations?provider=hubspot' },
   open_design: { id: 'open_design', name: 'OpenDesign', connectPath: '/integrations?provider=open_design' },
   linkedin_personal: { id: 'linkedin_personal', name: 'LinkedIn (Personal)', connectPath: '/integrations?provider=linkedin_personal' },
   linkedin_business: { id: 'linkedin_business', name: 'LinkedIn (Business)', connectPath: '/integrations?provider=linkedin_business' },

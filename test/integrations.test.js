@@ -71,6 +71,11 @@ describe('INTEGRATIONS constant', () => {
         // comments and renders frames via the Figma REST API with a Bearer
         // token (auto-refreshed server-side); no MCP server.
         'figma',
+        // HubSpot — first-class OAuth 2.0 integration (authorization-code +
+        // refresh). See hubspot.js + handlers/hubspot.js. The skill reads/writes
+        // CRM objects via the HubSpot REST API with a Bearer token
+        // (auto-refreshed server-side); no MCP server.
+        'hubspot',
         // OpenDesign — paste-token + base URL integration (same { token,
         // baseUrl } shape as plane). OPTIONAL skill — opendesignSkill sets
         // NO requiresIntegration, so this id is not in any gating map.
