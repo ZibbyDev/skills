@@ -4,6 +4,23 @@ import { resolve, join, basename } from 'path';
 
 const DEFAULT_CHECKOUT_DIR = '.zibby/repos';
 
+/**
+ * Redact any VCS token (or the authenticated-URL userinfo) from a string before
+ * it is returned to the model. Covers the literal token values this skill
+ * embeds in clone URLs AND the generic `user:secret@host` / `x-access-token:...`
+ * / `oauth2:...` URL forms git echoes in its errors.
+ */
+function redactGitSecrets(msg) {
+  let out = String(msg == null ? '' : msg);
+  for (const tok of [process.env.GITHUB_TOKEN, process.env.GITLAB_TOKEN]) {
+    if (tok) out = out.split(tok).join('***');
+  }
+  return out
+    .replace(/x-access-token:[^@\s]*@/g, 'x-access-token:***@')
+    .replace(/oauth2:[^@\s]*@/g, 'oauth2:***@')
+    .replace(/https?:\/\/[^/@\s:]+:[^@\s]+@/g, (m) => m.replace(/:[^@\s]+@/, ':***@'));
+}
+
 function exec(cmd, cwd, env = {}) {
   return new Promise((res, reject) => {
     const proc = spawn(cmd, {
@@ -56,7 +73,10 @@ When a test ticket lacks context, use this workflow:
         default: return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
     } catch (e) {
-      return JSON.stringify({ error: e.message });
+      // git_checkout embeds the VCS token in the clone URL; git/exec errors can
+      // echo that URL back. Redact any token value + the URL userinfo so the
+      // model never sees a live credential in an error message.
+      return JSON.stringify({ error: redactGitSecrets(e.message) });
     }
   },
 

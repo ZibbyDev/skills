@@ -439,6 +439,15 @@ When user asks to move/transition ticket status:
       if (process.env[key]) env[key] = process.env[key];
     }
     if (process.env.ATLASSIAN_INSTANCE_URL) env.ATLASSIAN_INSTANCE_URL = process.env.ATLASSIAN_INSTANCE_URL;
+    // Basic-auth (paste-token / self-host) Jira: the run env carries
+    // JIRA_API_TOKEN / JIRA_EMAIL / JIRA_BASE_URL (workflow-executor injects them
+    // when metadata.authType==='token'). Forward them into the MCP child's OWN
+    // env HERE so the server is self-sufficient — the Claude Agent SDK's Bash
+    // tool env is sanitized of JIRA_API_TOKEN (a hostile-input exfil guard), so
+    // the child must receive it explicitly rather than by inheritance.
+    for (const key of ['JIRA_API_TOKEN', 'JIRA_EMAIL', 'JIRA_BASE_URL']) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
     return { command: 'node', args: [bin], env, description: this.description };
   },
 

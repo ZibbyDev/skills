@@ -553,9 +553,9 @@ When user just wants to "look at" or "read" files (not clone):
             });
           }
           
+          // Clone using token for auth (suppress git output to avoid mixing with spinner)
+          const repoUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
           try {
-            // Clone using token for auth (suppress git output to avoid mixing with spinner)
-            const repoUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
             execSync(`git clone ${repoUrl} "${destPath}"`, { stdio: 'pipe' }); // Changed from 'inherit' to 'pipe'
             
             // List contents (cross-platform)
@@ -578,7 +578,13 @@ When user just wants to "look at" or "read" files (not clone):
               instructions: 'IMPORTANT: Show the contents field to the user - it contains the directory listing.',
             });
           } catch (err) {
-            return JSON.stringify({ error: `Clone failed: ${err.message}` });
+            // NEVER echo the token-embedded remote URL back: execSync's error
+            // (and git's stderr) include the full `git clone <repoUrl>` command,
+            // which carries `x-access-token:<token>@github.com`. Redact the token
+            // (and the whole authenticated URL) before returning to the model.
+            const raw = String(err.message || err);
+            const safe = raw.split(token).join('***').replace(/x-access-token:[^@]*@/g, 'x-access-token:***@');
+            return JSON.stringify({ error: `Clone failed: ${safe}` });
           }
         }
 

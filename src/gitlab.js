@@ -277,8 +277,13 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
               contents: contents.split('\n').slice(0, 30).join('\n'),
             });
           } catch (err) {
-            // Never leak the token in an error string.
-            const safe = String(err.message || err).split(token).join('***');
+            // Never leak the token in an error string: git's stderr / execSync's
+            // error echo the full `git clone <repoUrl>` command, which carries
+            // `oauth2:<token>@host`. Redact the literal token AND the whole
+            // authenticated URL userinfo (defense in depth).
+            const safe = String(err.message || err)
+              .split(token).join('***')
+              .replace(/oauth2:[^@]*@/g, 'oauth2:***@');
             return JSON.stringify({ error: `Clone failed: ${safe}` });
           }
         }
