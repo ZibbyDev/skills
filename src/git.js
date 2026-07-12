@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, join, basename } from 'path';
 
@@ -19,6 +19,39 @@ function redactGitSecrets(msg) {
     .replace(/x-access-token:[^@\s]*@/g, 'x-access-token:***@')
     .replace(/oauth2:[^@\s]*@/g, 'oauth2:***@')
     .replace(/https?:\/\/[^/@\s:]+:[^@\s]+@/g, (m) => m.replace(/:[^@\s]+@/, ':***@'));
+}
+
+/**
+ * SECURITY (CLAUDE.md §5) — strip the auth token from a freshly-cloned repo's
+ * on-disk git state. A `git clone https://x-access-token:<tok>@host/...` bakes
+ * that authenticated URL into `<dest>/.git/config`; a Fargate agent then reads
+ * UNTRUSTED PR/issue content with a Bash tool and could `cat .git/config` /
+ * `git remote -v` to exfiltrate the tenant token (the shell ENV is scrubbed but
+ * the repo config was not). This rewrites `origin` to the TOKENLESS `cleanUrl`
+ * so the repo the model works in holds no secret. Push is unaffected:
+ * deterministic workflow nodes re-inject the token transiently right before
+ * `git push`, and the model is instructed never to push from Bash.
+ *
+ * `execSyncFn` is injected so this works from the execSync-based clone tools
+ * (github_clone / gitlab_clone). The set-url command uses only the tokenless
+ * URL, so a failure message carries no secret — but we still mask `token`
+ * defensively and never throw (a scrub failure must not break a good clone; it
+ * is logged so a regression is visible).
+ *
+ * @param {(cmd:string, opts?:object)=>any} execSyncFn
+ * @param {string} destPath  the cloned repo directory
+ * @param {string} cleanUrl  the tokenless remote URL to set on origin
+ * @param {string} [token]   the secret, masked out of any error log
+ * @param {string} [label]   caller name for the log line
+ */
+export function scrubClonedRemoteSync(execSyncFn, destPath, cleanUrl, token, label = 'clone') {
+  try {
+    execSyncFn(`git -C "${destPath}" remote set-url origin "${cleanUrl}"`, { stdio: 'pipe' });
+  } catch (err) {
+    let m = String(err?.message || err);
+    if (token) m = m.split(token).join('***');
+    console.error(`[${label}] WARNING: failed to strip token from .git/config: ${m}`);
+  }
 }
 
 function exec(cmd, cwd, env = {}) {
@@ -147,9 +180,14 @@ async function handleCheckout(args, cwd) {
   }
 
   if (existsSync(join(repoPath, '.git'))) {
+    // The repo was cloned by a PRIOR call, which stripped the token from
+    // .git/config (origin is tokenless — see scrubClonedRemoteSync). So the
+    // network fetch/pull must authenticate via the `authUrl` passed as a
+    // command ARGUMENT (transient — git does NOT persist a URL given to
+    // fetch/pull), never off `origin`. For a public repo authUrl === url.
     const pullCmd = branch
-      ? `git -C "${repoPath}" fetch origin ${branch} && git -C "${repoPath}" checkout ${branch} && git -C "${repoPath}" pull origin ${branch}`
-      : `git -C "${repoPath}" pull`;
+      ? `git -C "${repoPath}" fetch "${authUrl}" ${branch} && git -C "${repoPath}" checkout ${branch} && git -C "${repoPath}" merge --ff-only FETCH_HEAD`
+      : `git -C "${repoPath}" pull "${authUrl}"`;
     await exec(pullCmd, cwd);
     const head = await exec(`git -C "${repoPath}" log -1 --format="%h %s"`, cwd);
     return JSON.stringify({
@@ -167,6 +205,12 @@ async function handleCheckout(args, cwd) {
   cloneArgs.push(`"${authUrl}"`, `"${repoPath}"`);
 
   await exec(cloneArgs.join(' '), cwd);
+
+  // SECURITY (§5): strip the token the clone baked into .git/config. `url` is
+  // the tokenless form (authUrl injected the secret only for the clone); for a
+  // public repo authUrl === url so this is a harmless no-op re-set.
+  scrubClonedRemoteSync(execSync, repoPath, url, ghToken || glToken, 'git_checkout');
+
   const head = await exec(`git -C "${repoPath}" log -1 --format="%h %s"`, cwd);
 
   return JSON.stringify({

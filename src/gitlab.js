@@ -56,6 +56,7 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
+import { scrubClonedRemoteSync } from './git.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -269,6 +270,12 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
               stdio: 'pipe',
               env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
             });
+            // SECURITY (§5): strip `oauth2:<token>@host` the clone baked into
+            // .git/config so the untrusted-input agent can't `cat .git/config`
+            // to exfiltrate the GitLab token. Deterministic push nodes re-inject
+            // transiently at push time. See scrubClonedRemoteSync.
+            const cleanUrl = `${scheme}://${host}/${path}.git`;
+            scrubClonedRemoteSync(execSync, destPath, cleanUrl, token, 'gitlab_clone');
             const contents = execSync(`ls -la "${destPath}"`, { encoding: 'utf-8' });
             return JSON.stringify({
               success: true,

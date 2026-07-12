@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { scrubClonedRemoteSync } from './git.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -557,7 +558,19 @@ When user just wants to "look at" or "read" files (not clone):
           const repoUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
           try {
             execSync(`git clone ${repoUrl} "${destPath}"`, { stdio: 'pipe' }); // Changed from 'inherit' to 'pipe'
-            
+
+            // SECURITY (CLAUDE.md §5): the clone baked `x-access-token:<token>@github.com`
+            // into `${destPath}/.git/config`. A Fargate agent then reads UNTRUSTED
+            // PR/issue content with a Bash tool — a malicious payload could
+            // `cat .git/config` / `git remote -v` and exfiltrate the tenant's
+            // GitHub token even though the shell ENV was scrubbed. Rewrite origin
+            // to the TOKENLESS URL immediately so the on-disk git state carries no
+            // secret. Push still works: deterministic workflow nodes re-inject the
+            // token transiently (`git remote set-url origin <authed>` right before
+            // `git push`); the model is told never to push from Bash.
+            const cleanUrl = `https://github.com/${owner}/${repo}.git`;
+            scrubClonedRemoteSync(execSync, destPath, cleanUrl, token, 'github_clone');
+
             // List contents (cross-platform)
             const isWindows = platform() === 'win32';
             let contents;
