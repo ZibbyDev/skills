@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { codeScanSkill, SCANNERS, parseOxlint } from '../src/code-scan.js';
+import { codeScanSkill, SCANNERS, parseOxlint, parseSemgrep, buildSemgrepTargets } from '../src/code-scan.js';
 
 // code-scan is the AGENT-DRIVEN, stack-smart deterministic linter skill. It
 // auto-detects the repo stack via the SCANNERS registry and runs the matching
@@ -43,8 +43,8 @@ describe('code-scan skill — shape + registry', () => {
   });
 
   it('the SCANNERS registry is the single extension point (one entry per tool)', () => {
-    // oxlint (baked), ruff + staticcheck (scaffold). Adding a tool = one entry.
-    expect(SCANNERS.map((s) => s.id)).toEqual(['oxlint', 'ruff', 'staticcheck']);
+    // oxlint + semgrep (wired), ruff + staticcheck (scaffold). Adding a tool = one entry.
+    expect(SCANNERS.map((s) => s.id)).toEqual(['oxlint', 'semgrep', 'ruff', 'staticcheck']);
     for (const s of SCANNERS) {
       expect(typeof s.detect).toBe('function');
       expect(Array.isArray(s.langs)).toBe(true);
@@ -160,5 +160,130 @@ describe('parseOxlint — real `oxlint --format json` shape', () => {
     expect(parseOxlint('')).toEqual([]);
     expect(parseOxlint('not json')).toEqual([]);
     expect(parseOxlint(JSON.stringify({ diagnostics: [] }))).toEqual([]);
+  });
+});
+
+// ── Semgrep (multi-language, OSS engine) ────────────────────────────────────────
+// A fake `semgrep-core` that prints the EXACT bytes real semgrep-core 1.169.0 emits
+// for `-json`: progress DOTS (".\n") then the JSON object. This is a trimmed capture
+// of a REAL run (Java + Python fixtures) — enough to exercise detection + parsing
+// without the ~250MB engine. The real engine + curated rules were verified manually
+// (see the commit notes); the founder runs the actual binary vendoring.
+const REAL_SEMGREP_JSON = JSON.stringify({
+  version: '1.169.0',
+  results: [
+    {
+      check_id: 'zibby-java-command-injection', path: 'src/Bad.java',
+      start: { line: 3, col: 5, offset: 53 }, end: { line: 3, col: 33, offset: 81 },
+      extra: { metavars: {}, engine_kind: 'OSS', is_ignored: false, message: 'Command execution (Runtime.exec / ProcessBuilder) — command injection risk.', validation_state: 'NO_VALIDATOR' },
+    },
+    {
+      check_id: 'zibby-python-subprocess-shell', path: 'src/bad.py',
+      start: { line: 2, col: 1, offset: 10 }, end: { line: 2, col: 34, offset: 43 },
+      extra: { metavars: {}, engine_kind: 'OSS', is_ignored: false, message: 'subprocess call with shell=True — command injection risk.', validation_state: 'NO_VALIDATOR' },
+    },
+  ],
+  errors: [], paths: { scanned: ['src/Bad.java', 'src/bad.py'] },
+});
+const FAKE_SEMGREP_CORE = `#!/bin/sh
+printf '.\\n.\\n.\\n'
+cat <<'JSON'
+${REAL_SEMGREP_JSON}
+JSON
+`;
+
+describe('parseSemgrep — real `semgrep-core -json` shape (leading progress dots)', () => {
+  it('skips the leading dots and extracts file / line / rule / message', () => {
+    const findings = parseSemgrep(`.\n.\n${REAL_SEMGREP_JSON}`);
+    expect(findings).toHaveLength(2);
+    // severity is recovered from OUR curated rule by check_id (semgrep-core omits it
+    // per-result); the java command-injection rule is ERROR.
+    expect(findings[0]).toEqual({
+      file: 'src/Bad.java', line: 3, severity: 'error',
+      rule: 'zibby-java-command-injection',
+      message: 'Command execution (Runtime.exec / ProcessBuilder) — command injection risk.',
+    });
+    expect(findings[1].file).toBe('src/bad.py');
+    expect(findings[1].rule).toBe('zibby-python-subprocess-shell');
+  });
+
+  it('maps an explicit extra.severity (ERROR→error), defaults to warning otherwise', () => {
+    const withSev = parseSemgrep(JSON.stringify({
+      results: [{ check_id: 'r', path: 'a.go', start: { line: 1 }, extra: { severity: 'ERROR', message: 'x' } }],
+    }));
+    expect(withSev[0].severity).toBe('error');
+    const noSev = parseSemgrep(JSON.stringify({ results: [{ check_id: 'r', path: 'a.go', start: { line: 1 }, extra: { message: 'x' } }] }));
+    expect(noSev[0].severity).toBe('warning');
+  });
+
+  it('returns [] on empty / unparseable / no-object output (best-effort)', () => {
+    expect(parseSemgrep('')).toEqual([]);
+    expect(parseSemgrep('.\n.\n')).toEqual([]); // dots but no JSON
+    expect(parseSemgrep('not json')).toEqual([]);
+    expect(parseSemgrep(JSON.stringify({ results: [] }))).toEqual([]);
+  });
+});
+
+describe('buildSemgrepTargets — semgrep-core -targets ATD wire format', () => {
+  it('emits ["Targets",[["CodeTarget",{path,analyzer,products}]]] per mapped file, JS/TS excluded', () => {
+    const doc = buildSemgrepTargets(['src/Bad.java', 'app/svc.go', 'x/y.rb', 'ui/a.tsx', 'i.js']);
+    expect(doc[0]).toBe('Targets');
+    // .tsx/.js are NOT semgrep languages here (oxlint owns them) → dropped.
+    expect(doc[1]).toHaveLength(3);
+    const [cons, target] = doc[1][0];
+    expect(cons).toBe('CodeTarget');
+    expect(target).toEqual({
+      path: { fpath: 'src/Bad.java', ppath: '/src/Bad.java' },
+      analyzer: 'java', products: ['sast'],
+    });
+    expect(doc[1].map((t) => t[1].analyzer)).toEqual(['java', 'go', 'ruby']);
+  });
+
+  it('is defensive: non-array / garbage input yields an empty target list', () => {
+    expect(buildSemgrepTargets(undefined)).toEqual(['Targets', []]);
+    expect(buildSemgrepTargets(['', 42, null, 'no-ext'])).toEqual(['Targets', []]);
+  });
+});
+
+describe('scan_code — semgrep detection + run + parse (fake semgrep-core)', () => {
+  let sgrepo;
+  beforeEach(() => {
+    sgrepo = mkdtempSync(join(tmpdir(), 'zibby-sg-'));
+    mkdirSync(join(sgrepo, 'src'), { recursive: true });
+    writeFileSync(join(sgrepo, 'src', 'Bad.java'), 'public class Bad {}\n', 'utf8');
+    writeFileSync(join(sgrepo, 'src', 'bad.py'), 'import os\n', 'utf8');
+    writeFileSync(join(sgrepo, 'README.md'), '# docs\n', 'utf8'); // not a semgrep language
+  });
+  afterEach(() => { rmSync(sgrepo, { recursive: true, force: true }); delete process.env.SEMGREP_CORE_BIN; });
+
+  it('detects a Java/Python repo, runs semgrep, returns parsed multi-language findings', async () => {
+    process.env.SEMGREP_CORE_BIN = writeFakeBin(sgrepo, 'fake-semgrep-core.sh', FAKE_SEMGREP_CORE);
+    const out = JSON.parse(await codeScanSkill.handleToolCall('scan_code', { dir: sgrepo }));
+    expect(out.ok).toBe(true);
+    const sg = out.scanners.find((s) => s.scanner === 'semgrep');
+    expect(sg).toBeTruthy();
+    expect(sg.filesScanned).toBe(2); // Bad.java + bad.py; README.md filtered by langs
+    expect(sg.findings).toHaveLength(2);
+    expect(sg.findings[0].rule).toBe('zibby-java-command-injection');
+    // oxlint is NOT detected (no package.json) → semgrep is the only scanner here.
+    expect(out.scanners.map((s) => s.scanner)).toEqual(['semgrep']);
+  });
+
+  it('scopes an explicit `files` list to semgrep languages (drops non-source files)', async () => {
+    process.env.SEMGREP_CORE_BIN = writeFakeBin(sgrepo, 'fake-semgrep-core.sh', FAKE_SEMGREP_CORE);
+    const out = JSON.parse(await codeScanSkill.handleToolCall('scan_code', {
+      dir: sgrepo, files: ['src/Bad.java', 'README.md'],
+    }));
+    const sg = out.scanners.find((s) => s.scanner === 'semgrep');
+    expect(sg.filesScanned).toBe(1); // README.md dropped
+  });
+
+  it('gracefully SKIPS semgrep when the engine binary is missing (ENOENT), never throws', async () => {
+    process.env.SEMGREP_CORE_BIN = join(sgrepo, 'no-such-semgrep-core');
+    const out = JSON.parse(await codeScanSkill.handleToolCall('scan_code', { dir: sgrepo }));
+    expect(out.ok).toBe(true);
+    const sg = out.scanners.find((s) => s.scanner === 'semgrep');
+    expect(sg.skipped).toMatch(/binary not installed/);
+    expect(sg.findings).toBeUndefined();
   });
 });

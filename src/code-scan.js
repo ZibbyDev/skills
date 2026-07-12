@@ -26,15 +26,21 @@
  * no changes to scan_code itself. scan_code runs EVERY scanner whose detect(dir)
  * is true, scoped to files matching its `langs`, and merges the results.
  *
- * ONLY oxlint IS WIRED + VERIFIED TODAY (via @zibby/bin-oxlint — Zibby's
- * self-vendored, sha-pinned oxlint that's an npm DEP of @zibby/skills, so it
- * installs with the skill — no image bake, no upstream-npm binary trust; see
- * resolveOxlintBin). ruff (Python) + staticcheck (Go) are
- * SCAFFOLD entries (registry + parser present, clearly marked TODO) whose
- * binaries are NOT yet in the image — they simply skip with a "binary not
- * installed" note until baked. Best-effort throughout: a missing binary (spawn
- * ENOENT), an unreadable file, or a parser hiccup NEVER throws — the scanner is
- * skipped with a note and the others still run.
+ * TWO scanners are WIRED + VERIFIED TODAY, both self-vendored (no image bake, no
+ * upstream-npm binary trust):
+ *   - oxlint (JS/TS) via @zibby/bin-oxlint — a single static binary; see
+ *     resolveOxlintBin.
+ *   - semgrep (Java, Python, Go, Ruby, PHP) via @zibby/bin-semgrep — the OSS
+ *     Semgrep engine `semgrep-core` (LGPL-2.1), spawned DIRECTLY (no Python, no
+ *     `semgrep` CLI, no network, no telemetry, no registry) with a VENDORED curated
+ *     ruleset + a generated local targets file; see resolveSemgrepBin. It scans ALL
+ *     its languages in ONE invocation via a `-targets` file. JS/TS is intentionally
+ *     left to oxlint (semgrep EXCLUDES it) to avoid double-scanning.
+ * ruff (Python) + staticcheck (Go) remain SCAFFOLD entries (registry + parser
+ * present, clearly marked TODO) — semgrep now covers Python/Go for BREADTH; ruff/
+ * staticcheck can still be wired later for DEPTH. Best-effort throughout: a missing
+ * binary (spawn ENOENT), an unreadable file, or a parser hiccup NEVER throws — the
+ * scanner is skipped with a note and the others still run.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -44,6 +50,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { SKILL_META } from '@zibby/skill-ids';
 import { binPath as oxlintBinPath } from '@zibby/bin-oxlint';
+import { binPath as semgrepBinPath } from '@zibby/bin-semgrep';
 
 /**
  * Resolve the oxlint binary. Preference:
@@ -69,6 +76,29 @@ function resolveOxlintBin() {
     if (p && existsSync(p)) return p;
   } catch { /* not resolvable → PATH fallback */ }
   return 'oxlint';
+}
+
+/**
+ * Resolve the Semgrep OSS engine binary (`semgrep-core`). SAME rationale as
+ * resolveOxlintBin:
+ *   1. SEMGREP_CORE_BIN env (explicit override / a baked binary if one exists).
+ *   2. @zibby/bin-semgrep — Zibby's SELF-VENDORED, sha-pinned OSS `semgrep-core`
+ *      (LGPL-2.1), a DEP of @zibby/skills. Its host-matched platform package
+ *      (@zibby/bin-semgrep-<os>-<cpu>, os/cpu-gated optionalDependency) carries the
+ *      engine binary + its sibling `libs/` (the binary rpaths to it). Fetched from
+ *      Semgrep's OFFICIAL PyPI wheel ONCE at Zibby's publish time, sha256-verified,
+ *      vendored in. So after the run container's `npm install`, semgrep-core is in
+ *      node_modules with NO upstream binary trust and NO run-time fetch. binPath()
+ *      returns null on an unsupported platform → fall through to PATH.
+ *   3. `semgrep-core` on PATH (last resort).
+ */
+function resolveSemgrepBin() {
+  if (process.env.SEMGREP_CORE_BIN) return process.env.SEMGREP_CORE_BIN;
+  try {
+    const p = semgrepBinPath();
+    if (p && existsSync(p)) return p;
+  } catch { /* not resolvable → PATH fallback */ }
+  return 'semgrep-core';
 }
 
 /**
@@ -131,6 +161,207 @@ function curatedOxlintConfigPath() {
     _curatedCfgPath = p;
     return p;
   } catch { return null; }
+}
+
+// ── Semgrep (OSS engine, multi-language) ────────────────────────────────────────
+//
+// File-extension → Semgrep analyzer (the `-lang` / targets `analyzer` string). JS/TS
+// is DELIBERATELY absent — oxlint owns it; semgrep here covers the languages oxlint
+// can't. Add a language by adding its extension→analyzer here AND a rule for it in
+// CURATED_SEMGREP_RULES (a language with no rule just parses to nothing).
+const SEMGREP_LANG_BY_EXT = {
+  '.java': 'java',
+  '.py': 'python',
+  '.go': 'go',
+  '.rb': 'ruby',
+  '.php': 'php',
+};
+const SEMGREP_EXTS = Object.keys(SEMGREP_LANG_BY_EXT);
+
+// Zibby's curated OSS Semgrep ruleset — HIGH-SIGNAL security/correctness patterns,
+// applied ONLY when the repo has no semgrep config of its own. Small on purpose (a
+// FLOOR, not a full policy): the reviewer covers judgment. Every rule here was
+// validated against a real fixture with the pinned semgrep-core (2026-07-12) and
+// fires with ZERO load errors — a single malformed rule makes semgrep-core reject
+// the whole file, so DO NOT add a rule without validating it against the engine.
+// These are Zibby-authored open rules; they use ONLY the OSS engine (engine_kind
+// "OSS") — never Pro / Registry / proprietary rules. semgrep-core accepts JSON as a
+// rules file (YAML/JSON/Jsonnet), so we keep it as a JS object and write JSON.
+const CURATED_SEMGREP_RULES = {
+  rules: [
+    {
+      id: 'zibby-java-command-injection',
+      languages: ['java'],
+      severity: 'ERROR',
+      message: 'Command execution (Runtime.exec / ProcessBuilder) — command injection risk if the argument is attacker-influenced. Validate/allow-list the input or avoid a shell.',
+      patterns: [{ 'pattern-either': [{ pattern: 'Runtime.getRuntime().exec(...)' }, { pattern: 'new ProcessBuilder(...)' }] }],
+    },
+    {
+      id: 'zibby-python-subprocess-shell',
+      languages: ['python'],
+      severity: 'ERROR',
+      message: 'subprocess call with shell=True — command injection risk. Pass an argv list and shell=False.',
+      pattern: 'subprocess.$F(..., shell=True, ...)',
+    },
+    {
+      id: 'zibby-python-yaml-load',
+      languages: ['python'],
+      severity: 'WARNING',
+      message: 'yaml.load without a safe loader can instantiate arbitrary Python objects. Use yaml.safe_load.',
+      pattern: 'yaml.load(...)',
+    },
+    {
+      id: 'zibby-go-command-injection',
+      languages: ['go'],
+      severity: 'WARNING',
+      message: 'os/exec with a non-constant command — verify the value is not attacker-controlled (command injection).',
+      pattern: 'exec.Command($CMD, ...)',
+    },
+    {
+      id: 'zibby-ruby-command-injection',
+      languages: ['ruby'],
+      severity: 'ERROR',
+      message: 'Shell/eval execution (system / eval) — command injection risk if the argument is attacker-influenced.',
+      patterns: [{ 'pattern-either': [{ pattern: 'system(...)' }, { pattern: 'eval(...)' }] }],
+    },
+    {
+      id: 'zibby-php-command-injection',
+      languages: ['php'],
+      severity: 'ERROR',
+      message: 'Shell/eval execution (system / exec / shell_exec) — command injection risk if the argument is attacker-influenced.',
+      patterns: [{ 'pattern-either': [{ pattern: 'system(...);' }, { pattern: 'exec(...);' }, { pattern: 'shell_exec(...);' }] }],
+    },
+  ],
+};
+// A repo's OWN semgrep rules FILE → respect it (use it as -rules instead of ours).
+// NOTE: semgrep-core does NOT auto-discover config (that's the Python CLI) and we
+// NEVER fetch from the registry, so we only honor a self-contained LOCAL rules file;
+// if the repo's config references registry packs (`p/...`) semgrep-core will error
+// and we fail-soft to empty. Deterministic + offline is the hard requirement.
+const SEMGREP_OWN_CONFIG_FILES = ['.semgrep.yml', '.semgrep.yaml', 'semgrep.yml', 'semgrep.yaml'];
+
+let _curatedSemgrepPath = null;
+/** Write the curated semgrep rules to a temp JSON file ONCE; return its path (or null). */
+function curatedSemgrepRulesPath() {
+  if (_curatedSemgrepPath && existsSync(_curatedSemgrepPath)) return _curatedSemgrepPath;
+  try {
+    const dir = join(tmpdir(), 'zibby-code-scan');
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, 'semgrep.curated.rules.json');
+    writeFileSync(p, JSON.stringify(CURATED_SEMGREP_RULES), 'utf-8');
+    _curatedSemgrepPath = p;
+    return p;
+  } catch { return null; }
+}
+
+/** Resolve which -rules file to use: the repo's own local rules if present, else curated. */
+function semgrepRulesPath(baseDir) {
+  const own = SEMGREP_OWN_CONFIG_FILES.map((f) => join(baseDir, f)).find((p) => existsSync(p));
+  return own || curatedSemgrepRulesPath();
+}
+
+/**
+ * Build the semgrep-core `-targets` document for a set of RELATIVE file paths. This
+ * is the internal ATD wire format semgrep-core expects (verified against the pinned
+ * engine): a top-level variant ["Targets", [ ["CodeTarget", { path:{fpath,ppath},
+ * analyzer, products }], … ]]. One entry per file we can map to a language; files
+ * of other languages are dropped. EXPORTED for unit-testing the shape.
+ */
+export function buildSemgrepTargets(relFiles) {
+  const targets = [];
+  for (const f of (Array.isArray(relFiles) ? relFiles : [])) {
+    if (typeof f !== 'string' || !f) continue;
+    const lang = SEMGREP_LANG_BY_EXT[extname(f).toLowerCase()];
+    if (!lang) continue;
+    const p = f.replace(/\\/g, '/');
+    targets.push(['CodeTarget', { path: { fpath: p, ppath: `/${p.replace(/^\/+/, '')}` }, analyzer: lang, products: ['sast'] }]);
+  }
+  return ['Targets', targets];
+}
+
+let _semgrepTargetsSeq = 0;
+/** Write a -targets file for these relative files; return { path, count } (count = mapped targets). */
+function writeSemgrepTargetsFile(relFiles) {
+  const doc = buildSemgrepTargets(relFiles);
+  const count = doc[1].length;
+  const dir = join(tmpdir(), 'zibby-code-scan');
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, `semgrep.targets.${process.pid}.${_semgrepTargetsSeq++}.json`);
+  writeFileSync(p, JSON.stringify(doc), 'utf-8');
+  return { path: p, count };
+}
+
+/** Map a semgrep severity (ERROR/WARNING/INFO) to our lower-case scale; default 'warning'. */
+function semgrepSeverity(sev) {
+  const s = typeof sev === 'string' ? sev.toUpperCase() : '';
+  if (s === 'ERROR') return 'error';
+  if (s === 'INFO' || s === 'INVENTORY' || s === 'EXPERIMENT') return 'info';
+  return 'warning'; // WARNING (default)
+}
+
+// semgrep-core does NOT echo a rule's severity in each result, so recover it from
+// OUR curated rules by check_id. (A repo's own rules aren't known here → those fall
+// back to 'warning'; the rule message still conveys the risk.)
+const CURATED_SEMGREP_SEVERITY = Object.fromEntries(
+  CURATED_SEMGREP_RULES.rules.map((r) => [r.id, r.severity]),
+);
+/** Severity for a result: the engine's per-result severity if present, else our curated rule's, else 'warning'. */
+function resultSeverity(checkId, sev) {
+  if (sev) return semgrepSeverity(sev);
+  const curated = CURATED_SEMGREP_SEVERITY[checkId];
+  return curated ? semgrepSeverity(curated) : 'warning';
+}
+
+/**
+ * Parse `semgrep-core … -json` output into the SAME finding shape as parseOxlint
+ * ({ file, line, severity, rule, message }). The engine prints progress DOTS
+ * (".\n") before the JSON object, so we start at the first '{'. Shape (verified
+ * against semgrep-core 1.169.0): { results: [ { check_id, path, start:{line,col},
+ * end, extra:{ message, severity? } } ], errors, paths }. Best-effort: empty /
+ * unparseable → []. EXPORTED for direct unit-testing of the shape assumption.
+ */
+export function parseSemgrep(stdout) {
+  const text = String(stdout || '');
+  const at = text.indexOf('{');
+  if (at < 0) return [];
+  let doc;
+  try { doc = JSON.parse(text.slice(at)); } catch { return []; }
+  const results = doc && Array.isArray(doc.results) ? doc.results : [];
+  return results
+    .map((r) => {
+      if (!r || typeof r !== 'object') return null;
+      const start = r.start && typeof r.start === 'object' ? r.start : {};
+      const extra = r.extra && typeof r.extra === 'object' ? r.extra : {};
+      return {
+        file: r.path || '',
+        line: Number.isFinite(start.line) ? start.line : '',
+        severity: resultSeverity(r.check_id, extra.severity),
+        rule: r.check_id || '',
+        message: (extra.message || '').trim(),
+      };
+    })
+    .filter((f) => f && (f.file || f.message));
+}
+
+/** Bounded early-exit check: does `dir` contain ANY file with one of `exts`? (scanner detect) */
+function repoHasAnyExt(dir, exts, cap = 4000) {
+  const extSet = new Set(exts.map((e) => e.toLowerCase()));
+  const stack = [dir];
+  let seen = 0;
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries;
+    try { entries = readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (++seen > cap) return false;
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) stack.push(join(cur, e.name));
+      } else if (e.isFile() && extSet.has(extname(e.name).toLowerCase())) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -247,6 +478,32 @@ export const SCANNERS = [
     parse: parseOxlint,
   },
   {
+    // Java / Python / Go / Ruby / PHP — semgrep OSS engine (LGPL-2.1, semgrep-core).
+    // Resolved from @zibby/bin-semgrep (Zibby's self-vendored, sha-pinned engine, a
+    // dep of @zibby/skills) via resolveSemgrepBin; SEMGREP_CORE_BIN overrides. No
+    // image bake. ONE invocation scans all detected languages via a generated
+    // -targets file. Spawned DIRECTLY (no Python/CLI/network/telemetry/registry) —
+    // deterministic + offline by construction. JS/TS intentionally excluded (oxlint).
+    id: 'semgrep',
+    // Multi-language: no single marker file — detect by the presence of any source
+    // file in one of semgrep's wired languages (bounded, early-exit walk).
+    detect: (dir) => repoHasAnyExt(dir, SEMGREP_EXTS),
+    langs: SEMGREP_EXTS,
+    bin: () => resolveSemgrepBin(),
+    // Use the repo's OWN local semgrep rules if present, else Zibby's curated set.
+    // Write a -targets file (one entry per changed file, tagged with its language)
+    // so a SINGLE spawn covers every language. No -metrics / no --config auto exist
+    // on semgrep-core, so there is nothing to phone home / fetch.
+    args: (files, ctx = {}) => {
+      const baseDir = ctx.baseDir || '.';
+      const rules = semgrepRulesPath(baseDir);
+      const { path: targetsFile } = writeSemgrepTargetsFile(files);
+      const ruleArgs = rules ? ['-rules', rules] : [];
+      return [...ruleArgs, '-targets', targetsFile, '-json'];
+    },
+    parse: parseSemgrep,
+  },
+  {
     // Python — ruff (MIT, astral-sh). SCAFFOLD ONLY — TODO: bake ruff into the
     // image (sha256-pinned) before relying on this; today it skips (ENOENT).
     id: 'ruff',
@@ -327,12 +584,12 @@ export const codeScanSkill = {
   meta: SKILL_META['code-scan'],
   allowedTools: ['mcp__code_scan__*'],
   description:
-    'Code scan — run the RIGHT deterministic linter for a checked-out repo (auto-detects the stack: JS/TS→oxlint, etc.) and return structured findings. Fully local; the code never leaves the box.',
+    'Code scan — run the RIGHT deterministic linter/analyzer for a checked-out repo (auto-detects the stack: JS/TS→oxlint; Java/Python/Go/Ruby/PHP→semgrep) and return structured findings. Fully local; the code never leaves the box.',
 
   promptFragment: `## Code Scan (deterministic linter, auto-detects the stack)
 After you've cloned the repo, call \`scan_code\` to get DETERMINISTIC linter
-findings for WHATEVER stack this repo is — it auto-detects (JS/TS→oxlint, more
-coming) and runs the matching tool. Pass \`files\` (the changed files, ideal for
+findings for WHATEVER stack this repo is — it auto-detects (JS/TS→oxlint;
+Java/Python/Go/Ruby/PHP→semgrep) and runs the matching tool. Pass \`files\` (the changed files, ideal for
 a review) or \`dir\` (a directory to scan). Findings are GROUND-TRUTH CANDIDATES:
 triage them for THIS change, verify each in context (false positives exist —
 trace before asserting), fold noise, and turn the real ones into inline
@@ -416,7 +673,7 @@ suggestions. Don't hand-lint what the tool already covers, and don't re-run it.`
     {
       name: 'scan_code',
       description: 'Run the right deterministic linter for a checked-out repo and return structured findings. '
-        + 'Auto-detects the stack (JS/TS via package.json → oxlint; more scanners coming) and runs each matching tool, '
+        + 'Auto-detects the stack (JS/TS → oxlint; Java/Python/Go/Ruby/PHP → semgrep OSS) and runs each matching tool, '
         + 'scoped to files in its languages. Pass `files` (e.g. the changed files of the PR — recommended for a review) '
         + 'OR `dir` (a directory to scan). Returns { scanners: [ { scanner, findings: [ { file, line, severity, rule, message } ] } ] }. '
         + 'Findings are CANDIDATES — verify each in context before asserting. Best-effort: a stack whose linter is not installed is skipped with a note.',
