@@ -39,6 +39,7 @@ import { socialCardSkill } from './socialCard.js';
 import { codeScanSkill } from './code-scan.js';
 import { triggerAgentSkill } from './triggerAgent.js';
 import { codebaseMemorySkill } from './codebaseMemory.js';
+import { gbrainSkill } from './gbrain.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
 import {
   openaiBillingSkill,
@@ -78,6 +79,7 @@ registerSkill(socialCardSkill);
 registerSkill(codeScanSkill);
 registerSkill(triggerAgentSkill);
 registerSkill(codebaseMemorySkill);
+registerSkill(gbrainSkill);
 registerSkill(workflowBuilderSkill);
 registerSkill(openaiBillingSkill);
 registerSkill(anthropicBillingSkill);
@@ -93,7 +95,7 @@ registerSkill({ ...slackSkill, id: 'slack_notify' });
 // identical shape, now the complete superset (drift gone).
 export { SKILL_IDS as SKILLS } from '@zibby/skill-ids';
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, chartRenderSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, chartRenderSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
