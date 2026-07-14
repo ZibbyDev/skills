@@ -1,0 +1,15 @@
+{
+  "name": "@zibby/sidecar-gbrain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Knowledge-base sidecar — embedded Postgres (PGlite) + pgvector behind a small, engine-agnostic REST contract the @zibby/skills gbrain skill calls.",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.4.6"
+  }
+}
