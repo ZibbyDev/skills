@@ -1,7 +1,7 @@
 /**
- * gbrain.js — tier-③ "connect to a sidecar over an env-injected URL" skill
- * (SCAFFOLD / STUB). Gives an agent an ingest / query / delete surface over a
- * per-tenant KNOWLEDGE-BASE brain (PGlite + pgvector) that runs as a SIDECAR,
+ * gbrain.js — tier-③ "connect to a sidecar over an env-injected URL" skill.
+ * Gives an agent an ingest / query / delete surface over a per-tenant
+ * KNOWLEDGE-BASE brain (Postgres/PGlite + pgvector) that runs as a SIDECAR,
  * reached at GBRAIN_MCP_URL.
  *
  * The brain is persisted as a Stores-v2 store whose TYPE is the real engine —
@@ -11,33 +11,33 @@
  * ever swapped (Supabase / self-managed Postgres / another pgvector KB). See
  * the knowledge-base template's ingest node for the store DEF.
  *
- * WHY THIS SHAPE (and the honest dogfood finding)
- * ───────────────────────────────────────────────
+ * WHY THIS SHAPE
+ * ─────────────────────────────────────────────────
  * The engine's MCP client (@zibby/core/mcp-client.js) speaks ONLY the stdio
- * transport — it has no built-in streamable-HTTP / SSE MCP client. So the
- * codebase's actual tier-③ "sidecar via env URL" pattern is NOT "the engine
- * dials an HTTP MCP server"; it is a LOCAL stdio MCP proxy that itself dials the
- * sidecar. `browser` does exactly this: it resolves to a local stdio MCP binary
- * that connects to a remote browser over CDP (BROWSER_WS_ENDPOINT). GBrain
- * mirrors that: a hand-written skill (kvMemory.js shape — `tools[]` +
- * `handleToolCall` + a `resolve()` that spawns the GENERIC bin/mcp-skill.mjs
- * stdio server pointing back at THIS module), whose tool handlers proxy each
- * call to the sidecar over HTTP at GBRAIN_MCP_URL.
+ * transport — no built-in streamable-HTTP / SSE client. So the tier-③ "sidecar
+ * via env URL" pattern is NOT "the engine dials an HTTP MCP server"; it is a
+ * LOCAL stdio MCP proxy that itself dials the sidecar. `browser` does this
+ * (stdio bin → remote browser over CDP / BROWSER_WS_ENDPOINT). GBrain mirrors
+ * it: a hand-written skill (kvMemory.js shape — `tools[]` + `handleToolCall` +
+ * a `resolve()` that spawns the GENERIC bin/mcp-skill.mjs stdio server pointing
+ * back at THIS module), whose tool handlers proxy each call to the sidecar over
+ * HTTP at GBRAIN_MCP_URL.
  *
- * Reading env in resolve() to reach a sidecar (like browser reads
- * BROWSER_WS_ENDPOINT) is fully expressible on the public API. The one thing
- * that is NOT expressible today: pointing the engine DIRECTLY at a
- * streamable-HTTP MCP endpoint — that would need an engine transport change
- * (mcp-client.js is stdio-only). The stdio-proxy pattern here sidesteps that,
- * so this scaffold needs ZERO private-platform change.
+ * SIDECAR HTTP CONTRACT (stable; engine-agnostic — implemented by sidecars/gbrain)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *   POST  {GBRAIN_MCP_URL}/ingest  { kbId, docs:[{sourceId, markdown, deleted?}] }
+ *         → { ok, upserted, deleted, chunks }
+ *   POST  {GBRAIN_MCP_URL}/query   { kbId, query, topK }
+ *         → { ok, results:[{ sourceId, chunk, score }] }
+ *   POST  {GBRAIN_MCP_URL}/delete  { kbId, sourceIds:[...] }
+ *         → { ok, deleted }
+ *   GET   {GBRAIN_MCP_URL}/health  → { ok }
+ *   Auth: optional `Authorization: Bearer <PROJECT_API_TOKEN>` (the sidecar
+ *   normally runs on the run's private network and may not require it).
  *
- * STUB STATUS
- * ───────────
- * The three tools are wired end-to-end shape-wise but their bodies are STUBS:
- * when GBRAIN_MCP_URL is set they POST to the sidecar; when it is unset (the
- * scaffold default) they return a clear, structured "sidecar not wired
- * (scaffold)" result rather than throwing — so a run that declares SKILLS.GBRAIN
- * degrades gracefully instead of crashing.
+ * Keeping this a small REST contract (not GBrain's own API) is deliberate: the
+ * sidecar can be GBrain, a bare PGlite+pgvector server, or another engine — the
+ * skill never changes. This IS the "pluggable engine" property of the KB.
  *
  * TIER / GATING
  * ─────────────
@@ -49,9 +49,7 @@
  * BUILD NOTE
  * ──────────
  * No build-script entry is needed: the shared build (packages/scripts/build.mjs)
- * GLOB-collects every non-test src/*.js automatically — dropping this file in
- * src/ is sufficient. (The old CLAUDE.md "add a build.mjs entry" step predates
- * the glob-based builder.)
+ * GLOB-collects every non-test src/*.js — dropping this file in src/ suffices.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -59,6 +57,9 @@ import { homedir } from 'node:os';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SKILL_META } from '@zibby/skill-ids';
+
+const REQUEST_TIMEOUT_MS = 20_000;
+const MAX_RETRIES = 1; // one retry on a transient network/5xx error
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -72,10 +73,10 @@ function resolveSkillBin() {
   return existsSync(candidate) ? candidate : null;
 }
 
-/** The sidecar MCP base URL, env-injected by the runtime (like BROWSER_WS_ENDPOINT). */
-function gbrainUrl() {
+/** The sidecar base URL, env-injected by the runtime (like BROWSER_WS_ENDPOINT). */
+function gbrainBase() {
   const u = typeof process.env.GBRAIN_MCP_URL === 'string' ? process.env.GBRAIN_MCP_URL.trim() : '';
-  return u ? u.replace(/\/$/, '') : null;
+  return u ? u.replace(/\/+$/, '') : null;
 }
 
 /** The run's backend credential — same resolution order as kvMemory.js. */
@@ -103,41 +104,45 @@ function kbId() {
 }
 
 /**
- * STUB proxy to the sidecar. When GBRAIN_MCP_URL is unset (scaffold default),
- * returns a structured not-wired result instead of throwing. When set, POSTs
- * {op, ...} to the sidecar and returns its JSON. Never throws into the run.
+ * POST to a sidecar endpoint. Real client: bounded timeout (AbortController),
+ * one retry on a transient failure (network error or 5xx), Bearer auth when a
+ * token is present. Throws a clear Error on a hard failure; handleToolCall wraps
+ * it into a structured tool result (never crashes the run).
  */
-async function gbrainCall(op, payload) {
-  const base = gbrainUrl();
+async function gbrainPost(path, payload) {
+  const base = gbrainBase();
   if (!base) {
-    return {
-      ok: false,
-      wired: false,
-      op,
-      kbId: kbId(),
-      message: 'GBrain sidecar not wired (scaffold). Set GBRAIN_MCP_URL to a running '
-        + 'PGlite/pgvector knowledge-base sidecar to enable ingest/query/delete.',
-      echo: payload,
-    };
+    throw new Error(
+      'GBrain sidecar URL is not set (GBRAIN_MCP_URL). The knowledge-base sidecar '
+      + '(sidecars/gbrain) must be running and its URL injected into the run env.',
+    );
   }
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const session = getSessionToken();
-    if (session) headers.Authorization = `Bearer ${session}`;
-    const res = await fetch(`${base}/mcp`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ op, kbId: kbId(), ...payload }),
-    });
-    const text = await res.text().catch(() => '');
-    if (!res.ok) {
-      return { ok: false, wired: true, op, status: res.status, message: text.slice(0, 300) };
+  const url = `${base}${path}`;
+  const headers = { 'Content-Type': 'application/json' };
+  const session = getSessionToken();
+  if (session) headers.Authorization = `Bearer ${session}`;
+  const body = JSON.stringify({ kbId: kbId(), ...payload });
+
+  let lastErr;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal });
+      const text = await res.text().catch(() => '');
+      if (res.status >= 500 && attempt < MAX_RETRIES) { lastErr = new Error(`sidecar ${res.status}`); continue; }
+      if (!res.ok) throw new Error(`sidecar ${res.status}: ${text.slice(0, 300)}`);
+      try { return JSON.parse(text); }
+      catch { throw new Error(`sidecar returned non-JSON: ${text.slice(0, 200)}`); }
+    } catch (e) {
+      lastErr = e;
+      const transient = e?.name === 'AbortError' || e?.code === 'ECONNREFUSED' || /fetch failed|network/i.test(String(e?.message));
+      if (!(transient && attempt < MAX_RETRIES)) break;
+    } finally {
+      clearTimeout(timer);
     }
-    try { return { ok: true, wired: true, op, ...JSON.parse(text) }; }
-    catch { return { ok: true, wired: true, op, raw: text.slice(0, 1000) }; }
-  } catch (e) {
-    return { ok: false, wired: true, op, message: String(e?.message || e) };
   }
+  throw lastErr || new Error('GBrain sidecar request failed');
 }
 
 export const gbrainSkill = {
@@ -149,27 +154,23 @@ export const gbrainSkill = {
   // skill.meta.toggleable off this.
   meta: SKILL_META.gbrain,
   description:
-    'Knowledge base (GBrain) — ingest source documents into, query, and prune a per-tenant PGlite/pgvector brain via a sidecar (scaffold/stub)',
+    'Knowledge base (GBrain) — ingest source documents into, semantically query, and prune a per-tenant Postgres/pgvector brain via a sidecar',
 
   promptFragment: `## Knowledge Base (GBrain — per-tenant document brain)
-You have a per-tenant KNOWLEDGE BASE (a PGlite + pgvector "brain") reached over a
+You have a per-tenant KNOWLEDGE BASE (a Postgres + pgvector "brain") reached over a
 sidecar. Ingested documents are addressed by a STABLE \`sourceId\` so re-ingesting
 the same source UPSERTS (updates in place) rather than duplicating, and a source
 can be removed. Tools:
 - gbrain_ingest({ docs }): upsert an array of { sourceId, markdown, deleted? }.
   Pass deleted:true to remove a source that no longer exists upstream.
 - gbrain_query({ query, topK }): semantic search the brain; returns the topK most
-  relevant document chunks with their sourceId.
-- gbrain_delete({ sourceIds }): remove documents by their stable sourceId(s).
-NOTE (scaffold): if the sidecar is not wired (GBRAIN_MCP_URL unset) these tools
-return a clear "not wired" result — they do not fail the run.`,
+  relevant document chunks with their sourceId and relevance score.
+- gbrain_delete({ sourceIds }): remove documents by their stable sourceId(s).`,
 
   /**
    * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
-   * module's gbrainSkill export — same FIXED pattern as kvMemory. The module
-   * arg resolves relative to bin/ at runtime → ../dist/gbrain.js in a published
-   * install. Forwards the sidecar URL + backend auth env the spawned process
-   * needs (read GBRAIN_MCP_URL here, like browser reads BROWSER_WS_ENDPOINT).
+   * module's gbrainSkill export — same FIXED pattern as kvMemory. Forwards the
+   * sidecar URL + backend auth env the spawned process needs.
    */
   resolve() {
     const bin = resolveSkillBin();
@@ -200,18 +201,21 @@ return a clear "not wired" result — they do not fail the run.`,
         case 'gbrain_ingest': {
           const docs = Array.isArray(args?.docs) ? args.docs : null;
           if (!docs) return JSON.stringify({ error: 'docs is required (array of { sourceId, markdown, deleted? })' });
-          // Light shape validation — every doc needs a stable sourceId.
+          if (docs.length === 0) return JSON.stringify({ ok: true, upserted: 0, deleted: 0, chunks: 0, note: 'empty docs — nothing to ingest' });
           const bad = docs.find((d) => !d || typeof d.sourceId !== 'string' || !d.sourceId.trim());
           if (bad !== undefined) return JSON.stringify({ error: 'every doc requires a non-empty string sourceId' });
-          const data = await gbrainCall('ingest', { docs });
+          // A non-deleted doc must carry markdown to upsert.
+          const missingMd = docs.find((d) => d.deleted !== true && (typeof d.markdown !== 'string' || !d.markdown.length));
+          if (missingMd !== undefined) return JSON.stringify({ error: `doc "${missingMd.sourceId}" has no markdown (required unless deleted:true)` });
+          const data = await gbrainPost('/ingest', { docs });
           return JSON.stringify(data);
         }
 
         case 'gbrain_query': {
           const query = typeof args?.query === 'string' ? args.query.trim() : '';
           if (!query) return JSON.stringify({ error: 'query is required' });
-          const topK = Number.isInteger(args?.topK) ? args.topK : 8;
-          const data = await gbrainCall('query', { query, topK });
+          const topK = Number.isInteger(args?.topK) && args.topK > 0 ? Math.min(args.topK, 50) : 8;
+          const data = await gbrainPost('/query', { query, topK });
           return JSON.stringify(data);
         }
 
@@ -222,7 +226,7 @@ return a clear "not wired" result — they do not fail the run.`,
           if (!sourceIds || sourceIds.length === 0) {
             return JSON.stringify({ error: 'sourceIds is required (non-empty array of strings)' });
           }
-          const data = await gbrainCall('delete', { sourceIds });
+          const data = await gbrainPost('/delete', { sourceIds });
           return JSON.stringify(data);
         }
 
@@ -230,7 +234,7 @@ return a clear "not wired" result — they do not fail the run.`,
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
     } catch (e) {
-      return JSON.stringify({ error: e.message });
+      return JSON.stringify({ error: String(e?.message || e) });
     }
   },
 
@@ -260,12 +264,12 @@ return a clear "not wired" result — they do not fail the run.`,
     },
     {
       name: 'gbrain_query',
-      description: 'Semantic-search the knowledge base and return the most relevant document chunks (each with its sourceId).',
+      description: 'Semantic-search the knowledge base and return the most relevant document chunks (each with its sourceId and relevance score).',
       input_schema: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Natural-language query.' },
-          topK: { type: 'integer', description: 'How many chunks to return (default 8).' },
+          topK: { type: 'integer', description: 'How many chunks to return (default 8, max 50).' },
         },
         required: ['query'],
       },
