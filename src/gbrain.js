@@ -4,6 +4,13 @@
  * per-tenant KNOWLEDGE-BASE brain (PGlite + pgvector) that runs as a SIDECAR,
  * reached at GBRAIN_MCP_URL.
  *
+ * The brain is persisted as a Stores-v2 store whose TYPE is the real engine —
+ * `postgres` (PGlite = embedded Postgres 17.5 + pgvector), NOT `gbrain`. A
+ * product name never belongs in a store `type`; `gbrain` is only this SKILL.
+ * Naming the type after the engine keeps the contract stable if the engine is
+ * ever swapped (Supabase / self-managed Postgres / another pgvector KB). See
+ * the knowledge-base template's ingest node for the store DEF.
+ *
  * WHY THIS SHAPE (and the honest dogfood finding)
  * ───────────────────────────────────────────────
  * The engine's MCP client (@zibby/core/mcp-client.js) speaks ONLY the stdio
