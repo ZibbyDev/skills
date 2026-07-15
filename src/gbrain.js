@@ -1,55 +1,47 @@
 /**
- * gbrain.js — tier-③ "connect to a sidecar over an env-injected URL" skill.
- * Gives an agent an ingest / query / delete surface over a per-tenant
- * KNOWLEDGE-BASE brain (Postgres/PGlite + pgvector) that runs as a SIDECAR,
- * reached at GBRAIN_MCP_URL.
+ * gbrain.js — knowledge-base (KB) skill, brokered through the control-plane.
  *
- * The brain is persisted as a Stores-v2 store whose TYPE is the real engine —
- * `postgres` (PGlite = embedded Postgres 17.5 + pgvector), NOT `gbrain`. A
- * product name never belongs in a store `type`; `gbrain` is only this SKILL.
- * Naming the type after the engine keeps the contract stable if the engine is
- * ever swapped (Supabase / self-managed Postgres / another pgvector KB). See
- * the knowledge-base template's ingest node for the store DEF.
+ * WHAT IT IS
+ * ──────────
+ * Gives an agent an ingest / query / delete surface over a per-tenant KNOWLEDGE
+ * BASE (Postgres + pgvector). The brain is persisted as a Stores-v2 store whose
+ * TYPE is the engine protocol — `postgres` — NOT `gbrain` (a product name never
+ * belongs in a store `type`; `gbrain` is only THIS skill). Naming the type after
+ * the protocol keeps the contract stable if the engine is ever swapped.
  *
- * WHY THIS SHAPE
- * ─────────────────────────────────────────────────
- * The engine's MCP client (@zibby/core/mcp-client.js) speaks ONLY the stdio
- * transport — no built-in streamable-HTTP / SSE client. So the tier-③ "sidecar
- * via env URL" pattern is NOT "the engine dials an HTTP MCP server"; it is a
- * LOCAL stdio MCP proxy that itself dials the sidecar. `browser` does this
- * (stdio bin → remote browser over CDP / BROWSER_WS_ENDPOINT). GBrain mirrors
- * it: a hand-written skill (kvMemory.js shape — `tools[]` + `handleToolCall` +
- * a `resolve()` that spawns the GENERIC bin/mcp-skill.mjs stdio server pointing
- * back at THIS module), whose tool handlers proxy each call to the sidecar over
- * HTTP at GBRAIN_MCP_URL.
+ * ARCHITECTURE — brokered, NOT a direct sidecar dial (security)
+ * ─────────────────────────────────────────────────────────────
+ * The KB engine holds tenant data and is TOO heavy to bake into every run, so it
+ * runs as an on-demand SIDECAR. But run containers are network-isolated by design
+ * (they can reach ONLY the control-plane, never a datastore/sidecar). So this
+ * skill does NOT dial the sidecar directly. It behaves EXACTLY like the
+ * dataset-store skill: it hits the token-gated control-plane store API
  *
- * SIDECAR HTTP CONTRACT (stable; engine-agnostic — implemented by sidecars/gbrain)
+ *   POST {ZIBBY_ACCOUNT_API_URL}/datasets/stores/{storeId}/ingest {docs}
+ *   POST {ZIBBY_ACCOUNT_API_URL}/datasets/stores/{storeId}/query  {query, topK}
+ *   POST {ZIBBY_ACCOUNT_API_URL}/datasets/stores/{storeId}/delete {sourceIds}
+ *
+ * with the run's PROJECT_API_TOKEN (Bearer). The control-plane resolves +
+ * authorizes the tenant from the token, then (postgres-store.js) launches/reuses
+ * the sidecar on the ISOLATED infra network and proxies the call, deriving the
+ * sidecar's `kbId` SERVER-SIDE from (account, project, storeId). The agent never
+ * sees the sidecar URL or a kbId — the engine is never exposed to the run.
+ *
+ * STORES v2 — NAME-BASED RESOLUTION (the shared contract, same as dataset-store)
  * ─────────────────────────────────────────────────────────────────────────────
- *   POST  {GBRAIN_MCP_URL}/ingest  { kbId, docs:[{sourceId, markdown, deleted?}] }
- *         → { ok, upserted, deleted, chunks }
- *   POST  {GBRAIN_MCP_URL}/query   { kbId, query, topK }
- *         → { ok, results:[{ sourceId, chunk, score }] }
- *   POST  {GBRAIN_MCP_URL}/delete  { kbId, sourceIds:[...] }
- *         → { ok, deleted }
- *   GET   {GBRAIN_MCP_URL}/health  → { ok }
- *   Auth: optional `Authorization: Bearer <PROJECT_API_TOKEN>` (the sidecar
- *   normally runs on the run's private network and may not require it).
- *
- * Keeping this a small REST contract (not GBrain's own API) is deliberate: the
- * sidecar can be GBrain, a bare PGlite+pgvector server, or another engine — the
- * skill never changes. This IS the "pluggable engine" property of the KB.
+ * Stores are auto-provisioned at DEPLOY and resolved at runtime BY NAME via env:
+ *   - The run carries one `ZIBBY_STORE__<name> = <storeId>` per bound store.
+ *   - The agent reads the injected "AVAILABLE STORES" catalog (name + type +
+ *     description), picks one, and passes the chosen logical `store` NAME.
+ *   - That name→storeId env map is BOTH the allowlist AND the resolver.
+ * A knowledge-base agent typically has ONE postgres store bound, so `store` may
+ * be omitted and defaults to it.
  *
  * TIER / GATING
  * ─────────────
- * Tier ③ (heavy resident runtime → sidecar). Fully server-side, no user
- * connection → UNGATED (deliberately NOT in the backend REQUIRED/OPTIONAL
- * integration maps). No-connection TOGGLEABLE via SKILL_META['gbrain'] (see
- * @zibby/skill-ids). meta is set BY REFERENCE to that single source of truth.
- *
- * BUILD NOTE
- * ──────────
- * No build-script entry is needed: the shared build (packages/scripts/build.mjs)
- * GLOB-collects every non-test src/*.js — dropping this file in src/ suffices.
+ * Tier ③ (heavy resident runtime → sidecar), but the sidecar is brokered by the
+ * control-plane (above), not dialled by the run. Fully server-side, no user
+ * connection → UNGATED. No-connection TOGGLEABLE via SKILL_META['gbrain'].
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -58,13 +50,12 @@ import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SKILL_META } from '@zibby/skill-ids';
 
-const REQUEST_TIMEOUT_MS = 20_000;
+const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 1; // one retry on a transient network/5xx error
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
- * kvMemory.js resolveSkillBin(): derive from import.meta.url so it works in src/
- * (dev), dist/ (bundled), and node_modules/@zibby/skills/ (published).
+ * kvMemory.js / datasetStore.js resolveSkillBin().
  */
 function resolveSkillBin() {
   if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
@@ -73,13 +64,7 @@ function resolveSkillBin() {
   return existsSync(candidate) ? candidate : null;
 }
 
-/** The sidecar base URL, env-injected by the runtime (like BROWSER_WS_ENDPOINT). */
-function gbrainBase() {
-  const u = typeof process.env.GBRAIN_MCP_URL === 'string' ? process.env.GBRAIN_MCP_URL.trim() : '';
-  return u ? u.replace(/\/+$/, '') : null;
-}
-
-/** The run's backend credential — same resolution order as kvMemory.js. */
+/** The run's backend credential — same resolution order as datasetStore.js. */
 function getSessionToken() {
   if (process.env.PROJECT_API_TOKEN) return process.env.PROJECT_API_TOKEN;
   if (process.env.ZIBBY_USER_TOKEN) return process.env.ZIBBY_USER_TOKEN;
@@ -92,36 +77,69 @@ function getSessionToken() {
   }
 }
 
-/**
- * The knowledge-base id this run writes to. The parent knowledge-base agent
- * forwards it; falls back to WORKFLOW_TYPE (per-agent brain) then 'default'.
- */
-function kbId() {
-  const explicit = typeof process.env.GBRAIN_KB_ID === 'string' ? process.env.GBRAIN_KB_ID.trim() : '';
-  if (explicit) return explicit;
-  const wt = typeof process.env.WORKFLOW_TYPE === 'string' ? process.env.WORKFLOW_TYPE.trim() : '';
-  return wt || 'default';
+/** Account API base URL — same resolution as datasetStore.js / backend-client.js. */
+function getAccountApiUrl() {
+  if (process.env.ZIBBY_ACCOUNT_API_URL) return process.env.ZIBBY_ACCOUNT_API_URL.replace(/\/$/, '');
+  const env = process.env.ZIBBY_ENV || 'prod';
+  if (env === 'local') return 'http://localhost:3001';
+  return process.env.ZIBBY_PROD_ACCOUNT_API_URL || 'https://api-prod.zibby.app';
 }
 
 /**
- * POST to a sidecar endpoint. Real client: bounded timeout (AbortController),
- * one retry on a transient failure (network error or 5xx), Bearer auth when a
- * token is present. Throws a clear Error on a hard failure; handleToolCall wraps
- * it into a structured tool result (never crashes the run).
+ * The run's bound-store map from `ZIBBY_STORE__<name>=<storeId>` env (same as
+ * datasetStore.js). `{ <name>: <storeId> }` is BOTH the allowlist AND resolver;
+ * empty values are skipped so an unbound placeholder never becomes addressable.
  */
-async function gbrainPost(path, payload) {
-  const base = gbrainBase();
-  if (!base) {
-    throw new Error(
-      'GBrain sidecar URL is not set (GBRAIN_MCP_URL). The knowledge-base sidecar '
-      + '(sidecars/gbrain) must be running and its URL injected into the run env.',
-    );
+function storeMap() {
+  const map = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    const m = /^ZIBBY_STORE__(.+)$/.exec(key);
+    if (!m) continue;
+    const id = typeof value === 'string' ? value.trim() : '';
+    if (!id) continue;
+    map[m[1]] = id;
   }
-  const url = `${base}${path}`;
-  const headers = { 'Content-Type': 'application/json' };
+  return map;
+}
+
+/**
+ * Resolve a logical store NAME to its backend storeId against the bound map.
+ * Returns `{ storeId, name }` or `{ error }` — never throws. The anti-
+ * fragmentation guard: an agent can ONLY address a store bound at deploy.
+ *   - name omitted + exactly one bound store → default to it
+ *   - name omitted + multiple                → error, list the names
+ *   - name omitted + zero bound stores       → error, nothing bound
+ *   - name given but not bound               → error, list the available names
+ */
+function resolveStore(store) {
+  const map = storeMap();
+  const names = Object.keys(map);
+  const requested = typeof store === 'string' ? store.trim() : '';
+  if (!requested) {
+    if (names.length === 1) return { storeId: map[names[0]], name: names[0] };
+    if (names.length === 0) return { error: 'no knowledge-base store is bound to this agent' };
+    return { error: `multiple stores are bound; pass \`store\` (one of: ${names.join(', ')})` };
+  }
+  if (!Object.prototype.hasOwnProperty.call(map, requested)) {
+    return { error: `unknown store '${requested}'; available: ${names.join(', ')}` };
+  }
+  return { storeId: map[requested], name: requested };
+}
+
+/**
+ * POST {base}/datasets/stores/{storeId}/{action} with the project Bearer token.
+ * Tenancy is derived server-side from the token (the skill never sends
+ * account/project/kbId). Bounded timeout, one retry on a transient failure.
+ * Throws a clear Error on a hard failure; handleToolCall wraps it structurally.
+ */
+async function storeFetch(storeId, action, payload) {
   const session = getSessionToken();
-  if (session) headers.Authorization = `Bearer ${session}`;
-  const body = JSON.stringify({ kbId: kbId(), ...payload });
+  if (!session) {
+    throw new Error('No backend credential (PROJECT_API_TOKEN). The knowledge base is only available inside a Zibby run.');
+  }
+  const url = `${getAccountApiUrl()}/datasets/stores/${encodeURIComponent(storeId)}/${action}`;
+  const headers = { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' };
+  const body = JSON.stringify(payload);
 
   let lastErr;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -130,10 +148,10 @@ async function gbrainPost(path, payload) {
     try {
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal });
       const text = await res.text().catch(() => '');
-      if (res.status >= 500 && attempt < MAX_RETRIES) { lastErr = new Error(`sidecar ${res.status}`); continue; }
-      if (!res.ok) throw new Error(`sidecar ${res.status}: ${text.slice(0, 300)}`);
+      if (res.status >= 500 && attempt < MAX_RETRIES) { lastErr = new Error(`store ${res.status}`); continue; }
+      if (!res.ok) throw new Error(`gbrain ${action} failed (${res.status}): ${text.slice(0, 300)}`);
       try { return JSON.parse(text); }
-      catch { throw new Error(`sidecar returned non-JSON: ${text.slice(0, 200)}`); }
+      catch { throw new Error(`store returned non-JSON: ${text.slice(0, 200)}`); }
     } catch (e) {
       lastErr = e;
       const transient = e?.name === 'AbortError' || e?.code === 'ECONNREFUSED' || /fetch failed|network/i.test(String(e?.message));
@@ -142,7 +160,7 @@ async function gbrainPost(path, payload) {
       clearTimeout(timer);
     }
   }
-  throw lastErr || new Error('GBrain sidecar request failed');
+  throw lastErr || new Error(`gbrain ${action} request failed`);
 }
 
 export const gbrainSkill = {
@@ -154,34 +172,41 @@ export const gbrainSkill = {
   // skill.meta.toggleable off this.
   meta: SKILL_META.gbrain,
   description:
-    'Knowledge base (GBrain) — ingest source documents into, semantically query, and prune a per-tenant Postgres/pgvector brain via a sidecar',
+    'Knowledge base (GBrain) — ingest source documents into, semantically query, and prune a per-tenant Postgres/pgvector brain (a `postgres`-type store, brokered by the control-plane)',
 
   promptFragment: `## Knowledge Base (GBrain — per-tenant document brain)
-You have a per-tenant KNOWLEDGE BASE (a Postgres + pgvector "brain") reached over a
-sidecar. Ingested documents are addressed by a STABLE \`sourceId\` so re-ingesting
-the same source UPSERTS (updates in place) rather than duplicating, and a source
-can be removed. Tools:
-- gbrain_ingest({ docs }): upsert an array of { sourceId, markdown, deleted? }.
+You have a per-tenant KNOWLEDGE BASE (a Postgres + pgvector "brain"), bound as a
+\`postgres\`-type store in the "AVAILABLE STORES" block below. Ingested documents
+are addressed by a STABLE \`sourceId\` so re-ingesting the same source UPSERTS
+(updates in place) rather than duplicating, and a source can be removed. If
+exactly one store is bound you may omit \`store\`; otherwise pass its NAME.
+Tools:
+- gbrain_ingest({ docs, store? }): upsert an array of { sourceId, markdown, deleted? }.
   Pass deleted:true to remove a source that no longer exists upstream.
-- gbrain_query({ query, topK }): semantic search the brain; returns the topK most
+- gbrain_query({ query, topK, store? }): semantic search; returns the topK most
   relevant document chunks with their sourceId and relevance score.
-- gbrain_delete({ sourceIds }): remove documents by their stable sourceId(s).`,
+- gbrain_delete({ sourceIds, store? }): remove documents by their stable sourceId(s).`,
 
   /**
    * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
-   * module's gbrainSkill export — same FIXED pattern as kvMemory. Forwards the
-   * sidecar URL + backend auth env the spawned process needs.
+   * module's gbrainSkill export — same FIXED pattern as datasetStore. Forwards
+   * the backend-auth env + every bound-store mapping the spawned process needs.
    */
   resolve() {
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env = {};
     for (const key of [
-      'GBRAIN_MCP_URL', 'GBRAIN_KB_ID',
       'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV',
       'ZIBBY_PROD_ACCOUNT_API_URL', 'ZIBBY_USER_TOKEN', 'WORKFLOW_TYPE',
     ]) {
       if (process.env[key]) env[key] = process.env[key];
+    }
+    // Forward EVERY bound-store mapping (ZIBBY_STORE__<name>=<storeId>) so the
+    // spawned MCP process can resolve store names → ids. A node without a bound
+    // store has none → the tools report "no knowledge-base store bound".
+    for (const key of Object.keys(process.env)) {
+      if (/^ZIBBY_STORE__.+$/.test(key) && process.env[key]) env[key] = process.env[key];
     }
     return {
       type: 'stdio',
@@ -190,7 +215,7 @@ can be removed. Tools:
       env,
       description: this.description,
       // Force tools into the system prompt rather than deferring behind the
-      // SDK's ToolSearch (same as kvMemory / github).
+      // SDK's ToolSearch (same as kvMemory / datasetStore).
       alwaysLoad: true,
     };
   },
@@ -207,16 +232,21 @@ can be removed. Tools:
           // A non-deleted doc must carry markdown to upsert.
           const missingMd = docs.find((d) => d.deleted !== true && (typeof d.markdown !== 'string' || !d.markdown.length));
           if (missingMd !== undefined) return JSON.stringify({ error: `doc "${missingMd.sourceId}" has no markdown (required unless deleted:true)` });
-          const data = await gbrainPost('/ingest', { docs });
-          return JSON.stringify(data);
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          const data = await storeFetch(target.storeId, 'ingest', { docs });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
 
         case 'gbrain_query': {
           const query = typeof args?.query === 'string' ? args.query.trim() : '';
           if (!query) return JSON.stringify({ error: 'query is required' });
-          const topK = Number.isInteger(args?.topK) && args.topK > 0 ? Math.min(args.topK, 50) : 8;
-          const data = await gbrainPost('/query', { query, topK });
-          return JSON.stringify(data);
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          const payload = { query };
+          if (Number.isInteger(args?.topK) && args.topK > 0) payload.topK = Math.min(args.topK, 50);
+          const data = await storeFetch(target.storeId, 'query', payload);
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
 
         case 'gbrain_delete': {
@@ -226,8 +256,10 @@ can be removed. Tools:
           if (!sourceIds || sourceIds.length === 0) {
             return JSON.stringify({ error: 'sourceIds is required (non-empty array of strings)' });
           }
-          const data = await gbrainPost('/delete', { sourceIds });
-          return JSON.stringify(data);
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          const data = await storeFetch(target.storeId, 'delete', { sourceIds });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
 
         default:
@@ -258,6 +290,7 @@ can be removed. Tools:
               required: ['sourceId'],
             },
           },
+          store: { type: 'string', description: 'The bound knowledge-base store NAME (from AVAILABLE STORES). Omit if exactly one store is bound.' },
         },
         required: ['docs'],
       },
@@ -270,6 +303,7 @@ can be removed. Tools:
         properties: {
           query: { type: 'string', description: 'Natural-language query.' },
           topK: { type: 'integer', description: 'How many chunks to return (default 8, max 50).' },
+          store: { type: 'string', description: 'The bound knowledge-base store NAME (from AVAILABLE STORES). Omit if exactly one store is bound.' },
         },
         required: ['query'],
       },
@@ -285,6 +319,7 @@ can be removed. Tools:
             description: 'Stable source ids to delete.',
             items: { type: 'string' },
           },
+          store: { type: 'string', description: 'The bound knowledge-base store NAME (from AVAILABLE STORES). Omit if exactly one store is bound.' },
         },
         required: ['sourceIds'],
       },
