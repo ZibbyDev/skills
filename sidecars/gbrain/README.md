@@ -1,53 +1,69 @@
 # GBrain KB sidecar
 
-A small **knowledge-base sidecar**: embedded Postgres ([PGlite](https://pglite.dev)
-= Postgres compiled to WASM) + **pgvector**, exposed over a tiny REST contract.
-It ingests markdown documents, chunks + embeds them, and answers semantic
-queries — scoped per knowledge base (`kbId`) for multi-tenant isolation.
+A **knowledge-base sidecar** that runs the **real** [GBrain](https://github.com/garrytan/gbrain)
+(MIT) behind a small, stable REST contract. It ingests markdown documents,
+chunks + embeds + indexes them with GBrain, and answers hybrid (vector + BM25 +
+RRF + graph-signal) queries — each `kbId` scoped to its **own GBrain brain** for
+multi-tenant isolation.
 
-The `@zibby/skills` **`gbrain`** skill (`src/gbrain.js`) is the only caller. It
-speaks this REST contract and nothing else, so **the engine behind the contract
-is pluggable** — this PGlite+pgvector implementation can be swapped for GBrain
-proper, a self-managed Postgres+pgvector, Supabase, or any other vector engine
-without touching the skill. The contract is the API; the engine is an
-implementation detail.
+> **This used to be a hand-rolled PGlite+pgvector engine.** It was replaced with
+> real GBrain. The REST contract below is byte-for-byte unchanged, so nothing
+> upstream (the control-plane's `backend/src/handlers/postgres-store.js`) changed
+> — only the engine behind the contract did. See `VENDOR.md`.
 
-## HTTP contract
+## Architecture
+
+GBrain is TypeScript-on-Bun. The sidecar image is based on `oven/bun` and
+vendors GBrain as a **commit-pinned** dependency (`package.json` →
+`github:garrytan/gbrain#<sha>`; see `VENDOR.md` + `GBRAIN_LICENSE`). A thin
+adapter (`brain.js`) translates each REST call into a real GBrain CLI operation:
+
+| REST route | GBrain operation | GBrain command |
+|---|---|---|
+| `POST /ingest` (upsert) | `put_page` (chunk + embed + index) | `gbrain capture --file <md> --slug <slug>` |
+| `POST /ingest` (`deleted:true`) | `delete_page` (soft-delete) | `gbrain call delete_page {slug}` |
+| `POST /query` | hybrid search | `gbrain call query {query,limit}` |
+| `POST /delete` | `delete_page` (soft-delete) | `gbrain call delete_page {slug}` |
+
+The adapter also issues `restore_page` before an upsert so a previously deleted
+`sourceId` comes back live when re-ingested.
+
+### Multi-tenant isolation
+
+Each `kbId` maps to its own GBrain brain — a separate PGLite database at
+`${GBRAIN_DATA_ROOT}/kb-<sha256(kbId)>/​.gbrain/brain.pglite`, selected via a
+per-call `GBRAIN_HOME`. Two kbIds are two physically separate databases that
+cannot see each other's pages, so one sidecar safely holds many tenants' KBs.
+The control-plane derives `kbId` server-side from `(accountId, projectId,
+storeId)`; the client never supplies it.
+
+### sourceId ↔ slug
+
+The contract addresses docs by an arbitrary `sourceId`; GBrain addresses pages
+by a restricted-grammar `slug`. The adapter maps injectively with
+`doc/<sha256(sourceId)>` and persists the reverse `slug → sourceId` map per brain
+(`<brainDir>/adapter/sourcemap.json`) so query results are reported by
+`sourceId`.
+
+## HTTP contract (unchanged)
 
 ```
 POST /ingest   { kbId, docs: [{ sourceId, markdown, deleted? }] }
                → { ok:true, upserted:<n>, deleted:<n>, chunks:<n> }
-```
-Upsert **by `sourceId`** within `kbId`: existing chunks for that `(kbId, sourceId)`
-are deleted, then the new markdown is chunked, embedded and inserted. A doc with
-`deleted:true` removes that `(kbId, sourceId)` (its `markdown` is ignored) and is
-counted in `deleted`.
-
-```
 POST /query    { kbId, query, topK }
                → { ok:true, results: [{ sourceId, chunk, score }] }
-```
-Embeds the query and vector-searches **within that `kbId` only**, returning the
-`topK` most similar chunks, highest similarity first. `score` is cosine
-similarity in `[0,1]` (`1 - cosine_distance`, clamped).
-
-```
 POST /delete   { kbId, sourceIds: [...] }
                → { ok:true, deleted:<n> }
-```
-Removes the given sources within `kbId`. `deleted` = how many of them actually
-had chunks removed.
-
-```
 GET  /health   → { ok:true }
 ```
 
-All routes return JSON. On error: HTTP `4xx`/`5xx` with `{ ok:false, error:"..." }`.
-Missing `kbId`/`docs`/`query`/`sourceIds` → `400`.
+`upsert` is **by `sourceId`** within `kbId`. `deleted:true` (in `/ingest`) or
+`/delete` soft-removes the source (it disappears from query results). On error:
+HTTP `4xx`/`5xx` with `{ ok:false, error }`. Missing `kbId`/`docs`/`query`/
+`sourceIds` → `400`.
 
-**Auth:** if `SIDECAR_AUTH_TOKEN` is set, the POST routes require
-`Authorization: Bearer <that token>` (else `401`). If unset, there is no auth —
-the sidecar is expected to run on the run's private network.
+**Auth:** if `SIDECAR_AUTH_TOKEN` is set, POST routes require
+`Authorization: Bearer <that token>` (else `401`).
 
 ## Environment
 
@@ -55,57 +71,55 @@ the sidecar is expected to run on the run's private network.
 |---|---|---|
 | `PORT` | `8080` | HTTP listen port |
 | `SIDECAR_AUTH_TOKEN` | *(unset)* | If set, Bearer token required on POST routes |
-| `PGLITE_DATA_DIR` | `/data/brain` | Persistent data dir (brain survives restart) |
-| `EMBEDDINGS_API_URL` | `https://api.openai.com/v1/embeddings` | OpenAI-compatible embeddings endpoint |
-| `EMBEDDINGS_API_KEY` | *(unset)* | API key for the embeddings endpoint |
-| `EMBEDDINGS_MODEL` | `text-embedding-3-small` | Embedding model (dim 1536) |
-| `EMBEDDINGS_FAKE` | *(unset)* | `1` ⇒ use the deterministic offline fake embedder (dim 64) |
-| `EMBED_DIM_REAL` | `1536` | Dimension of the real embedding model |
+| `GBRAIN_DATA_ROOT` | `/data` | Root under which per-kbId brains live |
+| `GBRAIN_OP_TIMEOUT_MS` | `120000` | Per-operation subprocess timeout |
+| `GBRAIN_NO_EMBEDDING` | *(unset)* | `1` ⇒ init brains keyword-only (fully offline) |
+| `GBRAIN_EMBEDDING` | *(unset)* | `1` ⇒ force embeddings on (must supply a key) |
+| `OPENAI_API_KEY` (or `ZEROENTROPY_API_KEY`, `VOYAGE_API_KEY`, …) | *(unset)* | Embeddings provider key GBrain reads directly |
 
-**Embeddings.** With an API key set, the sidecar calls an OpenAI-compatible
-`/embeddings` endpoint (batched). With `EMBEDDINGS_FAKE=1` **or no API key**, it
-uses a deterministic, dependency-free hashing embedder (dim 64) so it boots and
-works fully offline — lexically-overlapping text lands in the same hash buckets,
-so nearest-neighbour ranking is still meaningful. The active embedder fixes
-`EMBED_DIM`, and the `vector(EMBED_DIM)` schema is derived from it, so schema and
-embedder never drift. (Switching embedder dimension means a fresh data dir.)
+**Embeddings.** If any known embeddings key is present in the environment, brains
+are initialized with GBrain's semantic embeddings enabled (vector + keyword
+hybrid). If **no** key is present (or `GBRAIN_NO_EMBEDDING=1`), brains init with
+`--no-embedding` and GBrain still ingests, indexes, and answers via its
+**keyword/BM25** hybrid arm — so the sidecar boots and works fully offline, just
+without vector/semantic ranking. GBrain reads provider keys straight from the
+process env; set them on the container.
 
 ## Run
 
 ```bash
-npm install          # installs @electric-sql/pglite (into ./node_modules, gitignored)
-npm start            # boots the server on :8080
+bun install          # fetches the pinned gbrain (+ deps) into ./node_modules
+bun server.js        # boots the server on :8080
 
-# offline smoke test — proves ingest/query/upsert/delete/isolation end-to-end:
-EMBEDDINGS_FAKE=1 npm run smoke
+# offline smoke test — proves ingest/query/upsert/delete/isolation end-to-end
+# against real GBrain brains (keyword mode, no API key needed):
+GBRAIN_NO_EMBEDDING=1 bun smoke.mjs
 ```
 
-Quick manual check:
+Quick manual check (from inside the built image):
 
 ```bash
-EMBEDDINGS_FAKE=1 PORT=8899 node server.mjs &
-curl -s localhost:8899/health
-curl -s localhost:8899/ingest -H 'Content-Type: application/json' \
-  -d '{"kbId":"demo","docs":[{"sourceId":"a","markdown":"# Bread\nBaking sourdough."}]}'
-curl -s localhost:8899/query  -H 'Content-Type: application/json' \
-  -d '{"kbId":"demo","query":"how to bake bread","topK":3}'
+curl -s localhost:8080/health
+curl -s localhost:8080/ingest -H 'Content-Type: application/json' \
+  -d '{"kbId":"a:b:store1","docs":[{"sourceId":"x","markdown":"# Bread\nBaking sourdough."}]}'
+curl -s localhost:8080/query  -H 'Content-Type: application/json' \
+  -d '{"kbId":"a:b:store1","query":"how to bake bread","topK":3}'
 ```
-
-## Persistence
-
-Data lives in `PGLITE_DATA_DIR` (default `/data/brain`; the Docker image mounts
-`/data` as a volume). The brain therefore survives restarts. Shipping the data
-dir off-box (the Stores-v2 S3/MinIO snapshot round-trip) is handled by the
-platform, not this sidecar — the sidecar only reads/writes its local data dir.
 
 ## Files
 
-- `server.mjs` — Node `http` server; routes, auth, JSON handling.
-- `db.mjs` — PGlite init (data dir + `vector` extension + schema) and the
-  `upsertDoc` / `deleteSources` / `query` ops (all `kb_id`-scoped).
-- `embeddings.mjs` — OpenAI-compatible client + the deterministic fake;
-  exports `embed()` and `EMBED_DIM`.
-- `chunk.mjs` — `chunkMarkdown(md) -> string[]` (heading/paragraph-aware,
-  ~500–1000 char chunks with overlap).
-- `smoke.mjs` — end-to-end offline proof (run via `npm run smoke`).
-- `Dockerfile` — `node:20-slim`, `/data` volume, `CMD node server.mjs`.
+- `server.js` — Node `http` server (run by Bun); routes, auth, JSON handling.
+- `brain.js` — the thin adapter: drives the real `gbrain` CLI per kbId brain.
+- `smoke.mjs` — end-to-end proof against real GBrain (run via `bun smoke.mjs`).
+- `Dockerfile` — `oven/bun`, `bun install` (pinned gbrain), `/data` volume.
+- `VENDOR.md` / `GBRAIN_LICENSE` — pinned-commit record + MIT attribution.
+
+## Notes / tradeoffs
+
+- Each op spawns a short-lived `gbrain` process (correct + isolated, but a cold
+  Bun+PGLite start per call). A future optimization is a persistent per-brain
+  GBrain process or importing GBrain's library operations in-process; the REST
+  contract would not change.
+- Deletes are GBrain **soft**-deletes (recoverable for 72h, then purged by
+  GBrain's own maintenance). They vanish from query results immediately, which is
+  what the contract requires.

@@ -1,8 +1,10 @@
 /**
- * server.mjs — the KB sidecar HTTP server (Node built-in `http`, no framework).
+ * server.js — the KB sidecar HTTP server (Node built-in `http`, run by Bun).
  *
- * Implements the stable, engine-agnostic REST contract that the @zibby/skills
- * `gbrain` skill calls (see src/gbrain.js "SIDECAR HTTP CONTRACT"):
+ * Exposes the STABLE, engine-agnostic REST contract the Zibby control-plane
+ * (backend/src/handlers/postgres-store.js) calls. The contract is unchanged;
+ * only the engine behind it changed — it is now the REAL GBrain
+ * (github.com/garrytan/gbrain), driven by ./brain.js.
  *
  *   POST /ingest  { kbId, docs:[{ sourceId, markdown, deleted? }] }
  *                 → { ok, upserted, deleted, chunks }
@@ -15,7 +17,7 @@
  */
 
 import http from 'node:http';
-import { upsertDoc, deleteSources, query, getDb, stats } from './db.mjs';
+import { ingest, query, del, health } from './brain.js';
 
 const PORT = Number(process.env.PORT) || 8080;
 const AUTH_TOKEN = (process.env.SIDECAR_AUTH_TOKEN || '').trim();
@@ -72,35 +74,18 @@ async function handleIngest(body) {
   if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
   if (!docs) return { status: 400, body: { ok: false, error: 'docs is required (array)' } };
 
-  let upserted = 0;
-  let chunks = 0;
-  const toDelete = [];
-
   for (const d of docs) {
     if (!d || typeof d.sourceId !== 'string' || !d.sourceId.trim()) {
       return { status: 400, body: { ok: false, error: 'every doc requires a non-empty string sourceId' } };
     }
-    const sourceId = d.sourceId.trim();
-    if (d.deleted === true) {
-      toDelete.push(sourceId);
-      continue;
+    if (d.deleted !== true && (typeof d.markdown !== 'string' || !d.markdown.length)) {
+      return { status: 400, body: { ok: false, error: `doc "${d.sourceId}" has no markdown (required unless deleted:true)` } };
     }
-    if (typeof d.markdown !== 'string' || !d.markdown.length) {
-      return { status: 400, body: { ok: false, error: `doc "${sourceId}" has no markdown (required unless deleted:true)` } };
-    }
-    // eslint-disable-next-line no-await-in-loop
-    const r = await upsertDoc(kbId, sourceId, d.markdown);
-    upserted += 1;
-    chunks += r.chunks;
   }
 
-  let deleted = 0;
-  if (toDelete.length > 0) {
-    const r = await deleteSources(kbId, toDelete);
-    deleted = r.deleted;
-  }
-
-  return { status: 200, body: { ok: true, upserted, deleted, chunks } };
+  const norm = docs.map((d) => ({ sourceId: d.sourceId.trim(), markdown: d.markdown, deleted: d.deleted === true }));
+  const r = await ingest(kbId, norm);
+  return { status: 200, body: { ok: true, ...r } };
 }
 
 async function handleQuery(body) {
@@ -108,17 +93,19 @@ async function handleQuery(body) {
   const q = typeof body?.query === 'string' ? body.query.trim() : '';
   if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
   if (!q) return { status: 400, body: { ok: false, error: 'query is required' } };
-  const topK = Number.isInteger(body?.topK) && body.topK > 0 ? body.topK : 8;
-  const results = await query(kbId, q, topK);
-  return { status: 200, body: { ok: true, results } };
+  const topK = Number.isInteger(body?.topK) && body.topK > 0 ? Math.min(body.topK, 50) : 8;
+  const r = await query(kbId, q, topK);
+  return { status: 200, body: { ok: true, results: r.results } };
 }
 
 async function handleDelete(body) {
   const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
-  const sourceIds = Array.isArray(body?.sourceIds) ? body.sourceIds : null;
+  const sourceIds = Array.isArray(body?.sourceIds)
+    ? body.sourceIds.filter((s) => typeof s === 'string' && s.trim())
+    : null;
   if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
   if (!sourceIds) return { status: 400, body: { ok: false, error: 'sourceIds is required (array)' } };
-  const r = await deleteSources(kbId, sourceIds);
+  const r = await del(kbId, sourceIds.map((s) => s.trim()));
   return { status: 200, body: { ok: true, deleted: r.deleted } };
 }
 
@@ -133,7 +120,12 @@ const server = http.createServer(async (req, res) => {
     const url = (req.url || '').split('?')[0].replace(/\/+$/, '') || '/';
 
     if (req.method === 'GET' && (url === '/health' || url === '/')) {
-      return sendJson(res, 200, { ok: true });
+      try {
+        await health();
+        return sendJson(res, 200, { ok: true });
+      } catch (e) {
+        return sendJson(res, 503, { ok: false, error: String(e?.message || e) });
+      }
     }
 
     const handler = POST_ROUTES[url];
@@ -159,17 +151,17 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function main() {
-  // Open the DB up front so /health only returns ok once the brain is ready.
-  await getDb();
-  const s = await stats().catch(() => ({ chunks: 0 }));
+  // Confirm the real gbrain binary is runnable up front so a broken image fails
+  // loudly at boot rather than on the first request.
+  await health();
   server.listen(PORT, () => {
     // eslint-disable-next-line no-console
-    console.log(`[gbrain-sidecar] listening on :${PORT} (chunks=${s.chunks}, auth=${AUTH_TOKEN ? 'on' : 'off'})`);
+    console.log(`[gbrain-sidecar] listening on :${PORT} (engine=real-gbrain, auth=${AUTH_TOKEN ? 'on' : 'off'})`);
   });
 }
 
 // Only auto-start when run directly (not when imported, e.g. by a test).
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   main().catch((e) => {
     // eslint-disable-next-line no-console
     console.error('[gbrain-sidecar] fatal:', e);

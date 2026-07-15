@@ -1,128 +1,132 @@
 /**
- * smoke.mjs — end-to-end proof the sidecar engine is REAL.
+ * smoke.mjs — end-to-end proof the sidecar is driving REAL GBrain.
  *
- * Runs the full ingest → query → re-ingest(upsert) → delete → isolation cycle
- * against a fresh temp PGlite data dir using the deterministic fake embedder
- * (EMBEDDINGS_FAKE=1 — no external API). Prints PASS/FAIL per assertion and
+ * Runs the full ingest → query → upsert → delete → isolation cycle through
+ * ./brain.js, which shells out to the vendored `gbrain` CLI. Each kbId becomes
+ * a real GBrain PGLite brain on disk under a fresh temp data root.
+ *
+ * Forces GBRAIN_NO_EMBEDDING=1 so it runs fully offline: GBrain still ingests,
+ * indexes, and answers via its keyword/BM25 hybrid arm (semantic/vector ranking
+ * needs an embeddings API key — see README). Prints PASS/FAIL per assertion and
  * exits non-zero on any failure.
  *
- * Run:  EMBEDDINGS_FAKE=1 npm run smoke
+ * Run (inside the image, or anywhere `gbrain` is on PATH + Bun is installed):
+ *   GBRAIN_NO_EMBEDDING=1 bun smoke.mjs
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// Force the fake embedder + an isolated temp data dir BEFORE importing db.mjs
-// (which reads these at module load).
-process.env.EMBEDDINGS_FAKE = '1';
-const DATA_DIR = mkdtempSync(join(tmpdir(), 'gbrain-smoke-'));
-process.env.PGLITE_DATA_DIR = DATA_DIR;
+// Isolated temp data root + deterministic offline mode BEFORE importing brain.js.
+process.env.GBRAIN_NO_EMBEDDING = '1';
+const DATA_ROOT = mkdtempSync(join(tmpdir(), 'gbrain-smoke-'));
+process.env.GBRAIN_DATA_ROOT = DATA_ROOT;
 
-const { upsertDoc, deleteSources, query } = await import('./db.mjs');
-const { getDb } = await import('./db.mjs');
+const { ingest, query, del, health, _internal } = await import('./brain.js');
 
 let passed = 0;
 let failed = 0;
 function assert(name, cond, detail) {
-  if (cond) {
-    passed += 1;
-    console.log(`PASS  ${name}`);
-  } else {
-    failed += 1;
-    console.log(`FAIL  ${name}${detail ? `  — ${detail}` : ''}`);
-  }
-}
-
-async function chunkCount(kbId, sourceId) {
-  const db = await getDb();
-  const r = await db.query(
-    'SELECT count(*)::int AS n FROM chunks WHERE kb_id = $1 AND source_id = $2',
-    [kbId, sourceId],
-  );
-  return r.rows[0]?.n || 0;
+  if (cond) { passed += 1; console.log(`PASS  ${name}`); }
+  else { failed += 1; console.log(`FAIL  ${name}${detail ? `  — ${detail}` : ''}`); }
 }
 
 try {
-  const KB = 'kb-alpha';
-  const OTHER_KB = 'kb-beta';
+  const KB = 'acct1:proj1:store_alpha';
+  const OTHER_KB = 'acct2:proj2:store_beta';
+
+  await health();
+  assert('gbrain binary is runnable (health)', true);
 
   // ── 1. Ingest 3 docs on distinct topics ────────────────────────────────────
-  await upsertDoc(KB, 'doc-cooking',
-    '# Sourdough Bread\n\nMix flour water and salt with a sourdough starter. '
-    + 'Let the dough ferment overnight, then bake the loaf in a hot oven until '
-    + 'the crust is golden. Baking bread is about patience and temperature.');
-  await upsertDoc(KB, 'doc-space',
-    '# Mars Rovers\n\nNASA rovers explore the surface of Mars, drilling rock '
-    + 'samples and photographing craters. The rover uses solar panels and a '
-    + 'nuclear battery to survive the cold Martian night on the red planet.');
-  await upsertDoc(KB, 'doc-finance',
-    '# Compound Interest\n\nInterest compounds when earnings are reinvested, so '
-    + 'a savings account grows exponentially over time. The annual percentage '
-    + 'yield reflects compounding frequency on your invested principal.');
+  const r1 = await ingest(KB, [
+    { sourceId: 'doc-cooking', markdown:
+      '# Sourdough Bread\n\nMix flour water and salt with a sourdough starter. '
+      + 'Let the dough ferment overnight, then bake the loaf in a hot oven until '
+      + 'the crust is golden. Baking bread is about patience and temperature.' },
+    { sourceId: 'doc-space', markdown:
+      '# Mars Rovers\n\nNASA rovers explore the surface of Mars, drilling rock '
+      + 'samples and photographing craters on the red planet.' },
+    { sourceId: 'doc-finance', markdown:
+      '# Compound Interest\n\nInterest compounds when earnings are reinvested, so '
+      + 'a savings account grows exponentially over time.' },
+  ]);
+  assert('ingest upserted 3 docs', r1.upserted === 3, JSON.stringify(r1));
+  assert('ingest produced chunks (real GBrain chunking)', r1.chunks >= 3, JSON.stringify(r1));
 
-  const q1 = await query(KB, 'how do I bake a golden loaf of bread with sourdough', 3);
-  assert('ingest returned searchable results', q1.length > 0, `got ${q1.length} results`);
+  // A real GBrain brain (PGLite database) exists on disk for this kbId.
+  const brainDir = _internal.brainDirFor(KB);
+  assert('real GBrain PGLite brain created on disk',
+    existsSync(join(brainDir, '.gbrain', 'brain.pglite')),
+    join(brainDir, '.gbrain', 'brain.pglite'));
+
+  // ── 2. Query ranks the right doc ───────────────────────────────────────────
+  const q1 = await query(KB, 'how do I bake a golden loaf of sourdough bread', 3);
+  assert('query returns results', q1.results.length > 0, `got ${q1.results.length}`);
   assert('cooking query ranks doc-cooking #1',
-    q1[0]?.sourceId === 'doc-cooking',
-    `top=${q1[0]?.sourceId} score=${q1[0]?.score?.toFixed(3)}`);
-  assert('top score is a similarity in [0,1]',
-    typeof q1[0]?.score === 'number' && q1[0].score >= 0 && q1[0].score <= 1,
-    `score=${q1[0]?.score}`);
+    q1.results[0]?.sourceId === 'doc-cooking',
+    `top=${q1.results[0]?.sourceId} score=${q1.results[0]?.score}`);
+  assert('result carries chunk text + numeric score',
+    typeof q1.results[0]?.chunk === 'string' && q1.results[0].chunk.length > 0
+      && typeof q1.results[0]?.score === 'number',
+    JSON.stringify(q1.results[0]));
 
   const q2 = await query(KB, 'exploring the red planet Mars with a rover', 3);
   assert('space query ranks doc-space #1',
-    q2[0]?.sourceId === 'doc-space',
-    `top=${q2[0]?.sourceId} score=${q2[0]?.score?.toFixed(3)}`);
+    q2.results[0]?.sourceId === 'doc-space',
+    `top=${q2.results[0]?.sourceId}`);
 
-  // ── 2. Re-ingest one sourceId (upsert) — must REPLACE, not duplicate ────────
-  const before = await chunkCount(KB, 'doc-cooking');
-  await upsertDoc(KB, 'doc-cooking',
-    '# Sourdough Bread (revised)\n\nA shorter note about baking sourdough bread.');
-  const after = await chunkCount(KB, 'doc-cooking');
-  assert('re-ingest REPLACES chunks (no duplication)',
-    after > 0 && after <= before,
-    `before=${before} after=${after}`);
-  // The new content should still be the top hit for a cooking query, and the OLD
-  // "golden crust / ferment overnight" text should be gone (replaced).
+  // ── 3. Upsert one sourceId — must REPLACE content, not duplicate ────────────
+  const r2 = await ingest(KB, [{ sourceId: 'doc-cooking', markdown:
+    '# Sourdough Bread (revised)\n\nA shorter note about baking sourdough bread.' }]);
+  assert('re-ingest reports 1 upsert', r2.upserted === 1, JSON.stringify(r2));
   const q3 = await query(KB, 'baking sourdough bread', 5);
   assert('after upsert doc-cooking still top for cooking query',
-    q3[0]?.sourceId === 'doc-cooking', `top=${q3[0]?.sourceId}`);
-  const stillHasOldText = q3.some((r) => r.sourceId === 'doc-cooking' && /golden|overnight/i.test(r.chunk));
+    q3.results[0]?.sourceId === 'doc-cooking', `top=${q3.results[0]?.sourceId}`);
+  const stillHasOldText = q3.results.some(
+    (r) => r.sourceId === 'doc-cooking' && /golden|overnight|ferment/i.test(r.chunk));
   assert('old chunk text is gone after upsert', !stillHasOldText,
     stillHasOldText ? 'stale chunk still present' : '');
 
-  // ── 3. Delete a sourceId — must vanish from query results ───────────────────
-  const del = await deleteSources(KB, ['doc-space']);
-  assert('delete reports 1 source removed', del.deleted === 1, `deleted=${del.deleted}`);
+  // ── 4. Delete a sourceId — must vanish from query results ───────────────────
+  const d1 = await del(KB, ['doc-space']);
+  assert('delete reports 1 source removed', d1.deleted === 1, JSON.stringify(d1));
   const q4 = await query(KB, 'exploring the red planet Mars with a rover', 5);
-  const spaceStillThere = q4.some((r) => r.sourceId === 'doc-space');
-  assert('deleted source no longer in query results', !spaceStillThere,
-    spaceStillThere ? 'doc-space still returned' : '');
-  assert('delete of an absent source removes 0',
-    (await deleteSources(KB, ['nope-not-here'])).deleted === 0, 'expected 0');
+  assert('deleted source no longer in query results',
+    !q4.results.some((r) => r.sourceId === 'doc-space'),
+    q4.results.map((r) => r.sourceId).join(','));
+  const d2 = await del(KB, ['nope-not-here']);
+  assert('delete of an absent source removes 0', d2.deleted === 0, JSON.stringify(d2));
 
-  // ── 4. KB isolation — querying a DIFFERENT kb returns nothing ───────────────
-  const q5 = await query(OTHER_KB, 'baking sourdough bread', 5);
+  // ── 5. deleted:true via /ingest doc shape ───────────────────────────────────
+  await ingest(KB, [{ sourceId: 'doc-temp', markdown: '# Temp\n\nTemporary doc.' }]);
+  const r3 = await ingest(KB, [{ sourceId: 'doc-temp', deleted: true }]);
+  assert('ingest deleted:true removes the source', r3.deleted === 1, JSON.stringify(r3));
+
+  // ── 6. Re-ingest a previously deleted sourceId comes back live (upsert) ─────
+  await ingest(KB, [{ sourceId: 'doc-space', markdown:
+    '# Mars Rovers Again\n\nThe rover returns to explore Mars craters.' }]);
+  const q5 = await query(KB, 'rover exploring Mars craters', 5);
+  assert('re-ingest of a deleted sourceId is queryable again',
+    q5.results.some((r) => r.sourceId === 'doc-space'),
+    q5.results.map((r) => r.sourceId).join(','));
+
+  // ── 7. kbId isolation — a different brain sees nothing of KB's docs ─────────
+  const q6 = await query(OTHER_KB, 'baking sourdough bread', 5);
   assert('cross-kb query returns no results (tenant isolation)',
-    q5.length === 0, `got ${q5.length} results from ${OTHER_KB}`);
-  // And ingesting into OTHER_KB must not leak into KB.
-  await upsertDoc(OTHER_KB, 'doc-beta', '# Beta\n\nSome unrelated content in another knowledge base.');
-  const q6 = await query(KB, 'unrelated content in another knowledge base', 5);
-  const leaked = q6.some((r) => r.sourceId === 'doc-beta');
-  assert('other-kb ingest does not leak into this kb', !leaked,
-    leaked ? 'doc-beta leaked into KB' : '');
-
-  // ── 5. Ingest DELETE flag path (via the doc {deleted:true} shape) ───────────
-  // (mirrors what /ingest does for a doc with deleted:true)
-  await upsertDoc(KB, 'doc-temp', '# Temp\n\nTemporary doc that will be removed.');
-  const gone = await deleteSources(KB, ['doc-temp']);
-  assert('deleted:true-style removal works', gone.deleted === 1, `deleted=${gone.deleted}`);
+    q6.results.length === 0, `got ${q6.results.length} from ${OTHER_KB}`);
+  await ingest(OTHER_KB, [{ sourceId: 'doc-beta',
+    markdown: '# Beta\n\nUnrelated content in another knowledge base entirely.' }]);
+  const q7 = await query(KB, 'unrelated content another knowledge base', 5);
+  assert('other-kb ingest does not leak into this kb',
+    !q7.results.some((r) => r.sourceId === 'doc-beta'),
+    q7.results.map((r) => r.sourceId).join(','));
 } catch (e) {
   failed += 1;
   console.log(`FAIL  unexpected error — ${e?.stack || e}`);
 } finally {
   console.log(`\n${passed} passed, ${failed} failed`);
-  try { rmSync(DATA_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { rmSync(DATA_ROOT, { recursive: true, force: true }); } catch { /* ignore */ }
   process.exit(failed > 0 ? 1 : 0);
 }

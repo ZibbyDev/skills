@@ -1,15 +1,15 @@
 {
   "name": "@zibby/sidecar-gbrain",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Knowledge-base sidecar — embedded Postgres (PGlite) + pgvector behind a small, engine-agnostic REST contract the @zibby/skills gbrain skill calls.",
-  "main": "server.mjs",
+  "description": "Knowledge-base sidecar — the REAL GBrain (github.com/garrytan/gbrain, MIT) behind Zibby's engine-agnostic REST contract. A thin adapter drives the vendored `gbrain` CLI; each kbId gets its own GBrain brain for multi-tenant isolation.",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.mjs",
-    "smoke": "node smoke.mjs"
+    "start": "bun server.js",
+    "smoke": "bun smoke.mjs"
   },
   "dependencies": {
-    "@electric-sql/pglite": "^0.4.6"
+    "gbrain": "github:garrytan/gbrain#5008b287e47bf791132eedfebf66bdef11e9398c"
   }
 }
