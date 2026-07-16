@@ -13,15 +13,17 @@
  * Token shape (GET /integrations/token/google → resolveIntegrationToken):
  *   { provider:'google', token, email, scopes, expiresInSec }
  *
- * SCOPE / VISIBILITY (drive.file — Phase 1):
+ * SCOPE / VISIBILITY (drive.file):
  *   The integration requests ONLY the non-sensitive
  *   https://www.googleapis.com/auth/drive.file scope, which grants per-file
- *   access to files this app CREATED or the user explicitly PICKED. The Docs
- *   API's documents.create / documents.get / documents.batchUpdate all accept
- *   drive.file, so create→append→read-back of our own docs works fully. What
- *   does NOT work under Phase 1 is reading arbitrary pre-existing docs — that
- *   needs the Phase-2 documents.readonly scope (extended connect). The same
- *   code path serves both phases; only the granted scope differs.
+ *   access to files this app CREATED or the user explicitly PICKED (via the
+ *   Google Picker). The Docs API's documents.create / documents.get /
+ *   documents.batchUpdate all accept drive.file, so create→append→read-back of
+ *   our own / picked docs works fully. Reading an arbitrary pre-existing doc
+ *   requires the user to PICK it once first (the Picker grants drive.file on
+ *   that file). We do NOT request the sensitive documents.readonly scope —
+ *   Google's OAuth review rejected it; drive.file + Picker is the sanctioned
+ *   path.
  */
 
 import { existsSync, statSync, readFileSync } from 'fs';
@@ -492,7 +494,7 @@ Docs access is PER-USER: each teammate connects their OWN Google account (Integr
 - gdocs_create_doc: create a new Google Doc from a title + markdown (headings/bold/bullets/links supported) or plain text; returns { documentId, url }. Share the url with the user.
 - gdocs_append: append markdown/text to the end of a doc you created earlier (pass the documentId or doc URL).
 - gdocs_insert_image: append a LOCAL image file (png/jpg, ≤5MB) to the end of a doc — pass { documentId, imagePath, width?, height? } (width/height in PT, optional). The image is uploaded to the user's Drive and made link-readable (anyone with the link) so Docs can render it. Returns { ok, documentId, fileId, url }.
-- gdocs_get: read a doc back as plain text (works for app-created/user-picked docs; arbitrary docs need the extended documents.readonly connection).
+- gdocs_get: read a doc back as plain text (works for app-created/user-picked docs only; to read an arbitrary pre-existing doc the user must PICK it once first via the Google Picker — drive.file has no access to un-picked files).
 - gdocs_list_created: list the Google Docs visible to this app (drive.file → only docs it created or the user picked).
 These tools return { ok:false, error } on failure — treat an unavailable Google connection as "cannot deliver to Docs" and report it rather than blocking the task.`,
 
@@ -732,7 +734,7 @@ These tools return { ok:false, error } on failure — treat an unavailable Googl
     },
     {
       name: 'gdocs_get',
-      description: 'Read a Google Doc back as plain text (truncated to ~20k chars). Under the default drive.file scope this works ONLY for docs this app created or the user explicitly picked; reading arbitrary docs requires the extended documents.readonly connection. Returns { ok, documentId, title, url, text }.',
+      description: 'Read a Google Doc back as plain text (truncated to ~20k chars). The drive.file scope grants access ONLY to docs this app created or the user explicitly picked; to read an arbitrary pre-existing doc the user must PICK it once first via the Google Picker (drive.file cannot see un-picked files). Returns { ok, documentId, title, url, text }.',
       input_schema: {
         type: 'object',
         properties: {
