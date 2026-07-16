@@ -17,7 +17,26 @@
  */
 
 import http from 'node:http';
-import { ingest, query, del, health } from './brain.js';
+import { ingest, query, del, health, withEmbedding } from './brain.js';
+
+// Per-agent embedding overrides carried on the request (set by the control-plane
+// from the deploying agent's snapshotted config). Maps to the env GBrain reads.
+// The dimension is baked into the store at creation, so we pin it per known model.
+const EMBED_DIMS = { 'text-embedding-3-small': 1536, 'text-embedding-3-large': 3072 };
+function embedEnvFrom(body) {
+  const env = {};
+  const model = typeof body?.embeddingModel === 'string' ? body.embeddingModel.trim() : '';
+  const key = typeof body?.embeddingKey === 'string' ? body.embeddingKey.trim() : '';
+  if (model) {
+    env.GBRAIN_EMBEDDING_MODEL = model;
+    if (EMBED_DIMS[model]) env.GBRAIN_EMBEDDING_DIMENSIONS = String(EMBED_DIMS[model]);
+  }
+  if (key) {
+    env.OPENAI_API_KEY = key;   // GBrain reads the embedding key from OPENAI_API_KEY
+    env.GBRAIN_EMBEDDING = '1'; // a key was supplied → force embeddings on
+  }
+  return env;
+}
 
 const PORT = Number(process.env.PORT) || 8080;
 const AUTH_TOKEN = (process.env.SIDECAR_AUTH_TOKEN || '').trim();
@@ -84,7 +103,7 @@ async function handleIngest(body) {
   }
 
   const norm = docs.map((d) => ({ sourceId: d.sourceId.trim(), markdown: d.markdown, deleted: d.deleted === true }));
-  const r = await ingest(kbId, norm);
+  const r = await withEmbedding(embedEnvFrom(body), () => ingest(kbId, norm));
   return { status: 200, body: { ok: true, ...r } };
 }
 
@@ -94,7 +113,7 @@ async function handleQuery(body) {
   if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
   if (!q) return { status: 400, body: { ok: false, error: 'query is required' } };
   const topK = Number.isInteger(body?.topK) && body.topK > 0 ? Math.min(body.topK, 50) : 8;
-  const r = await query(kbId, q, topK);
+  const r = await withEmbedding(embedEnvFrom(body), () => query(kbId, q, topK));
   return { status: 200, body: { ok: true, results: r.results } };
 }
 

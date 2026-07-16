@@ -28,6 +28,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -81,11 +82,27 @@ function withBrainLock(brainDir, fn) {
 }
 
 // ── gbrain subprocess ───────────────────────────────────────────────────────
+// Per-REQUEST embedding overrides (model/key), threaded WITHOUT touching every
+// function signature: the server wraps an ingest/query call in withEmbedding(),
+// and every nested gbrain spawn (init + capture + query) reads the same store.
+// AsyncLocalStorage keeps it concurrency-safe — two kbIds running in parallel
+// each see their own overrides. GBrain reads GBRAIN_EMBEDDING_MODEL /
+// GBRAIN_EMBEDDING_DIMENSIONS / OPENAI_API_KEY from its (per-spawn) env, so a
+// per-agent model+key takes effect with NO gbrain fork. The model is baked into
+// the brain at creation (pgvector dimension) → per-store, fixed for its lifetime.
+const _embedCtx = new AsyncLocalStorage();
+export function withEmbedding(embedEnv, fn) {
+  if (!embedEnv || Object.keys(embedEnv).length === 0) return fn();
+  return _embedCtx.run(embedEnv, fn);
+}
+
 function runGbrain(brainDir, args) {
   return new Promise((resolve) => {
     const child = spawn(GBRAIN_BIN, args, {
       env: {
         ...process.env,
+        // Per-agent embedding overrides win over the box-global env (else inherit).
+        ...(_embedCtx.getStore() || {}),
         GBRAIN_HOME: brainDir,
         // Keep the CLI from retrying a wedged connect for the whole timeout.
         GBRAIN_NO_RETRY_CONNECT: '1',
