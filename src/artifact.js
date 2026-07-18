@@ -123,7 +123,10 @@ async function artifactWriteFetch(payload) {
   if (!session) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). Artifacts are only available inside a Zibby run.');
   }
-  const res = await fetch(`${getAccountApiUrl()}/artifacts`, {
+  // '/credits/artifacts', not '/artifacts': on cloud the main API sits at its
+  // 500-resource cap, so these routes live on the credits RestApi (same
+  // placement as review-memory below); self-host mounts the same alias.
+  const res = await fetch(`${getAccountApiUrl()}/credits/artifacts`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -141,7 +144,7 @@ async function artifactReadFetch(id) {
   if (!session) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). Artifacts are only available inside a Zibby run.');
   }
-  const res = await fetch(`${getAccountApiUrl()}/artifacts/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${getAccountApiUrl()}/credits/artifacts/${encodeURIComponent(id)}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${session}` },
   });
