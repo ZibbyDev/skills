@@ -47,7 +47,7 @@ describe('artifact_publish', () => {
 
     // 1) blob write carried the content + title, NOT account/project.
     const write = calls.find((c) => c[0] === 'write');
-    expect(write[1]).toBe('http://cp.local/artifacts');
+    expect(write[1]).toBe('http://cp.local/credits/artifacts');
     expect(write[2]).toMatchObject({ title: 'Status Report', html: '<h1>hi</h1>', kind: 'report' });
 
     // 2) index write hit kv-memory at scope `<WORKFLOW_TYPE>:artifact:<id>`.

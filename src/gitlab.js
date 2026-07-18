@@ -476,6 +476,79 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           });
         }
 
+        case 'gitlab_list_commits': {
+          // Repository commit LISTING — the window/date-range source of truth.
+          // Built for metering/insights agents: gitlab_clone is SHALLOW (depth
+          // 1), so listing history via a clone silently truncates to one
+          // commit; this hits GET /repository/commits (since/until/ref/paging,
+          // with_stats) instead. Purely additive — no existing tool covered
+          // commit listing (the tool set was MR/issue-centric).
+          const { projectId, since, until, refName, page, perPage, withStats } = args || {};
+          if (!projectId) return JSON.stringify({ error: 'projectId is required' });
+          const params = new URLSearchParams();
+          params.set('per_page', String(Math.min(Number(perPage) || 50, 100)));
+          params.set('page', String(Number(page) || 1));
+          if (since) params.set('since', since);
+          if (until) params.set('until', until);
+          if (refName) params.set('ref_name', refName);
+          if (withStats !== false) params.set('with_stats', 'true');
+          const data = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits?${params.toString()}`);
+          const commits = (Array.isArray(data) ? data : []).map((c) => ({
+            id: c.id,
+            shortId: c.short_id,
+            title: c.title,
+            authorName: c.author_name,
+            authorEmail: c.author_email,
+            authoredDate: c.authored_date,
+            committedDate: c.committed_date,
+            parentIds: Array.isArray(c.parent_ids) ? c.parent_ids : [],
+            // with_stats=true → additions/deletions/total per commit (size
+            // signals without a per-commit diff call).
+            stats: c.stats || null,
+          }));
+          // A FULL page ⇒ more pages may exist — callers MUST keep paging.
+          return JSON.stringify({
+            page: Number(page) || 1,
+            count: commits.length,
+            hasMore: commits.length >= (Math.min(Number(perPage) || 50, 100)),
+            commits,
+          });
+        }
+        case 'gitlab_get_commit': {
+          // One commit's detail + (optionally) its per-file diffs — what a
+          // scorer needs to judge a commit it found via gitlab_list_commits.
+          const { projectId, sha, includeDiff } = args || {};
+          if (!projectId || !sha) return JSON.stringify({ error: 'projectId and sha are required' });
+          const c = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}`);
+          let files;
+          if (includeDiff !== false) {
+            const diffs = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}/diff`);
+            files = (Array.isArray(diffs) ? diffs : []).map((d) => ({
+              oldPath: d.old_path,
+              newPath: d.new_path,
+              newFile: !!d.new_file,
+              deletedFile: !!d.deleted_file,
+              renamedFile: !!d.renamed_file,
+              // Same per-file cap as gitlab_get_mr_changes — enough to judge
+              // the nature/complexity of a change without unbounded payloads.
+              diff: typeof d.diff === 'string' ? d.diff.slice(0, 3000) : '',
+            }));
+          }
+          return JSON.stringify({
+            id: c.id,
+            shortId: c.short_id,
+            title: c.title,
+            message: typeof c.message === 'string' ? c.message.slice(0, 2000) : '',
+            authorName: c.author_name,
+            authorEmail: c.author_email,
+            authoredDate: c.authored_date,
+            committedDate: c.committed_date,
+            parentIds: Array.isArray(c.parent_ids) ? c.parent_ids : [],
+            stats: c.stats || null,
+            webUrl: c.web_url,
+            ...(files ? { filesChanged: files.length, files } : {}),
+          });
+        }
         case 'gitlab_list_mrs': {
           const { projectId, state, targetBranch, sourceBranch, authorUsername, labels, search, sort, orderBy, limit } = args || {};
           if (!projectId) return JSON.stringify({ error: 'projectId is required' });
@@ -891,6 +964,36 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           iid: { type: 'number', description: 'Merge request iid' },
         },
         required: ['projectId', 'iid'],
+      },
+    },
+    {
+      name: 'gitlab_list_commits',
+      description: 'List a project\'s repository commits (the commit HISTORY — not MRs), optionally bounded by since/until ISO dates and a ref/branch, with per-commit stats (additions/deletions). Paginated: keep calling with page+1 while hasMore is true. This is the ONLY correct way to enumerate commits in a date window — gitlab_clone is shallow (depth 1) and its git log shows just one commit.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string', description: 'Project numeric id OR full path (e.g. "group/repo")' },
+          since: { type: 'string', description: 'Only commits after this ISO-8601 date/time (inclusive), e.g. "2026-01-01T00:00:00Z"' },
+          until: { type: 'string', description: 'Only commits before this ISO-8601 date/time, e.g. "2026-07-01T00:00:00Z"' },
+          refName: { type: 'string', description: 'Branch/tag to list (defaults to the default branch)' },
+          page: { type: 'number', description: 'Page number, 1-based (default 1)' },
+          perPage: { type: 'number', description: 'Commits per page, max 100 (default 50)' },
+          withStats: { type: 'boolean', description: 'Include per-commit additions/deletions stats (default true)' },
+        },
+        required: ['projectId'],
+      },
+    },
+    {
+      name: 'gitlab_get_commit',
+      description: 'Get ONE commit\'s full detail — message, author, timestamps, stats, and (by default) its per-file diffs (each capped at 3000 chars) — so you can judge the nature/complexity of the change. Use after gitlab_list_commits.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string', description: 'Project numeric id OR full path (e.g. "group/repo")' },
+          sha: { type: 'string', description: 'The commit sha (full or short)' },
+          includeDiff: { type: 'boolean', description: 'Include per-file diffs (default true; set false for metadata-only)' },
+        },
+        required: ['projectId', 'sha'],
       },
     },
     {

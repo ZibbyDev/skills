@@ -397,19 +397,29 @@ When user just wants to "look at" or "read" files (not clone):
         }
 
         case 'github_list_commits': {
-          const { owner, repo, branch, path, limit } = args;
+          // since/until/page are ADDITIVE (2026-07-18, engineering-insights
+          // window backfill): a date-window listing was impossible before —
+          // same gap the gitlab twin (gitlab_list_commits) closes.
+          const { owner, repo, branch, path, limit, since, until, page } = args;
           if (!owner || !repo) return JSON.stringify({ error: 'owner and repo are required' });
-          let url = `/repos/${owner}/${repo}/commits?per_page=${limit || 20}`;
+          const perPage = Math.min(Number(limit) || 20, 100);
+          let url = `/repos/${owner}/${repo}/commits?per_page=${perPage}&page=${Number(page) || 1}`;
           if (branch) url += `&sha=${encodeURIComponent(branch)}`;
           if (path) url += `&path=${encodeURIComponent(path)}`;
+          if (since) url += `&since=${encodeURIComponent(since)}`;
+          if (until) url += `&until=${encodeURIComponent(until)}`;
           const commits = await ghFetch(url);
           return JSON.stringify({
             total: commits.length,
+            page: Number(page) || 1,
+            // A FULL page ⇒ more pages may exist — keep paging while true.
+            hasMore: commits.length >= perPage,
             commits: commits.map(c => ({
               sha: c.sha?.slice(0, 8),
               fullSha: c.sha,
               message: c.commit?.message?.slice(0, 300),
               author: c.commit?.author?.name,
+              authorEmail: c.commit?.author?.email,
               date: c.commit?.author?.date,
               url: c.html_url,
             })),
@@ -1234,7 +1244,7 @@ When user just wants to "look at" or "read" files (not clone):
     },
     {
       name: 'github_list_commits',
-      description: 'List recent commits on a branch, optionally filtered by file path',
+      description: 'List commits on a branch — optionally bounded by since/until ISO dates (date-window listing) and paginated (keep calling with page+1 while hasMore is true). Optionally filtered by file path.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1242,7 +1252,10 @@ When user just wants to "look at" or "read" files (not clone):
           repo: { type: 'string', description: 'Repository name' },
           branch: { type: 'string', description: 'Branch name (default: repo default branch)' },
           path: { type: 'string', description: 'Filter commits touching this file path' },
-          limit: { type: 'number', description: 'Max commits (default: 20)' },
+          limit: { type: 'number', description: 'Commits per page, max 100 (default: 20)' },
+          since: { type: 'string', description: 'Only commits after this ISO-8601 date/time, e.g. "2026-01-01T00:00:00Z"' },
+          until: { type: 'string', description: 'Only commits before this ISO-8601 date/time' },
+          page: { type: 'number', description: 'Page number, 1-based (default 1)' },
         },
         required: ['owner', 'repo'],
       },
