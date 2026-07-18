@@ -427,9 +427,27 @@ When user just wants to "look at" or "read" files (not clone):
         }
 
         case 'github_get_commit': {
-          const { owner, repo, sha } = args;
+          const { owner, repo, sha, includePrs } = args;
           if (!owner || !repo || !sha) return JSON.stringify({ error: 'owner, repo, and sha are required' });
           const commit = await ghFetch(`/repos/${owner}/${repo}/commits/${sha}`);
+          // includePrs (ADDITIVE, default false): the PRs that CONTAIN this
+          // commit — the evidence link for contribution reporting (a PR page
+          // carries description + review history; a bare commit doesn't).
+          // GitHub's commits/:sha/pulls is the exact twin of GitLab's
+          // commits/:sha/merge_requests. Best-effort: an error yields [].
+          let pullRequests;
+          if (includePrs) {
+            try {
+              const prs = await ghFetch(`/repos/${owner}/${repo}/commits/${sha}/pulls`);
+              pullRequests = (Array.isArray(prs) ? prs : []).map((p) => ({
+                number: p.number,
+                title: p.title,
+                state: p.state,
+                merged: !!p.merged_at,
+                webUrl: p.html_url,
+              }));
+            } catch { pullRequests = []; }
+          }
           return JSON.stringify({
             sha: commit.sha?.slice(0, 8),
             message: commit.commit?.message,
@@ -443,6 +461,7 @@ When user just wants to "look at" or "read" files (not clone):
               deletions: f.deletions,
               patch: f.patch?.slice(0, 3000),
             })),
+            ...(pullRequests ? { pullRequests } : {}),
           });
         }
 
@@ -1269,6 +1288,7 @@ When user just wants to "look at" or "read" files (not clone):
           owner: { type: 'string', description: 'Repository owner' },
           repo: { type: 'string', description: 'Repository name' },
           sha: { type: 'string', description: 'Commit SHA (full or short)' },
+          includePrs: { type: 'boolean', description: 'Also return the pull request(s) containing this commit ({number,title,state,merged,webUrl}) — the evidence link for contribution records (default false)' },
         },
         required: ['owner', 'repo', 'sha'],
       },

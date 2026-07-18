@@ -517,9 +517,25 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
         case 'gitlab_get_commit': {
           // One commit's detail + (optionally) its per-file diffs — what a
           // scorer needs to judge a commit it found via gitlab_list_commits.
-          const { projectId, sha, includeDiff } = args || {};
+          const { projectId, sha, includeDiff, includeMrs } = args || {};
           if (!projectId || !sha) return JSON.stringify({ error: 'projectId and sha are required' });
           const c = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}`);
+          // includeMrs (ADDITIVE, default false): the MRs that CONTAIN this
+          // commit — the evidence link for contribution reporting (an MR page
+          // carries description + review history; a bare commit doesn't).
+          // Best-effort: an error yields [].
+          let mergeRequests;
+          if (includeMrs) {
+            try {
+              const mrs = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}/merge_requests`);
+              mergeRequests = (Array.isArray(mrs) ? mrs : []).map((m) => ({
+                iid: m.iid,
+                title: m.title,
+                state: m.state,
+                webUrl: m.web_url,
+              }));
+            } catch { mergeRequests = []; }
+          }
           let files;
           if (includeDiff !== false) {
             const diffs = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}/diff`);
@@ -547,6 +563,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
             stats: c.stats || null,
             webUrl: c.web_url,
             ...(files ? { filesChanged: files.length, files } : {}),
+            ...(mergeRequests ? { mergeRequests } : {}),
           });
         }
         case 'gitlab_list_mrs': {
@@ -992,6 +1009,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           projectId: { type: 'string', description: 'Project numeric id OR full path (e.g. "group/repo")' },
           sha: { type: 'string', description: 'The commit sha (full or short)' },
           includeDiff: { type: 'boolean', description: 'Include per-file diffs (default true; set false for metadata-only)' },
+          includeMrs: { type: 'boolean', description: 'Also return the merge request(s) containing this commit ({iid,title,state,webUrl}) — the evidence link for contribution records (default false)' },
         },
         required: ['projectId', 'sha'],
       },
