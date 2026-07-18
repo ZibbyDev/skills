@@ -37,6 +37,7 @@ import { datasetStoreSkill } from './datasetStore.js';
 import { artifactSkill } from './artifact.js';
 import { chartRenderSkill } from './chartRender.js';
 import { codeStatsSkill } from './codeStats.js';
+import { chatProgressSkill } from './chatProgress.js';
 import { socialCardSkill } from './socialCard.js';
 import { codeScanSkill } from './code-scan.js';
 import { triggerAgentSkill } from './triggerAgent.js';
@@ -79,6 +80,7 @@ registerSkill(datasetStoreSkill);
 registerSkill(artifactSkill);
 registerSkill(chartRenderSkill);
 registerSkill(codeStatsSkill);
+registerSkill(chatProgressSkill);
 registerSkill(socialCardSkill);
 registerSkill(codeScanSkill);
 registerSkill(triggerAgentSkill);
@@ -99,7 +101,7 @@ registerSkill({ ...slackSkill, id: 'slack_notify' });
 // identical shape, now the complete superset (drift gone).
 export { SKILL_IDS as SKILLS } from '@zibby/skill-ids';
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, artifactSkill, chartRenderSkill, codeStatsSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, artifactSkill, chartRenderSkill, codeStatsSkill, chatProgressSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
