@@ -1,3 +1,4 @@
+import { SKILL_META } from '@zibby/skill-ids';
 /**
  * artifact.js — publish a self-contained, shareable HTML/Markdown page.
  *
@@ -196,6 +197,8 @@ function pickContent(args) {
 
 export const artifactSkill = {
   id: 'artifact',
+  // ONE source for toggle metadata — by reference, never a copy (skills-platform rule).
+  meta: SKILL_META['artifact'],
   serverName: 'artifact',
   allowedTools: ['mcp__artifact__*'],
   description: 'Artifacts — publish a self-contained, shareable HTML/Markdown page to Zibby and get back a URL; the index of what you published is your memory.',
