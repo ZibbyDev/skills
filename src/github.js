@@ -4,6 +4,7 @@ import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
+import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -379,20 +380,71 @@ When user just wants to "look at" or "read" files (not clone):
           if (ev !== 'APPROVE' && !body && inline.length === 0) {
             return JSON.stringify({ error: 'a COMMENT or REQUEST_CHANGES review needs a body and/or inline comments' });
           }
-          const payload = { event: ev };
-          if (body) payload.body = String(body);
-          if (inline.length > 0) payload.comments = inline;
-          const review = await ghFetch(`/repos/${owner}/${repo}/pulls/${number}/reviews`, {
-            method: 'POST',
-            body: payload,
-          });
+
+          // DEDUP so a RE-review (new commit / re-@mention) doesn't pile up
+          // duplicates. Read existing PR review comments for the fingerprints
+          // THIS bot already posted, and the conversation for its updatable
+          // summary comment. Best-effort: any read failure → post everything.
+          const existingFps = new Set();
+          let summaryCommentId = null;
+          try {
+            for (let page = 1; page <= 20; page += 1) {
+              const rc = await ghFetch(`/repos/${owner}/${repo}/pulls/${number}/comments?per_page=100&page=${page}`);
+              if (!Array.isArray(rc) || rc.length === 0) break;
+              for (const c of rc) { const fp = extractFp(c.body); if (fp) existingFps.add(fp); }
+              if (rc.length < 100) break;
+            }
+            for (let page = 1; page <= 20 && summaryCommentId == null; page += 1) {
+              const ic = await ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments?per_page=100&page=${page}`);
+              if (!Array.isArray(ic) || ic.length === 0) break;
+              for (const c of ic) { if (hasSummaryMarker(c.body)) { summaryCommentId = c.id; break; } }
+              if (ic.length < 100) break;
+            }
+          } catch { /* best-effort */ }
+
+          // Summary → an UPDATABLE issue comment (GitHub reviews can't be edited),
+          // so it refreshes in place instead of a new summary every review.
+          let summaryUpdated = false;
+          let notePosted = false;
+          if (body) {
+            const summaryBody = `${String(body)}${SUMMARY_MARKER}`;
+            try {
+              if (summaryCommentId != null) {
+                await ghFetch(`/repos/${owner}/${repo}/issues/comments/${summaryCommentId}`, { method: 'PATCH', body: { body: summaryBody } });
+                summaryUpdated = true;
+              } else {
+                await ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments`, { method: 'POST', body: { body: summaryBody } });
+              }
+              notePosted = true;
+            } catch { /* non-fatal */ }
+          }
+
+          // Inline → only the NEW findings, marked for next time.
+          const { toPost, skipped: inlineSkipped } = dedupeInline(inline, existingFps);
+          const deduped = toPost.map(({ _fp, ...c }) => c); // keep marker in body, drop the helper field
+
+          let review = null;
+          // Post a review only when there's something new: fresh inline comments,
+          // or an approval/request-changes state to set. A COMMENT review with no
+          // new comments would just be noise (the summary comment already updated).
+          if (deduped.length > 0 || ev === 'APPROVE' || ev === 'REQUEST_CHANGES') {
+            const payload = { event: ev };
+            if (deduped.length > 0) payload.comments = deduped;
+            // REQUEST_CHANGES needs a body/comments; give it a pointer to the summary.
+            if (deduped.length === 0 && ev === 'REQUEST_CHANGES') payload.body = 'Changes requested — see the review summary comment.';
+            review = await ghFetch(`/repos/${owner}/${repo}/pulls/${number}/reviews`, { method: 'POST', body: payload });
+          }
+
           return JSON.stringify({
             ok: true,
-            id: review.id,
-            state: review.state,
+            id: review ? review.id : undefined,
+            state: review ? review.state : undefined,
             event: ev,
-            commentsPosted: inline.length,
-            url: review.html_url,
+            notePosted,
+            summaryUpdated,
+            commentsPosted: deduped.length,
+            inlineSkipped: inlineSkipped || undefined,
+            url: review ? review.html_url : undefined,
           });
         }
 

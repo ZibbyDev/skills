@@ -57,6 +57,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
+import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -700,19 +701,61 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
             diffRefs = mr.diff_refs || null;
           }
 
+          // DEDUP: read the MR's existing discussions to find (a) fingerprints of
+          // inline comments THIS bot already posted (hidden zbfp markers) and (b)
+          // the review-summary note to UPDATE. So a RE-review (new commit / re-
+          // @mention) only posts NEW findings + refreshes one summary, instead of
+          // piling up duplicate threads. Best-effort: on any read failure, treat
+          // as "nothing posted yet" and post everything (never blocks a review).
+          const existingFps = new Set();
+          let summaryNoteId = null;
+          try {
+            for (let page = 1; page <= 20; page += 1) {
+              const disc = await glFetch(`/projects/${proj}/merge_requests/${iid}/discussions?per_page=100&page=${page}`);
+              if (!Array.isArray(disc) || disc.length === 0) break;
+              for (const d of disc) {
+                for (const n of (d.notes || [])) {
+                  const fp = extractFp(n.body);
+                  if (fp) existingFps.add(fp);
+                  if (summaryNoteId == null && hasSummaryMarker(n.body)) summaryNoteId = n.id;
+                }
+              }
+              if (disc.length < 100) break;
+            }
+          } catch { /* best-effort — post everything */ }
+
+          // Summary note: UPDATE the existing one (if any) instead of re-posting.
           let notePosted = false;
+          let summaryUpdated = false;
           if (body) {
-            await glFetch(`/projects/${proj}/merge_requests/${iid}/notes`, {
-              method: 'POST',
-              body: { body: String(body) },
-            });
-            notePosted = true;
+            const summaryBody = `${String(body)}${SUMMARY_MARKER}`;
+            try {
+              if (summaryNoteId != null) {
+                await glFetch(`/projects/${proj}/merge_requests/${iid}/notes/${summaryNoteId}`, {
+                  method: 'PUT', body: { body: summaryBody },
+                });
+                summaryUpdated = true;
+              } else {
+                await glFetch(`/projects/${proj}/merge_requests/${iid}/notes`, {
+                  method: 'POST', body: { body: summaryBody },
+                });
+              }
+              notePosted = true;
+            } catch (e) {
+              // fall back to a plain post so the summary is never lost
+              await glFetch(`/projects/${proj}/merge_requests/${iid}/notes`, { method: 'POST', body: { body: summaryBody } });
+              notePosted = true;
+            }
           }
+
+          // Inline: drop findings already posted (by content fingerprint); stamp
+          // the survivors with a marker so the NEXT review recognizes them.
+          const { toPost, skipped: inlineSkipped } = dedupeInline(inline, existingFps);
 
           let inlinePosted = 0;
           const inlineErrors = [];
-          if (inline.length > 0 && diffRefs) {
-            for (const c of inline) {
+          if (toPost.length > 0 && diffRefs) {
+            for (const c of toPost) {
               const position = {
                 base_sha: diffRefs.base_sha,
                 start_sha: diffRefs.start_sha,
@@ -733,14 +776,16 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
                 inlineErrors.push(`${c.path}:${c.newLine ?? c.oldLine} — ${e.message}`);
               }
             }
-          } else if (inline.length > 0 && !diffRefs) {
+          } else if (toPost.length > 0 && !diffRefs) {
             inlineErrors.push('no diff_refs available — inline comments skipped (pass diffRefs from gitlab_get_mr)');
           }
 
           return JSON.stringify({
             ok: true,
             notePosted,
+            summaryUpdated,
             inlinePosted,
+            inlineSkipped: inlineSkipped || undefined,
             inlineErrors: inlineErrors.length ? inlineErrors : undefined,
           });
         }
