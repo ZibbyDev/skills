@@ -41,6 +41,13 @@
  * NEVER throws — a failed index degrades to "tools return empty", not a crashed
  * run. The hook returns {} (it contributes no agent-visible options); its only
  * job is the side-effect of building the index.
+ *
+ * It only helps agents whose repo is ALREADY checked out when the node starts.
+ * An agent that clones INSIDE its own run has nothing to index at hook time —
+ * the hook then NO-OPS (see repoDirToIndex) and that agent must call
+ * index_repository itself right after cloning. Do NOT "fix" the empty case by
+ * falling back to the workspace root: that indexes the agent's own template
+ * source, which is worse than no index at all.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -69,8 +76,19 @@ function cacheDir() {
 /**
  * Best-effort discovery of the repo dir to index. The git skill clones into
  * <workspace>/.zibby/repos/<repo>; if exactly one repo is checked out we index
- * it, otherwise we index the workspace root (codebase-memory derives a
- * path-based project name either way). Returns an absolute dir or null.
+ * it, else the whole repos root. Returns an absolute dir, or NULL when nothing
+ * is checked out yet.
+ *
+ * NEVER falls back to the workspace ROOT. That fallback was actively harmful:
+ * this hook runs BEFORE the node's agent, and an agent that clones INSIDE its
+ * own run (the code-review templates call gitlab_clone/github_clone from the
+ * gather agent) has an empty repos dir at hook time — so the fallback indexed
+ * `/workspace`, which at that moment holds the AGENT'S OWN TEMPLATE SOURCE.
+ * The graph then described the reviewer's own graph.mjs/nodes instead of the
+ * repo under review, and the idempotency marker made that garbage index stick
+ * for the rest of the run. Returning null instead means: no repo yet → skip
+ * pre-indexing entirely and let whoever cloned it index the REAL path (the
+ * code-review gather step calls index_repository right after the clone).
  */
 function repoDirToIndex() {
   const ws = process.env.WORKSPACE || process.env.ZIBBY_WORKSPACE || '/workspace';
@@ -83,8 +101,8 @@ function repoDirToIndex() {
       if (entries.length === 1) return entries[0];
       if (entries.length > 1) return reposRoot; // index the whole repos root
     }
-  } catch { /* fall through to workspace */ }
-  return existsSync(ws) ? ws : null;
+  } catch { /* nothing checked out we can trust */ }
+  return null;
 }
 
 /** Stable short hash of an absolute path, for the idempotency marker filename. */
