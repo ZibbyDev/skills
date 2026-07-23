@@ -30,6 +30,8 @@
  *   - POST {base}/datasets/stores/{storeId}/query   body { select?, where?,
  *       groupBy?, orderBy?, limit?, since?, until?, agent? }
  *       → { ok, rowCount, columns, rows }
+ * Plus the per-type data routes on the same base: /sql (sqlite stores) and
+ * /put /get /list /delete (file stores — blob storage by relative path).
  * The `storeId` lives in the URL path. Tenancy (account + project) is enforced
  * SERVER-SIDE from the Bearer token — the skill NEVER sends account/project.
  *
@@ -230,12 +232,15 @@ omit \`store\` and it defaults to that one. You can ONLY write to a bound store
 name; any other name is rejected. Each appended record is an arbitrary JSON
 object, auto-tagged with YOUR agent type so you can later filter to your writes.
 
-There are TWO kinds of bound store (shown as TYPE in AVAILABLE STORES):
+There are THREE kinds of bound store (shown as TYPE in AVAILABLE STORES):
 • dataset — append-only structured records you QUERY/AGGREGATE later (analytics).
 • sqlite  — a real, MUTABLE relational database (a SQLite file per store): CREATE
   TABLE on the fly, INSERT/UPDATE/DELETE, SELECT. Schema + data persist across
   runs. Use this when you need to UPDATE rows / track changing state (e.g. a
   queue with a status column), not just append.
+• file    — arbitrary FILE/BLOB storage addressed by relative path: stash raw
+  JSON dumps, CSVs, images, snapshots as-is and fetch them back in later runs.
+  Use this when the data is a document/blob, not rows.
 
 You can also CREATE your own store on demand (no deploy needed) with
 ensure_store — e.g. an agent that needs a private sqlite DB to track drafts/
@@ -252,8 +257,14 @@ Tools:
   NOT EXISTS. Returns { rowsModified, wrote }.
 - sqlite_query: (sqlite stores) Run a SELECT (optionally with \`params\` for safe
   binding). Returns { columns, rows }. Read-only — never changes data.
+- file_put: (file stores) Write/overwrite ONE file at a relative path (text or
+  base64 binary; max 4 MiB).
+- file_get: (file stores) Read a file back (text returned as text, binary as
+  base64).
+- file_list: (file stores) List stored files (optionally by path prefix).
+- file_delete: (file stores) Delete ONE file by path.
 Pick the tool that matches the store's TYPE; using a dataset tool on a sqlite
-store (or vice-versa) is rejected.`,
+store (or a file tool on either, etc.) is rejected.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -341,6 +352,69 @@ store (or vice-versa) is rejected.`,
           return JSON.stringify({ ...data, store: name });
         }
 
+        case 'file_put': {
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          if (typeof args?.path !== 'string' || !args.path.trim()) {
+            return JSON.stringify({ error: 'path is required (a relative file path like "reports/2026-07.json")' });
+          }
+          const hasText = typeof args?.content === 'string';
+          const hasB64 = typeof args?.contentBase64 === 'string' && args.contentBase64.length > 0;
+          if (!hasText && !hasB64) {
+            return JSON.stringify({ error: 'content (text) or contentBase64 (base64 bytes) is required' });
+          }
+          const payload = { path: args.path.trim() };
+          if (hasText) payload.content = args.content; else payload.contentBase64 = args.contentBase64;
+          if (typeof args?.contentType === 'string' && args.contentType.trim()) payload.contentType = args.contentType.trim();
+          const data = await storeFetch(target.storeId, 'put', payload);
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+        }
+
+        case 'file_get': {
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          if (typeof args?.path !== 'string' || !args.path.trim()) {
+            return JSON.stringify({ error: 'path is required' });
+          }
+          const data = await storeFetch(target.storeId, 'get', { path: args.path.trim() });
+          // Ergonomics: valid UTF-8 that round-trips is returned as TEXT
+          // (`content`); anything else stays base64 (`contentBase64`) with an
+          // `encoding` marker so the agent knows what it got.
+          const out = {
+            ok: true, store: target.name, storeId: target.storeId,
+            path: data.path, size: data.size, contentType: data.contentType, lastModified: data.lastModified,
+          };
+          const buf = Buffer.from(data.contentBase64 || '', 'base64');
+          const text = buf.toString('utf8');
+          if (Buffer.compare(Buffer.from(text, 'utf8'), buf) === 0 && !text.includes('\u0000')) {
+            out.content = text; out.encoding = 'utf8';
+          } else {
+            out.contentBase64 = data.contentBase64; out.encoding = 'base64';
+          }
+          return JSON.stringify(out);
+        }
+
+        case 'file_list': {
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          const payload = {};
+          if (typeof args?.prefix === 'string' && args.prefix.trim()) payload.prefix = args.prefix.trim();
+          if (args?.limit != null) payload.limit = args.limit;
+          if (typeof args?.cursor === 'string' && args.cursor) payload.cursor = args.cursor;
+          const data = await storeFetch(target.storeId, 'list', payload);
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+        }
+
+        case 'file_delete': {
+          const target = resolveStore(args?.store);
+          if (target.error) return JSON.stringify({ error: target.error });
+          if (typeof args?.path !== 'string' || !args.path.trim()) {
+            return JSON.stringify({ error: 'path is required' });
+          }
+          const data = await storeFetch(target.storeId, 'delete', { path: args.path.trim() });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+        }
+
         case 'sqlite_exec':
         case 'sqlite_query': {
           // Both map to the /sql route on a SQLITE-type store. exec vs query is
@@ -419,7 +493,7 @@ store (or vice-versa) is rejected.`,
         type: 'object',
         properties: {
           name: { type: 'string', description: 'A short logical name for the store (e.g. "linkedin_posts"). Letters, digits, _ and - only.' },
-          type: { type: 'string', enum: ['sqlite', 'dataset'], description: 'Store type. "sqlite" (default) = a mutable relational DB whose schema YOU define with SQL. "dataset" = append-only JSON records for later aggregation/analytics.' },
+          type: { type: 'string', enum: ['sqlite', 'dataset', 'file'], description: 'Store type. "sqlite" (default) = a mutable relational DB whose schema YOU define with SQL. "dataset" = append-only JSON records for later aggregation/analytics. "file" = arbitrary file/blob storage by relative path (file_put/file_get/file_list/file_delete).' },
           description: { type: 'string', description: 'What this store is for (shown in the Storage UI).' },
         },
         required: ['name'],
@@ -449,6 +523,59 @@ store (or vice-versa) is rejected.`,
           params: { type: 'array', description: 'Optional positional bind params for the SELECT, e.g. ["linkedin_personal"].' },
         },
         required: ['sql'],
+      },
+    },
+    {
+      name: 'file_put',
+      description: 'For FILE-type stores: write (or overwrite) ONE file at a relative path — raw JSON dumps, CSVs, images, snapshots, any blob you want to keep across your stateless runs. Text goes in `content`; binary goes base64-encoded in `contentBase64` (pass exactly one). Max 4 MiB per file. Overwriting the same path UPDATES the file. Returns { ok, path, size }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          store: { type: 'string', description: 'The logical store NAME (a file-type store from AVAILABLE STORES) — pick by description. NOT an id. If exactly one store is bound you may omit this.' },
+          path: { type: 'string', description: 'Relative file path, e.g. "dumps/run-42.json" or "img/chart.png". Letters, digits, ".", "_", "-" and "/" only; no "..", no leading "/".' },
+          content: { type: 'string', description: 'Text content (UTF-8). Use for JSON/CSV/text files.' },
+          contentBase64: { type: 'string', description: 'Base64-encoded binary content (images etc.). Alternative to `content`.' },
+          contentType: { type: 'string', description: 'Optional MIME type (e.g. "application/json", "image/png"). Defaults sensibly.' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'file_get',
+      description: 'For FILE-type stores: read ONE stored file back by its relative path. Text files come back as `content` (encoding "utf8"); binary files come back as `contentBase64` (encoding "base64"). Returns { path, size, contentType, lastModified, content|contentBase64, encoding }.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          store: { type: 'string', description: 'The logical store NAME (a file-type store from AVAILABLE STORES). If exactly one store is bound you may omit this.' },
+          path: { type: 'string', description: 'The relative file path to fetch (as listed by file_list / used in file_put).' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'file_list',
+      description: 'For FILE-type stores: list the stored files — each entry has { path, size, lastModified }. Optionally filter by a path `prefix` (e.g. "dumps/"). Paginated via `cursor` when there are more results.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          store: { type: 'string', description: 'The logical store NAME (a file-type store from AVAILABLE STORES). If exactly one store is bound you may omit this.' },
+          prefix: { type: 'string', description: 'Optional path prefix filter, e.g. "dumps/" or "reports/2026".' },
+          limit: { type: 'number', description: 'Max entries to return (default/max 1000).' },
+          cursor: { type: 'string', description: 'Pagination cursor from a previous file_list response (nextCursor).' },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'file_delete',
+      description: 'For FILE-type stores: delete ONE stored file by its relative path. Returns { ok, path, deleted }. Errors if the path does not exist.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          store: { type: 'string', description: 'The logical store NAME (a file-type store from AVAILABLE STORES). If exactly one store is bound you may omit this.' },
+          path: { type: 'string', description: 'The relative file path to delete.' },
+        },
+        required: ['path'],
       },
     },
   ],

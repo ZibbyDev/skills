@@ -49,7 +49,7 @@ describe('datasetStoreSkill structure', () => {
 
   it('exposes the expected tools', () => {
     const names = datasetStoreSkill.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['dataset_append', 'dataset_query', 'ensure_store', 'sqlite_exec', 'sqlite_query']);
+    expect(names).toEqual(['dataset_append', 'dataset_query', 'ensure_store', 'file_delete', 'file_get', 'file_list', 'file_put', 'sqlite_exec', 'sqlite_query']);
   });
 
   it('sqlite tools take a logical `store` name + required sql', () => {
