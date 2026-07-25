@@ -6,7 +6,7 @@
 
 [Deutsch](./i18n/README.de.md) | [Español](./i18n/README.es.md) | [français](./i18n/README.fr.md) | [日本語](./i18n/README.ja.md) | [한국어](./i18n/README.ko.md) | [Português](./i18n/README.pt.md) | [Русский](./i18n/README.ru.md) | [中文](./i18n/README.zh.md)
 
-📖 **Full docs:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
+📖 **Full docs:** [docs.zibby.app](https://docs.zibby.app) · [Get Started](https://docs.zibby.app/get-started/install) · [Concepts](https://docs.zibby.app/concepts/graph) · [Designing agents](https://docs.zibby.app/concepts/designing-agents) · [CLI Reference](https://docs.zibby.app/cli-reference) · [Cloud](https://docs.zibby.app/cloud/triggering)
 
 > **The skill layer for [@zibby/agent-workflow](https://github.com/ZibbyDev/agent-workflow).** Built-in skill definitions that give a workflow node the tools it needs — function tools, MCP servers, browser, issue trackers, memory. Vendor-neutral, JavaScript-first.
 
