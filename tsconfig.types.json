@@ -13,15 +13,28 @@
     "rootDir": "src",
     "strict": false,
     "noEmitOnError": false,
-    "lib": ["ES2022", "DOM"]
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "verbatimModuleSyntax": true,
+    "useDefineForClassFields": false,
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src/**/*.js"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.js"
+  ],
   "exclude": [
     "node_modules",
     "dist",
     "test",
     "**/__tests__/**",
     "**/*.test.js",
-    "**/*.spec.js"
+    "**/*.spec.js",
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts"
   ]
 }

@@ -1,0 +1,7 @@
+{
+  "_comment": "esbuild reads this (nearest tsconfig.json) for useDefineForClassFields — false keeps bare TS class-field declarations zero-code so the migrated JS runtime stays byte-identical. tsc uses tsconfig.types.json for declaration emit.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": false
+  }
+}
