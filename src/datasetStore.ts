@@ -213,6 +213,68 @@ async function storeFetch(storeId, action, payload) {
   return res.json();
 }
 
+// ── large-file (presigned direct-to-S3) path ─────────────────────────────────
+// The base64-in-JSON put/get above caps at 4 MiB of RAW bytes (MAX_FILE_BYTES) —
+// content travels inside the JSON body through the cloud Lambda proxy whose hard
+// payload ceiling is 6 MB. The STORAGE (S3/MinIO) holds up to 5 TB/object, so
+// that 4 MiB is a TRANSPORT limit, not a storage one. For bigger files we mint a
+// short-lived presigned S3 URL (put-url/get-url) and transfer the object
+// DIRECTLY to/from the store, bypassing the JSON/Lambda envelope entirely. The
+// server derives the tenant-scoped S3 key from the resolved storeId + validated
+// path, so a presigned URL can only ever touch THIS tenant's file. On self-host
+// the backend signs against S3_PUBLIC_ENDPOINT so the URL is reachable outside
+// the docker network; on cloud it's a normal S3 presign. Transparent to the
+// agent — file_put/file_get just no longer fail at 4 MiB.
+
+// Cut over to the presigned path above this many RAW bytes. Kept safely under
+// the 4 MiB base64 cap (a bit of JSON-envelope headroom) so a base64 put never
+// 413s: files ≤ this keep the byte-identical base64 path, larger ones go direct.
+const LARGE_FILE_THRESHOLD = Math.floor(3.5 * 1024 * 1024); // 3.5 MiB
+
+/**
+ * Upload raw bytes to a file store via a presigned PUT (direct to S3/MinIO).
+ * Requests a put-url (server-derived tenant key), then PUTs the bytes with the
+ * EXACT Content-Type the server signed (SigV4 covers that header). Returns a
+ * result shaped like the small-file put ({ ok, path, size, contentType }).
+ */
+async function putViaPresign(storeId, path, bytes, contentType) {
+  const meta: any = await storeFetch(storeId, 'put-url', { path, contentType });
+  if (!meta?.url) throw new Error('put-url did not return an upload URL');
+  const res = await fetch(meta.url, {
+    method: meta.method || 'PUT',
+    headers: meta.headers || { 'Content-Type': contentType },
+    body: bytes,
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`direct upload failed (${res.status}): ${t.slice(0, 200)}`);
+  }
+  return {
+    ok: true,
+    path: meta.path || path,
+    size: bytes.length,
+    contentType: meta.contentType || contentType,
+    via: 'presign',
+  };
+}
+
+/**
+ * Download a file store object via a presigned GET (direct from S3/MinIO).
+ * Used as the fallback when the inline base64 get hits the 4 MiB read cap (413).
+ * Returns the raw bytes + the object's Content-Type.
+ */
+async function getViaPresign(storeId, path) {
+  const meta: any = await storeFetch(storeId, 'get-url', { path });
+  if (!meta?.url) throw new Error('get-url did not return a download URL');
+  const res = await fetch(meta.url, { method: meta.method || 'GET' });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`direct download failed (${res.status}): ${t.slice(0, 200)}`);
+  }
+  const ab = await res.arrayBuffer();
+  return { buf: Buffer.from(ab), contentType: res.headers.get('content-type') || 'application/octet-stream' };
+}
+
 export const datasetStoreSkill: any = {
   id: 'dataset-store',
   serverName: 'dataset_store',
@@ -258,9 +320,11 @@ Tools:
 - sqlite_query: (sqlite stores) Run a SELECT (optionally with \`params\` for safe
   binding). Returns { columns, rows }. Read-only — never changes data.
 - file_put: (file stores) Write/overwrite ONE file at a relative path (text or
-  base64 binary; max 4 MiB).
+  base64 binary). Large files are supported — they upload directly to storage,
+  no size limit you need to worry about.
 - file_get: (file stores) Read a file back (text returned as text, binary as
-  base64).
+  base64). Large files download directly from storage; the content still comes
+  back inline.
 - file_list: (file stores) List stored files (optionally by path prefix).
 - file_delete: (file stores) Delete ONE file by path.
 Pick the tool that matches the store's TYPE; using a dataset tool on a sqlite
@@ -363,9 +427,22 @@ store (or a file tool on either, etc.) is rejected.`,
           if (!hasText && !hasB64) {
             return JSON.stringify({ error: 'content (text) or contentBase64 (base64 bytes) is required' });
           }
-          const payload: any = { path: args.path.trim() };
+          const putPath = args.path.trim();
+          const explicitCt = (typeof args?.contentType === 'string' && args.contentType.trim()) ? args.contentType.trim() : '';
+          // Size the raw payload: files over LARGE_FILE_THRESHOLD go via a
+          // presigned PUT DIRECTLY to S3/MinIO (no 4 MiB envelope cap); smaller
+          // ones keep the byte-identical base64-in-JSON request below.
+          const bytes = hasText
+            ? Buffer.from(args.content, 'utf8')
+            : Buffer.from(String(args.contentBase64).replace(/\s+/g, ''), 'base64');
+          if (bytes.length > LARGE_FILE_THRESHOLD) {
+            const contentType = explicitCt || (hasText ? 'text/plain; charset=utf-8' : 'application/octet-stream');
+            const data = await putViaPresign(target.storeId, putPath, bytes, contentType);
+            return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+          }
+          const payload: any = { path: putPath };
           if (hasText) payload.content = args.content; else payload.contentBase64 = args.contentBase64;
-          if (typeof args?.contentType === 'string' && args.contentType.trim()) payload.contentType = args.contentType.trim();
+          if (explicitCt) payload.contentType = explicitCt;
           const data = await storeFetch(target.storeId, 'put', payload);
           return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
         }
@@ -376,7 +453,22 @@ store (or a file tool on either, etc.) is rejected.`,
           if (typeof args?.path !== 'string' || !args.path.trim()) {
             return JSON.stringify({ error: 'path is required' });
           }
-          const data = await storeFetch(target.storeId, 'get', { path: args.path.trim() });
+          const getPath = args.path.trim();
+          // Try the inline base64 path first (byte-identical for small files). If
+          // the object exceeds the 4 MiB read cap the backend returns 413 — fall
+          // back to a presigned GET and download the bytes DIRECTLY. Either way
+          // the agent gets the content inline (file_get never fails at 4 MiB now).
+          let data: any;
+          try {
+            data = await storeFetch(target.storeId, 'get', { path: getPath });
+          } catch (getErr: any) {
+            if (!/failed \(413\)/.test(getErr?.message || '')) throw getErr;
+            const dl = await getViaPresign(target.storeId, getPath);
+            data = {
+              path: getPath, size: dl.buf.length, contentType: dl.contentType,
+              lastModified: null, contentBase64: dl.buf.toString('base64'),
+            };
+          }
           // Ergonomics: valid UTF-8 that round-trips is returned as TEXT
           // (`content`); anything else stays base64 (`contentBase64`) with an
           // `encoding` marker so the agent knows what it got.
