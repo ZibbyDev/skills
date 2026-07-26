@@ -619,7 +619,7 @@ store (or a file tool on either, etc.) is rejected.`,
     },
     {
       name: 'file_put',
-      description: 'For FILE-type stores: write (or overwrite) ONE file at a relative path — raw JSON dumps, CSVs, images, snapshots, any blob you want to keep across your stateless runs. Text goes in `content`; binary goes base64-encoded in `contentBase64` (pass exactly one). Max 4 MiB per file. Overwriting the same path UPDATES the file. Returns { ok, path, size }.',
+      description: 'For FILE-type stores: write (or overwrite) ONE file at a relative path — raw JSON dumps, CSVs, images, snapshots, any blob you want to keep across your stateless runs. Text goes in `content`; binary goes base64-encoded in `contentBase64` (pass exactly one). SIZE: there is no practical limit — anything over ~3.5 MiB is streamed straight to object storage via a presigned URL automatically, so do NOT gzip, base64-wrap, chunk or split a file just to make it fit. Non-ASCII paths (e.g. 个人报告.html) are fine — do not transliterate. Overwriting the same path UPDATES the file. Returns { ok, path, size }.',
       input_schema: {
         type: 'object',
         properties: {
