@@ -9,6 +9,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakePc, startApp, startAuth, callback } from './helpers.js';
+import { appIdFor } from '../src/app-config.js';
+
+// The app the default fakePc runs under. Slots are keyed by (USER, APP), so an
+// ordinary fixture carries the stamp a real slot would.
+const APP_A = appIdFor('client-A');
 
 const boundSlot = (userId) => ({
   access_token: 'old-at',
@@ -17,6 +22,7 @@ const boundSlot = (userId) => ({
   granted_at: 1,
   created_at: 1,
   pingcode_user_id: userId,
+  pingcode_app_id: APP_A,
 });
 
 // ── /health + plumbing ────────────────────────────────────────────
@@ -103,6 +109,8 @@ test('RENEW REFUSED: no resolvable identity, LEGACY/UNBOUND slot (the fail-open 
   // GET /v1/myself 403 → identity null → the old code SKIPPED the check for an
   // unbound slot and wrote the tokens anyway.
   const pc = fakePc({ identity: { userId: null, error: 'GET /v1/myself → HTTP 403' } });
+  // A genuinely LEGACY slot: minted before slots were keyed by (user, app), so
+  // it carries no app stamp.
   const before = { access_token: 'old-at', refresh_token: 'old-rt' };
   pc.slots.set('mcp_legacy', { ...before });
   const h = await startApp(pc);
@@ -115,7 +123,14 @@ test('RENEW REFUSED: no resolvable identity, LEGACY/UNBOUND slot (the fail-open 
   assert.match(body, /无法确认授权者身份/);
   assert.match(body, /PINGCODE_SCOPE/, 'the error names the config that fixes it');
   assert.equal(pc.saveCalls.length, 0, 'NOTHING was written');
-  assert.deepEqual(pc.slots.get('mcp_legacy'), before, 'slot untouched');
+  // The TOKENS are untouched. The only thing that changed is the additive
+  // (user, app) migration stamp applied when a legacy slot is first resolved —
+  // it records the app that already owned it and grants nothing.
+  assert.deepEqual(
+    pc.slots.get('mcp_legacy'),
+    { ...before, pingcode_app_id: APP_A },
+    'tokens untouched; legacy slot merely app-stamped',
+  );
 });
 
 test('RENEW REFUSED: no resolvable identity, BOUND slot', async (t) => {

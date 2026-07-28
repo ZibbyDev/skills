@@ -36,15 +36,27 @@ app.listen(PORT, () => {
   console.log(`  OAuth callback URL:  ${PUBLIC_BASE_URL}/oauth/callback${CALLBACK_PATH_NONCE ? '/<nonce>  (per-attempt path — register the wildcard/extra path)' : ''}`);
   console.log(`  Self-serve onboard:  ${PUBLIC_BASE_URL}/oauth/start`);
   console.log(`  (register the callback URL above in your PingCode app)`);
+  // ── multi-tenant note ──────────────────────────────────────────────────
+  // The PingCode app (client id/secret, API roots, scope) is NOT boot state: it
+  // is resolved PER REQUEST from the declaring agent's encrypted Env bag
+  // (app-config.js), so this ONE container serves N agents pointing at N
+  // different PingCode apps. Container env is only the fallback for an operator
+  // who configures the box directly — report which mode this box is in.
+  const envConfigured = !!(process.env.PINGCODE_CLIENT_ID && process.env.PINGCODE_CLIENT_SECRET);
+  console.log(
+    `  App config:          per-request (from the declaring agent's Env bag)`
+    + `${envConfigured ? ' + container-env fallback present' : ' — no container-env fallback set'}`,
+  );
   // Renews FAIL CLOSED when the consenting PingCode user cannot be resolved via
   // GET /v1/myself. An empty scope is the configuration in which that call 403s,
-  // so surface it at boot rather than at day 90 when a user clicks renew.
-  if (!process.env.PINGCODE_SCOPE) {
+  // so say it once at boot rather than at day 90 when a user clicks renew.
+  if (envConfigured && !process.env.PINGCODE_SCOPE) {
     console.warn(
-      '  ⚠️  PINGCODE_SCOPE is empty. Renews require GET /v1/myself to succeed; ' +
-      'with no scope PingCode grants the user token no API permissions and that ' +
-      'call 403s, so every renew will be REFUSED (fail-closed). Set PINGCODE_SCOPE ' +
-      'to a value covering /v1/myself in your PingCode OAuth app.',
+      '  ⚠️  The container-env fallback sets no PINGCODE_SCOPE. Renews require ' +
+      'GET /v1/myself to succeed; with no scope PingCode grants the user token no ' +
+      'API permissions and that call 403s, so a renew under the fallback config ' +
+      'will be REFUSED (fail-closed). Set PINGCODE_SCOPE on the agent Env bag ' +
+      '(preferred) or on the box.',
     );
   }
 });

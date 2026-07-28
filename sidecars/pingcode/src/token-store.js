@@ -56,9 +56,15 @@ export function resolveStorePaths(storePath) {
 
 // Columns with first-class meaning; anything else a caller stores on a slot
 // object round-trips through extra_json.
+//
+// `pingcode_app_id` is the second half of the slot's identity: a slot is keyed
+// by (USER, APP), not by user alone. A PingCode token is an artifact of ONE
+// OAuth client registration, so recording which app minted it is what lets the
+// shared, multi-tenant store REFUSE to serve a token from app A to a request
+// running under app B (see PingCodeOAuth.slotFor).
 const KNOWN_FIELDS = new Set([
   'access_token', 'refresh_token', 'expires_at', 'granted_at', 'created_at',
-  'pingcode_user_id',
+  'pingcode_user_id', 'pingcode_app_id',
 ]);
 
 export class TokenStore {
@@ -80,10 +86,28 @@ export class TokenStore {
         granted_at         INTEGER,
         created_at         INTEGER,
         pingcode_user_id   TEXT,
+        pingcode_app_id    TEXT,
         extra_json         TEXT
       );
     `);
+    this.#ensureColumns();
     this.#migrateLegacyJson(legacyJsonPath);
+  }
+
+  // ── schema migration (additive + idempotent) ────────────────────
+  // A store created before slots were keyed by (user, app) has no
+  // `pingcode_app_id` column. Add it in place — additive, idempotent, and it
+  // leaves every existing row's value NULL, which PingCodeOAuth.slotFor treats
+  // as "legacy, stamp it with the app in force on first use". No data is
+  // rewritten here and nothing is dropped.
+  #ensureColumns() {
+    const have = new Set(
+      this.#db.prepare('PRAGMA table_info(users)').all().map((r) => r.name),
+    );
+    if (!have.has('pingcode_app_id')) {
+      this.#db.exec('ALTER TABLE users ADD COLUMN pingcode_app_id TEXT');
+      console.log('[token-store] migrated schema: added users.pingcode_app_id (slots are keyed by user × app)');
+    }
   }
 
   // ── crypto ──────────────────────────────────────────────────────
@@ -128,8 +152,8 @@ export class TokenStore {
     this.#db.prepare(`
       INSERT OR REPLACE INTO users
         (mcp_token, access_token_enc, refresh_token_enc, expires_at, granted_at,
-         created_at, pingcode_user_id, extra_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         created_at, pingcode_user_id, pingcode_app_id, extra_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       mcpToken,
       this.#encrypt(t.access_token),
@@ -138,6 +162,7 @@ export class TokenStore {
       t.granted_at ?? null,
       t.created_at ?? null,
       t.pingcode_user_id ?? null,
+      t.pingcode_app_id ?? null,
       Object.keys(extra).length ? JSON.stringify(extra) : null,
     );
   }
@@ -159,6 +184,7 @@ export class TokenStore {
       granted_at: row.granted_at,
       created_at: row.created_at,
       pingcode_user_id: row.pingcode_user_id,
+      pingcode_app_id: row.pingcode_app_id,
     };
   }
 
