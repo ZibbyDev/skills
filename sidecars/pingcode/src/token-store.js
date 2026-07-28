@@ -195,9 +195,26 @@ export class TokenStore {
         `token-store: migration verify failed (${verified}/${entries.length} rows) — keeping ${jsonPath}`,
       );
     }
-    // Verified: remove the plaintext file AND any atomic-write leftover.
-    // Deliberately NO .bak — plaintext refresh tokens must not survive on the
-    // volume (it is never reaped).
+    // DURABILITY GATE — must run BEFORE the JSON is unlinked.
+    // The verify above read the rows back through the WAL, which proves they
+    // are visible to THIS connection, not that they are in the database file.
+    // In WAL mode the inserts live in `users.db-wal` until a checkpoint; a
+    // power cut between the unlink and the next checkpoint would take the -wal
+    // with it and lose slots we had just declared "migrated" — while the only
+    // other copy had already been deleted. Force the WAL into the main file and
+    // require proof it fully landed; anything else keeps the JSON.
+    const ck = this.#db.prepare('PRAGMA wal_checkpoint(FULL)').get() || {};
+    const { busy, log, checkpointed } = ck;
+    if (busy !== 0 || typeof log !== 'number' || checkpointed !== log) {
+      throw new Error(
+        `token-store: WAL checkpoint did not fully land ` +
+        `(busy=${busy}, log=${log}, checkpointed=${checkpointed}) — keeping ${jsonPath}. ` +
+        'Restart with no other process holding the store open.',
+      );
+    }
+    // Verified AND durable: remove the plaintext file AND any atomic-write
+    // leftover. Deliberately NO .bak — plaintext refresh tokens must not
+    // survive on the volume (it is never reaped).
     fs.rmSync(jsonPath);
     fs.rmSync(`${jsonPath}.tmp`, { force: true });
     console.log(

@@ -36,18 +36,22 @@ export class PingCodeOAuth {
     this.refreshInflight = new Map();
   }
 
-  authorizeUrl(state) {
+  // `redirectUri` may be overridden per attempt (the caller can append a
+  // one-time nonce path segment). Whatever is used here MUST be repeated
+  // byte-identically in exchangeCode — RFC 6749 §4.1.3.
+  authorizeUrl(state, { redirectUri } = {}) {
     const qs = new URLSearchParams({
       response_type: 'code',
       client_id: this.clientId,
       state,
     });
-    if (this.redirectUri) qs.set('redirect_uri', this.redirectUri);
+    const ru = redirectUri || this.redirectUri;
+    if (ru) qs.set('redirect_uri', ru);
     if (this.scope) qs.set('scope', this.scope);
     return `${this.authRoot}/oauth2/authorize?${qs.toString()}`;
   }
 
-  async exchangeCode(code) {
+  async exchangeCode(code, { redirectUri } = {}) {
     const qs = new URLSearchParams({
       grant_type: 'authorization_code',
       client_id: this.clientId,
@@ -56,7 +60,8 @@ export class PingCodeOAuth {
     });
     // RFC 6749 §4.1.3: when redirect_uri was in the authorize request it must
     // be repeated identically here, or PingCode rejects the exchange.
-    if (this.redirectUri) qs.set('redirect_uri', this.redirectUri);
+    const ru = redirectUri || this.redirectUri;
+    if (ru) qs.set('redirect_uri', ru);
     const res = await fetch(`${this.restRoot}/v1/auth/token?${qs.toString()}`);
     if (!res.ok) {
       throw new Error(`exchangeCode failed: ${res.status} ${await res.text()}`);
@@ -72,22 +77,39 @@ export class PingCodeOAuth {
   }
 
   // Who does this access_token act as? Used to BIND a renew to the same
-  // PingCode user as the slot it renews (PingCode does not echo `state` on the
-  // OAuth callback, so identity — not state — is what makes renews safe).
-  // Returns the PingCode user id as a string, or null when it can't be
-  // determined (e.g. the app's scope doesn't cover GET /v1/myself).
-  async fetchUserId(accessToken) {
+  // PingCode user as the slot it renews. Renews FAIL CLOSED on a null userId,
+  // so the caller needs to tell the operator WHY it failed — hence the
+  // `{ userId, error }` shape rather than a bare null (a 403 means "the OAuth
+  // app's scope doesn't cover GET /v1/myself", a network error means "retry").
+  // `error` is a short, secret-free description safe to render and log.
+  async fetchIdentity(accessToken) {
+    let res;
     try {
-      const res = await fetch(`${this.restRoot}/v1/myself`, {
+      res = await fetch(`${this.restRoot}/v1/myself`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const id = data?.id ?? data?.user_id ?? data?.value?.id ?? null;
-      return id ? String(id) : null;
-    } catch {
-      return null;
+    } catch (e) {
+      return { userId: null, error: `GET /v1/myself network error: ${e.message}` };
     }
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.text()).slice(0, 200); } catch { /* body unreadable */ }
+      return {
+        userId: null,
+        error: `GET /v1/myself → HTTP ${res.status}${detail ? ` ${detail}` : ''}`,
+      };
+    }
+    let data;
+    try { data = await res.json(); }
+    catch (e) { return { userId: null, error: `GET /v1/myself returned non-JSON: ${e.message}` }; }
+    const id = data?.id ?? data?.user_id ?? data?.value?.id ?? null;
+    if (!id) return { userId: null, error: 'GET /v1/myself returned no user id field' };
+    return { userId: String(id), error: null };
+  }
+
+  // Back-compat convenience: the id alone, or null.
+  async fetchUserId(accessToken) {
+    return (await this.fetchIdentity(accessToken)).userId;
   }
 
   async refresh(refreshToken) {
