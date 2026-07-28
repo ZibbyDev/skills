@@ -39,9 +39,26 @@ server, which is exactly why hosting it is a pure declaration.
 
 ## Secret hygiene (this repo is PUBLIC, MIT)
 
-Only `src/`, `Dockerfile`, `.dockerignore`, `package.json`,
+Only `src/`, `test/`, `Dockerfile`, `.dockerignore`, `package.json`,
 `package-lock.json`, `README.md`, `.env.example` and `scripts/revoke-token.sh`
 are copied here — never `.env`, never `data/` (it holds live refresh tokens),
 never the vendored API-doc HTML. The PingCode API base + client credentials are
 REQUIRED env with no hardcoded default, so no customer host/IP/client-id ships
 in source. Re-run that whitelist (and re-scan) on every re-sync from upstream.
+
+## Re-sync rule — vendor from the CURRENT source HEAD, then DIFF
+
+A stale snapshot in a public repo is not "slightly behind", it is a **shipped
+vulnerability**: the first copy here predated the OAuth slot-hijack fix by 47
+minutes, so the open-source copy still carried the confused-deputy the private
+branch had already closed. Anyone deploying from it would have run the bug.
+
+So every re-sync ends with a byte comparison, not a vibe:
+
+```sh
+for f in $(git -C <source> ls-files | grep -E '^(src|test)/|^(Dockerfile|package.json|package-lock.json|README.md|.env.example|.dockerignore)$|^scripts/revoke-token.sh$'); do
+  cmp -s "<source>/$f" "sidecars/pingcode/$f" || echo "DIFF: $f"
+done
+```
+
+No `DIFF:` lines ⇒ the public copy is exactly the reviewed source.
