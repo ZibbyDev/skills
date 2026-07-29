@@ -129,6 +129,94 @@ function runGbrain(brainDir, args) {
   });
 }
 
+// ── persistent `gbrain serve` per brain (PERF) ───────────────────────────────
+// The per-op spawn above RELOADS the whole PGLite brain into memory every call,
+// so bulk ingest cost scaled O(brain-size) per doc (quadratic). Instead keep ONE
+// long-running `gbrain serve` (its MCP stdio server mode — gbrain's intended
+// server usage) per brain, holding the brain OPEN, and send each op as an MCP
+// tools/call. Idle-reaped like the container's own warm/reap model. The embedding
+// env is baked at spawn — correct, since a brain's vector dimension (model) is
+// fixed for its lifetime; a rotated key is picked up on the next reap+relaunch.
+const _serves = new Map(); // brainDir → serve session
+const SERVE_IDLE_MS = Number(process.env.GBRAIN_SERVE_IDLE_MS) || 300_000;
+
+function startServe(brainDir) {
+  const proc = spawn(GBRAIN_BIN, ['serve'], {
+    env: {
+      ...process.env,
+      ...(_embedCtx.getStore() || {}),
+      GBRAIN_HOME: brainDir,
+      GBRAIN_NO_UPDATE_CHECK: '1',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const s = { proc, pending: new Map(), buf: '', seq: 1, lastUsed: Date.now() };
+  proc.stdout.on('data', (d) => {
+    s.buf += d;
+    let idx;
+    // eslint-disable-next-line no-cond-assign
+    while ((idx = s.buf.indexOf('\n')) >= 0) {
+      const line = s.buf.slice(0, idx); s.buf = s.buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      let msg; try { msg = JSON.parse(line); } catch { continue; }
+      if (msg.id != null && s.pending.has(msg.id)) {
+        const { resolve, reject, timer } = s.pending.get(msg.id); s.pending.delete(msg.id);
+        clearTimeout(timer);
+        if (msg.error) reject(new Error((msg.error.message || 'gbrain error').slice(0, 300)));
+        else resolve(msg.result);
+      }
+    }
+  });
+  proc.stderr.on('data', () => {}); // gbrain logs to stderr; ignore
+  const fail = (e) => { for (const { reject, timer } of s.pending.values()) { clearTimeout(timer); reject(e); } s.pending.clear(); if (_serves.get(brainDir) === s) _serves.delete(brainDir); };
+  proc.on('exit', () => fail(new Error('gbrain serve exited')));
+  proc.on('error', (e) => fail(new Error(`gbrain serve error: ${e.message}`)));
+  s.initialized = rpc(s, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'gbrain-sidecar', version: '1' } })
+    .then(() => { try { s.proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`); } catch { /* ignore */ } });
+  return s;
+}
+
+function rpc(s, method, params) {
+  const id = s.seq++;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { if (s.pending.has(id)) { s.pending.delete(id); reject(new Error(`gbrain ${method} timeout`)); } }, OP_TIMEOUT_MS);
+    s.pending.set(id, { resolve, reject, timer });
+    try { s.proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`); }
+    catch (e) { s.pending.delete(id); clearTimeout(timer); reject(e); }
+  });
+}
+
+async function getServe(brainDir) {
+  let s = _serves.get(brainDir);
+  if (!s || s.proc.exitCode != null || s.proc.killed) { s = startServe(brainDir); _serves.set(brainDir, s); }
+  await s.initialized;
+  s.lastUsed = Date.now();
+  return s;
+}
+
+// Call a gbrain MCP tool on the brain's persistent serve process. Returns the
+// tool's JSON payload (MCP wraps it as content[0].text). Throws on tool error.
+async function serveCall(brainDir, tool, args) {
+  const s = await getServe(brainDir);
+  s.lastUsed = Date.now();
+  const res = await rpc(s, 'tools/call', { name: tool, arguments: args || {} });
+  const text = res && res.content && res.content[0] && res.content[0].text;
+  if (res && res.isError) throw new Error((typeof text === 'string' ? text : 'gbrain tool error').slice(0, 300));
+  if (typeof text !== 'string') return text;
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [dir, s] of _serves) {
+    if (now - s.lastUsed > SERVE_IDLE_MS) {
+      try { s.proc.stdin.end(); } catch { /* ignore */ }
+      try { s.proc.kill('SIGTERM'); } catch { /* ignore */ }
+      _serves.delete(dir);
+    }
+  }
+}, 60_000).unref?.();
+
 /**
  * Extract the JSON value a `gbrain call`/`capture --json` command printed to
  * stdout. GBrain logs to stderr, so stdout is the JSON — but we still locate
@@ -191,31 +279,25 @@ async function saveMap(brainDir, map) {
 
 // ── op: soft-delete a slug; returns true iff a page was actually removed ──────
 async function deleteSlug(brainDir, slug) {
-  const r = await runGbrain(brainDir, ['call', 'delete_page', JSON.stringify({ slug })]);
-  const res = parseGbrainJson(r.stdout);
   // delete_page → { status: 'soft_deleted' | 'already_soft_deleted' } on success,
-  // or throws page_not_found (non-zero exit, message on stderr).
+  // or an error for an absent slug (page_not_found) → treat as "nothing removed".
+  const res = await serveCall(brainDir, 'delete_page', { slug }).catch((e) => {
+    if (/not_found|not found/i.test(e.message || '')) return { status: 'not_found' };
+    throw e;
+  });
   return !!res && (res.status === 'soft_deleted' || res.status === 'already_soft_deleted');
 }
 
 // ── op: upsert one markdown doc as a GBrain page ─────────────────────────────
 async function upsertDoc(brainDir, slug, markdown) {
   // A previously soft-deleted slug must come back live on re-ingest. restore is
-  // a cheap no-op / harmless error when the page is live or absent.
-  await runGbrain(brainDir, ['call', 'restore_page', JSON.stringify({ slug })]);
-
-  const tmp = join(tmpdir(), `gbrain-ingest-${randomBytes(8).toString('hex')}.md`);
-  try {
-    await writeFile(tmp, markdown, 'utf8');
-    const r = await runGbrain(brainDir, ['capture', '--file', tmp, '--slug', slug, '--json']);
-    const res = parseGbrainJson(r.stdout);
-    if (r.code !== 0 || !res || !res.slug) {
-      throw new Error(`gbrain capture failed for ${slug} (code ${r.code}): ${(r.stderr || r.stdout || '').slice(0, 300)}`);
-    }
-    return { chunks: Number(res.chunks) || 0 };
-  } finally {
-    await rm(tmp, { force: true }).catch(() => {});
-  }
+  // a cheap in-process call on the persistent serve (no brain reload); ignore the
+  // harmless "page live / absent" error.
+  try { await serveCall(brainDir, 'restore_page', { slug }); } catch { /* live/absent — fine */ }
+  const res = await serveCall(brainDir, 'put_page', { slug, content: markdown, source_kind: 'capture-cli' });
+  const outSlug = res && (res.slug || (res.page && res.page.slug));
+  if (!res || !outSlug) throw new Error(`gbrain put_page failed for ${slug}: ${JSON.stringify(res).slice(0, 200)}`);
+  return { chunks: Number((res.chunks != null ? res.chunks : (res.page && res.page.chunks))) || 0 };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -257,21 +339,13 @@ export async function query(kbId, queryText, topK) {
   return withBrainLock(brainDir, async () => {
     await ensureBrain(brainDir);
     const map = await loadMap(brainDir);
-    const r = await runGbrain(brainDir, [
-      'call', 'query', JSON.stringify({ query: queryText, limit: topK }),
-    ]);
-    const arr = parseGbrainJson(r.stdout);
-    if (!Array.isArray(arr)) {
-      // A genuine gbrain error (non-zero exit + no JSON array) must not be
-      // silently swallowed as "no results".
-      if (r.code !== 0) {
-        throw new Error(`gbrain query failed (code ${r.code}): ${(r.stderr || '').slice(0, 300)}`);
-      }
-      return { results: [] };
-    }
+    const out = await serveCall(brainDir, 'query', { query: queryText, limit: topK });
+    const arr = Array.isArray(out) ? out
+      : (out && Array.isArray(out.results) ? out.results
+        : (out && Array.isArray(out.hits) ? out.hits : []));
     const results = arr.map((hit) => ({
       sourceId: map[hit.slug] || hit.slug,
-      chunk: hit.chunk_text || '',
+      chunk: hit.chunk_text || hit.chunk || hit.text || '',
       score: typeof hit.score === 'number' ? hit.score : 0,
     }));
     return { results };
