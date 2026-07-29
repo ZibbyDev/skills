@@ -10,6 +10,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from './tools.js';
+import {
+  SIDECAR_AGENT_HEADER, appConfigMiddleware, withAppConfig,
+} from './app-config.js';
 
 // Base-path awareness: when this app sits behind a reverse proxy under a
 // prefix (e.g. https://host/sidecars/pingcode/... with the prefix STRIPPED
@@ -149,6 +152,13 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
       : `${PUBLIC_BASE_URL}/oauth/callback`;
 
   const app = express();
+  // PER-REQUEST TENANT CONFIG, FIRST. The control-plane injects this agent's
+  // PingCode app credentials + API roots on every proxied request; this
+  // middleware decodes them and runs the WHOLE request inside an
+  // AsyncLocalStorage context (app-config.js), so nothing downstream needs a new
+  // parameter and two agents' requests in flight cannot see each other's
+  // config. With no header, every field falls back to this container's own env.
+  app.use(appConfigMiddleware);
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req, res) => {
@@ -172,15 +182,54 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
   // /oauth/start?renew=mcp_xx → renew: callback updates the existing slot's
   //                              PingCode tokens, MCP_TOKEN unchanged
   app.get('/oauth/start', async (req, res) => {
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    // SNAPSHOT the app identity this attempt runs under, BEFORE the redirect.
+    // The callback is a fresh request from PingCode carrying no agent hint, so
+    // the identity has to ride the round-trip inside the nonce binding we
+    // already keep — otherwise the code would be exchanged against whatever app
+    // happened to be resolvable then, which is exactly the confusion the
+    // per-tenant model exists to prevent.
+    let appConfig;
+    try {
+      appConfig = pc.requireApp ? pc.requireApp() : (pc.app || null);
+    } catch (e) {
+      if (e && e.code === 'APP_NOT_CONFIGURED') {
+        console.warn(`[oauth] start refused: ${e.message}`);
+        return res.status(503).send(html(`
+          <h2 class="err">⚠️ 这个部署还没有配置 PingCode 应用</h2>
+          <p>缺少: <code>${esc((e.missing || []).join(', '))}</code></p>
+          <p>请在<strong>声明了本 sidecar 的 agent 的 Env 标签页</strong>里填好这些值
+          (它们会在每次请求时从该 agent 的加密环境中读取), 然后重新点授权链接。</p>
+        `));
+      }
+      throw e;
+    }
     const renewToken = req.query.renew ? String(req.query.renew) : null;
-    if (renewToken && !(await pc.hasSlot(renewToken))) {
-      return res.status(400).set('Content-Type', 'text/html; charset=utf-8').send(html(`
+    if (renewToken) {
+      const slot = pc.slotFor ? await pc.slotFor(renewToken) : { ok: await pc.hasSlot(renewToken) };
+      if (!slot.ok) {
+        // 'other_app' is a DIFFERENT failure from 'unknown' and says so: the
+        // token is real, it just belongs to another PingCode app.
+        const otherApp = slot.reason === 'other_app';
+        return res.status(400).send(html(otherApp ? `
+        <h2 class="err">⚠️ 这个 MCP_TOKEN 属于另一个 PingCode 应用</h2>
+        <p>它是用别的 OAuth 应用 (client_id) 授权出来的, 不能在当前应用下续签。
+        请用当初那个应用对应的入口续签, 或走<a href="${BASE_PATH}/oauth/start">新用户授权</a>重新生成。</p>
+      ` : `
         <h2 class="err">⚠️ 找不到这个 MCP_TOKEN</h2>
         <p>你提供的 renew 值不存在或已被吊销。请走<a href="${BASE_PATH}/oauth/start">新用户授权</a>重新生成一个。</p>
       `));
+      }
     }
     const nonce = newNonce();
-    pendingAuth.set(nonce, { mcpToken: renewToken, createdAt: Date.now() });
+    // `app` is the per-attempt app identity: the callback exchanges the code
+    // against THIS config, never against whatever is ambient at callback time.
+    pendingAuth.set(nonce, {
+      mcpToken: renewToken,
+      createdAt: Date.now(),
+      app: appConfig,
+      agent: req.header(SIDECAR_AGENT_HEADER) || '',
+    });
     // Belt: the nonce rides back in a cookie (works with the plain, already
     // registered redirect URI). Braces: optionally also in the redirect_uri
     // path, for deployments whose PingCode app allows the extra segment.
@@ -248,159 +297,174 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
     pendingAuth.delete(nonce);
     res.clearCookie(NONCE_COOKIE, { path: COOKIE_PATH });
 
-    try {
-      const tokens = await pc.exchangeCode(code, { redirectUri: callbackUriFor(nonce) });
+    // THE ROUND-TRIP BINDING. Everything below runs under the app identity that
+    // was captured at /oauth/start and carried on this nonce's pending entry —
+    // NOT under whatever config happens to be ambient on this callback request
+    // (PingCode's redirect carries no agent hint, so there may be none at all).
+    // That is what guarantees the code is exchanged against the SAME client_id
+    // that requested it, and that the resulting slot is stamped with that app.
+    return withAppConfig(entry.app, async () => {
+      try {
+        const tokens = await pc.exchangeCode(code, { redirectUri: callbackUriFor(nonce) });
 
-      // Who just authorized? Identity is the second, independent guard: even if
-      // a nonce leaks (it travels in a URL / browser history), a renew may only
-      // ever be completed by the SAME PingCode user the slot already belongs to.
-      const identity = await pc.fetchIdentity(tokens.access_token);
-      const userId = identity && identity.userId ? String(identity.userId) : null;
+        // Who just authorized? Identity is the second, independent guard: even if
+        // a nonce leaks (it travels in a URL / browser history), a renew may only
+        // ever be completed by the SAME PingCode user the slot already belongs to.
+        const identity = await pc.fetchIdentity(tokens.access_token);
+        const userId = identity && identity.userId ? String(identity.userId) : null;
 
-      if (entry.mcpToken) {
-        // ── renew flow: update existing slot, keep MCP_TOKEN unchanged ──
-        //
-        // FAIL CLOSED. If we cannot establish who just consented, we refuse —
-        // for a bound slot AND for a legacy/unbound one. The previous code
-        // skipped the check when `pingcode_user_id` was absent, which made the
-        // whole identity guard a no-op in the default configuration (an empty
-        // PINGCODE_SCOPE makes GET /v1/myself 403 → userId null → check
-        // skipped) and left the slot overwritable by whoever raced the callback.
-        if (!userId) {
-          console.warn(
-            `[oauth] renew REFUSED for slot ${String(entry.mcpToken).slice(0, 12)}…: ` +
-            `PingCode identity could not be established (${identity?.error || 'unknown error'}) — ` +
-            'nothing was written',
-          );
-          return res.status(403).send(html(`
-            <h2 class="err">⚠️ 续签被拒绝:无法确认授权者身份</h2>
-            <p>服务器无法通过 <code>GET /v1/myself</code> 确认刚才授权的是哪个 PingCode 账号,
-            因此拒绝把令牌写入这个 MCP_TOKEN(宁可拒绝,也不能把别人的令牌写进你的槽位)。
-            <strong>你的原有授权没有被改动。</strong></p>
-            <p class="muted">管理员请检查:PingCode 应用的授权范围 <code>PINGCODE_SCOPE</code>
-            必须覆盖 <code>GET /v1/myself</code>(当前应用对该接口无权限或未配置 scope,
-            返回:${esc(identity?.error || 'unknown error')})。修好后请用户重新点续签链接。</p>
-            ${restart}`));
-        }
+        if (entry.mcpToken) {
+          // ── renew flow: update existing slot, keep MCP_TOKEN unchanged ──
+          //
+          // FAIL CLOSED. If we cannot establish who just consented, we refuse —
+          // for a bound slot AND for a legacy/unbound one. The previous code
+          // skipped the check when `pingcode_user_id` was absent, which made the
+          // whole identity guard a no-op in the default configuration (an empty
+          // PINGCODE_SCOPE makes GET /v1/myself 403 → userId null → check
+          // skipped) and left the slot overwritable by whoever raced the callback.
+          if (!userId) {
+            console.warn(
+              `[oauth] renew REFUSED for slot ${String(entry.mcpToken).slice(0, 12)}…: ` +
+              `PingCode identity could not be established (${identity?.error || 'unknown error'}) — ` +
+              'nothing was written',
+            );
+            return res.status(403).send(html(`
+              <h2 class="err">⚠️ 续签被拒绝:无法确认授权者身份</h2>
+              <p>服务器无法通过 <code>GET /v1/myself</code> 确认刚才授权的是哪个 PingCode 账号,
+              因此拒绝把令牌写入这个 MCP_TOKEN(宁可拒绝,也不能把别人的令牌写进你的槽位)。
+              <strong>你的原有授权没有被改动。</strong></p>
+              <p class="muted">管理员请检查:该 PingCode 应用需要有权限调用
+              <code>GET /v1/myself</code>(返回:${esc(identity?.error || 'unknown error')})。
+              多数应用用默认权限即可,无需配置 scope;若你的应用要求显式授权范围,再设置
+              <code>PINGCODE_SCOPE</code>。修好后请用户重新点续签链接。</p>
+              ${restart}`));
+          }
 
-        const existing = (await pc.store.get(entry.mcpToken)) || {};
-        const boundId = existing.pingcode_user_id ? String(existing.pingcode_user_id) : null;
-        if (boundId && userId !== boundId) {
-          console.warn(
-            `[oauth] renew REFUSED for slot ${String(entry.mcpToken).slice(0, 12)}…: ` +
-            'consenting PingCode user differs from the bound one — nothing was written',
-          );
-          return res.status(403).send(html(`
-            <h2 class="err">⚠️ 续签被拒绝:账号不一致</h2>
-            <p>这个 renew 链接属于另一个 PingCode 账号。请用当初授权这个 MCP_TOKEN 的
-            PingCode 账号登录后重试;或者走<a href="${BASE_PATH}/oauth/start">新用户授权</a>生成自己的 MCP_TOKEN。</p>
+          const existing = (await pc.store.get(entry.mcpToken)) || {};
+          const boundId = existing.pingcode_user_id ? String(existing.pingcode_user_id) : null;
+          if (boundId && userId !== boundId) {
+            console.warn(
+              `[oauth] renew REFUSED for slot ${String(entry.mcpToken).slice(0, 12)}…: ` +
+              'consenting PingCode user differs from the bound one — nothing was written',
+            );
+            return res.status(403).send(html(`
+              <h2 class="err">⚠️ 续签被拒绝:账号不一致</h2>
+              <p>这个 renew 链接属于另一个 PingCode 账号。请用当初授权这个 MCP_TOKEN 的
+              PingCode 账号登录后重试;或者走<a href="${BASE_PATH}/oauth/start">新用户授权</a>生成自己的 MCP_TOKEN。</p>
+            `));
+          }
+          // Legacy slot with no recorded identity (pre-migration): bind it now —
+          // safe because reaching here required the nonce from THIS slot's own
+          // /oauth/start AND a resolvable identity.
+          await pc.saveTokens(entry.mcpToken, {
+            ...existing,
+            ...tokens,
+            pingcode_user_id: boundId || userId,
+          });
+          return res.send(html(`
+            <h2 class="ok">✅ PingCode 重新授权完成</h2>
+            <p>你的 MCP_TOKEN <strong>没变</strong>，Claude Code 配置不用动。</p>
+            <p>直接回到对话, 让 agent 重试刚才那个工具调用就行。</p>
+            <p class="muted">下次过期大约在 90 天后。</p>
           `));
         }
-        // Legacy slot with no recorded identity (pre-migration): bind it now —
-        // safe because reaching here required the nonce from THIS slot's own
-        // /oauth/start AND a resolvable identity.
-        await pc.saveTokens(entry.mcpToken, {
-          ...existing,
+
+        // ── first-time flow: mint a fresh MCP_TOKEN ──
+        // No slot exists yet, so there is nothing to hijack: a missing identity
+        // here cannot hand anyone else's tokens to anyone. We therefore still
+        // issue the token (an app that cannot call /v1/myself but can call the
+        // business endpoints keeps working) — but we say LOUDLY that the slot is
+        // unbindable, because every future renew WILL be refused above.
+        const mcpToken = newMcpToken();
+        await pc.saveTokens(mcpToken, {
           ...tokens,
-          pingcode_user_id: boundId || userId,
+          created_at: Date.now(),
+          // Remember whose slot this is, so future renews can be identity-bound.
+          pingcode_user_id: userId,
         });
+        if (!userId) {
+          console.warn(
+            '[oauth] new slot created WITHOUT a PingCode identity ' +
+            `(${identity?.error || 'unknown error'}) — renews for it will be refused. ` +
+            'Grant the OAuth app access to GET /v1/myself and set PINGCODE_SCOPE.',
+          );
+        }
+
+        // Two SEPARATE copy-paste prompts, one per agent. Each is a self-contained
+        // natural-language prompt: paste it to the agent and it installs itself, no
+        // hand-typed commands. Codex has no `add` for HTTP servers, so its prompt
+        // carries a config.toml block; Codex sends http_headers verbatim, so a
+        // static Authorization header authenticates like Claude's --header. Each
+        // block gets a top-right copy button (copyBlock in the page script).
+        // The endpoint the user's editor will call. On a box where SEVERAL agents
+      // declare this sidecar, a bare /mcp cannot tell the control-plane whose
+      // config to inject — so carry the agent handle the proxy told us about.
+      // With 0 or 1 declaring agents the header is absent and the URL is
+      // byte-identical to before.
+      const agentQs = entry.agent ? `?agent=${encodeURIComponent(entry.agent)}` : '';
+      const mcpUrl = `${PUBLIC_BASE_URL}/mcp${agentQs}`;
+        // The MCP server NAME must be UNIQUE per human AND re-derivable inside any
+        // session. `claude mcp add` keys config by (home)×(workspace)×name and refuses
+        // to overwrite an existing name — and (verified live) teammates here can share
+        // BOTH the home dir and the workspace, so a fixed `pingcode` makes the 2nd
+        // user collide, and when several load together each agent must pick its own.
+        // Nothing on disk is per-user (shared files get clobbered), so we can't store
+        // a name — the agent must COMPUTE it, at install and at use, from the only
+        // per-person signal that exists here: the GIT_AUTHOR_EMAIL env var (verified
+        // distinct per teammate, e.g. alice@example.com vs alice-1@example.com). The server can't
+        // see that value, so it emits a self-instructing prompt telling the agent to
+        // read GIT_AUTHOR_EMAIL, slugify it (@ and . → -), and name the server
+        // pingcode-<slug>. (The connect-pingcode skill reinforces this + the matching
+        // selection rule.) We deliberately do NOT ship a runnable one-liner carrying a
+        // `<...>` literal — `<`/`>` are shell redirection, so the command must be built
+        // AFTER substitution, never pasted into a shell verbatim.
+        const claudePrompt = `请帮我安装 PingCode 的 MCP 服务器。
+  1) 先在当前会话运行 \`echo $GIT_AUTHOR_EMAIL\` 拿到我的邮箱, 把里面的 @ 和 . 都替换成 - 得到 slug (例如 alice@example.com → alice-example-com)。
+  2) 然后运行这条命令 (把 <slug> 换成上一步算出来的值, 别原样带着尖括号跑):
+  claude mcp add --transport http pingcode-<slug> ${mcpUrl} --header "Authorization: Bearer ${mcpToken}"
+  命令成功后告诉我装好了即可。注意: 刚装的 MCP 工具这一轮还不会加载, 你不用在本轮去搜索、调用或验证 pingcode 工具 —— 我下一条消息发出来时就能用了。`;
+        const codexPrompt = `请帮我安装 PingCode 的 MCP 服务器。
+  1) 先运行 \`echo $GIT_AUTHOR_EMAIL\` 拿到我的邮箱, 把 @ 和 . 都替换成 - 得到 slug (例如 alice@example.com → alice-example-com)。
+  2) 把下面这一节写入 ~/.codex/config.toml (把 <slug> 换成上一步的值; 没有文件就新建, 已有就追加这一节), 写好后告诉我即可:
+  [mcp_servers.pingcode-<slug>]
+  url = "${mcpUrl}"
+  http_headers = { "Authorization" = "Bearer ${mcpToken}" }
+  注意: 你不用在本轮验证或调用 pingcode 工具, 我重启 Codex 后下次对话就能用了。`;
+        const identityWarning = userId ? '' : `
+          <div class="warn">
+            ⚠️ <strong>这个授权没有绑定 PingCode 身份。</strong>
+            服务器无法通过 <code>GET /v1/myself</code> 确认你的账号
+            (${esc(identity?.error || 'unknown error')}),因此 90 天后的<strong>续签会被拒绝</strong>,
+            届时需要重新走一次授权并更新配置。请让管理员为 OAuth 应用开通 <code>/v1/myself</code>
+            权限并设置 <code>PINGCODE_SCOPE</code>,然后重新授权一次即可一劳永逸。
+          </div>`;
         return res.send(html(`
-          <h2 class="ok">✅ PingCode 重新授权完成</h2>
-          <p>你的 MCP_TOKEN <strong>没变</strong>，Claude Code 配置不用动。</p>
-          <p>直接回到对话, 让 agent 重试刚才那个工具调用就行。</p>
-          <p class="muted">下次过期大约在 90 天后。</p>
+          <h2 class="ok">✅ PingCode 授权成功</h2>
+          ${identityWarning}
+          <p>按你用的工具<strong>二选一</strong>: 复制对应的整段, 粘贴给你的 agent —— 它会自动帮你装好 PingCode MCP, 你不用自己敲命令。</p>
+
+          <h3>① 我用 Claude Code</h3>
+          <div class="codeblock">
+            <button class="copy" onclick="copyBlock(this)">复制</button>
+            <pre>${esc(claudePrompt)}</pre>
+          </div>
+
+          <h3>② 我用 Codex</h3>
+          <div class="codeblock">
+            <button class="copy" onclick="copyBlock(this)">复制</button>
+            <pre>${esc(codexPrompt)}</pre>
+          </div>
+
+          <p class="muted">
+            这里面包含你的专属 MCP_TOKEN, 相当于你的 PingCode 钥匙, 请勿外发或贴到公开场合。
+            <br>装一次即可, 之后聊天直接让 agent 用 PingCode 工具。有效期 90 天, 过期前会提示你点链接续签 (MCP_TOKEN 不变)。
+          </p>
         `));
+      } catch (e) {
+        console.error('OAuth callback failed:', e);
+        return res.status(500).send(html(`<h2 class="err">授权失败</h2><pre>${esc(e.message)}</pre>`));
       }
-
-      // ── first-time flow: mint a fresh MCP_TOKEN ──
-      // No slot exists yet, so there is nothing to hijack: a missing identity
-      // here cannot hand anyone else's tokens to anyone. We therefore still
-      // issue the token (a deployment whose scope omits /v1/myself but covers
-      // the business endpoints keeps working) — but we say LOUDLY that the slot
-      // is unbindable, because every future renew WILL be refused above.
-      const mcpToken = newMcpToken();
-      await pc.saveTokens(mcpToken, {
-        ...tokens,
-        created_at: Date.now(),
-        // Remember whose slot this is, so future renews can be identity-bound.
-        pingcode_user_id: userId,
-      });
-      if (!userId) {
-        console.warn(
-          '[oauth] new slot created WITHOUT a PingCode identity ' +
-          `(${identity?.error || 'unknown error'}) — renews for it will be refused. ` +
-          'Grant the OAuth app access to GET /v1/myself and set PINGCODE_SCOPE.',
-        );
-      }
-
-      // Two SEPARATE copy-paste prompts, one per agent. Each is a self-contained
-      // natural-language prompt: paste it to the agent and it installs itself, no
-      // hand-typed commands. Codex has no `add` for HTTP servers, so its prompt
-      // carries a config.toml block; Codex sends http_headers verbatim, so a
-      // static Authorization header authenticates like Claude's --header. Each
-      // block gets a top-right copy button (copyBlock in the page script).
-      const mcpUrl = `${PUBLIC_BASE_URL}/mcp`;
-      // The MCP server NAME must be UNIQUE per human AND re-derivable inside any
-      // session. `claude mcp add` keys config by (home)×(workspace)×name and refuses
-      // to overwrite an existing name — and (verified live) teammates here can share
-      // BOTH the home dir and the workspace, so a fixed `pingcode` makes the 2nd
-      // user collide, and when several load together each agent must pick its own.
-      // Nothing on disk is per-user (shared files get clobbered), so we can't store
-      // a name — the agent must COMPUTE it, at install and at use, from the only
-      // per-person signal that exists here: the GIT_AUTHOR_EMAIL env var (verified
-      // distinct per teammate, e.g. alice@example.com vs alice-1@example.com). The server can't
-      // see that value, so it emits a self-instructing prompt telling the agent to
-      // read GIT_AUTHOR_EMAIL, slugify it (@ and . → -), and name the server
-      // pingcode-<slug>. (The connect-pingcode skill reinforces this + the matching
-      // selection rule.) We deliberately do NOT ship a runnable one-liner carrying a
-      // `<...>` literal — `<`/`>` are shell redirection, so the command must be built
-      // AFTER substitution, never pasted into a shell verbatim.
-      const claudePrompt = `请帮我安装 PingCode 的 MCP 服务器。
-1) 先在当前会话运行 \`echo $GIT_AUTHOR_EMAIL\` 拿到我的邮箱, 把里面的 @ 和 . 都替换成 - 得到 slug (例如 alice@example.com → alice-example-com)。
-2) 然后运行这条命令 (把 <slug> 换成上一步算出来的值, 别原样带着尖括号跑):
-claude mcp add --transport http pingcode-<slug> ${mcpUrl} --header "Authorization: Bearer ${mcpToken}"
-命令成功后告诉我装好了即可。注意: 刚装的 MCP 工具这一轮还不会加载, 你不用在本轮去搜索、调用或验证 pingcode 工具 —— 我下一条消息发出来时就能用了。`;
-      const codexPrompt = `请帮我安装 PingCode 的 MCP 服务器。
-1) 先运行 \`echo $GIT_AUTHOR_EMAIL\` 拿到我的邮箱, 把 @ 和 . 都替换成 - 得到 slug (例如 alice@example.com → alice-example-com)。
-2) 把下面这一节写入 ~/.codex/config.toml (把 <slug> 换成上一步的值; 没有文件就新建, 已有就追加这一节), 写好后告诉我即可:
-[mcp_servers.pingcode-<slug>]
-url = "${mcpUrl}"
-http_headers = { "Authorization" = "Bearer ${mcpToken}" }
-注意: 你不用在本轮验证或调用 pingcode 工具, 我重启 Codex 后下次对话就能用了。`;
-      const identityWarning = userId ? '' : `
-        <div class="warn">
-          ⚠️ <strong>这个授权没有绑定 PingCode 身份。</strong>
-          服务器无法通过 <code>GET /v1/myself</code> 确认你的账号
-          (${esc(identity?.error || 'unknown error')}),因此 90 天后的<strong>续签会被拒绝</strong>,
-          届时需要重新走一次授权并更新配置。请让管理员为 OAuth 应用开通 <code>/v1/myself</code>
-          权限并设置 <code>PINGCODE_SCOPE</code>,然后重新授权一次即可一劳永逸。
-        </div>`;
-      return res.send(html(`
-        <h2 class="ok">✅ PingCode 授权成功</h2>
-        ${identityWarning}
-        <p>按你用的工具<strong>二选一</strong>: 复制对应的整段, 粘贴给你的 agent —— 它会自动帮你装好 PingCode MCP, 你不用自己敲命令。</p>
-
-        <h3>① 我用 Claude Code</h3>
-        <div class="codeblock">
-          <button class="copy" onclick="copyBlock(this)">复制</button>
-          <pre>${esc(claudePrompt)}</pre>
-        </div>
-
-        <h3>② 我用 Codex</h3>
-        <div class="codeblock">
-          <button class="copy" onclick="copyBlock(this)">复制</button>
-          <pre>${esc(codexPrompt)}</pre>
-        </div>
-
-        <p class="muted">
-          这里面包含你的专属 MCP_TOKEN, 相当于你的 PingCode 钥匙, 请勿外发或贴到公开场合。
-          <br>装一次即可, 之后聊天直接让 agent 用 PingCode 工具。有效期 90 天, 过期前会提示你点链接续签 (MCP_TOKEN 不变)。
-        </p>
-      `));
-    } catch (e) {
-      console.error('OAuth callback failed:', e);
-      return res.status(500).send(html(`<h2 class="err">授权失败</h2><pre>${esc(e.message)}</pre>`));
-    }
+    });
   }
 
   // Both shapes are served: the plain path (nonce arrives by cookie/state) and
@@ -417,11 +481,23 @@ http_headers = { "Authorization" = "Bearer ${mcpToken}" }
   // mcpToken that created it, so a session always acts as that one user.
   const sessions = new Map(); // sessionId -> { transport, mcpToken }
 
+  // The bearer identifies a SLOT, and a slot is keyed by (USER, APP) — a token
+  // minted under PingCode app A is meaningless under app B (PingCode itself will
+  // not refresh it), so serving it would be a silent cross-tenant reach. The
+  // mismatch is REFUSED with its own status + message, never conflated with
+  // "unknown token".
   async function requireBearer(req, res, next) {
     const auth = req.header('authorization') || '';
     const m = auth.match(/^Bearer\s+(.+)$/i);
     if (!m) return res.status(401).json({ error: 'missing bearer token' });
-    if (!(await pc.hasSlot(m[1]))) {
+    const slot = pc.slotFor ? await pc.slotFor(m[1]) : { ok: await pc.hasSlot(m[1]) };
+    if (!slot.ok) {
+      if (slot.reason === 'other_app') {
+        return res.status(403).json({
+          error: 'mcp_token belongs to a different PingCode app',
+          authorize_url: `${PUBLIC_BASE_URL}/oauth/start`,
+        });
+      }
       return res.status(401).json({
         error: 'unknown or revoked mcp_token',
         authorize_url: `${PUBLIC_BASE_URL}/oauth/start`,

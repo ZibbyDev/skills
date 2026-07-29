@@ -1,45 +1,115 @@
 import { fetch } from 'undici';
 import { TokenStore } from './token-store.js';
+import { appIdFor, currentAppConfig, envAppConfig } from './app-config.js';
 
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
+/**
+ * The OAuth client for ONE PingCode app — resolved PER REQUEST, not at boot.
+ *
+ * WHAT CHANGED AND WHY (CLAUDE.md north-star #9): the app credentials + API
+ * roots used to be constructor-frozen from this container's process env, which
+ * made the OAuth app container-global state — two projects wanting two different
+ * PingCode apps on one box collided. They are now resolved from the AMBIENT
+ * per-request config (app-config.js, threaded with AsyncLocalStorage exactly
+ * like gbrain's `withEmbedding`), falling back per FIELD to anything passed to
+ * the constructor and then to this process's own env.
+ *
+ * Precedence, highest first:
+ *   1. the PER-REQUEST config injected by the control-plane from the DECLARING
+ *      AGENT's encrypted Env bag,
+ *   2. explicit constructor values (tests / an embedder),
+ *   3. this container's process env (the operator-configured-box fallback).
+ *
+ * The TOKEN STORE is shared (one encrypted SQLite file for the whole box) — it
+ * is the tenant-keyed DATA plane, and every slot records WHICH app minted it
+ * (`pingcode_app_id`), so a token from app A can never be used with app B.
+ */
 export class PingCodeOAuth {
-  constructor({ clientId, clientSecret, restRoot, authRoot, tokenStorePath, redirectUri, scope }) {
-    if (!clientId || !clientSecret) {
-      throw new Error('PINGCODE_CLIENT_ID and PINGCODE_CLIENT_SECRET are required');
-    }
-    // No hardcoded deployment default: every install points at its OWN
-    // PingCode instance, so both roots are required env.
-    if (!restRoot || !authRoot) {
-      throw new Error(
-        'PINGCODE_REST_ROOT and PINGCODE_AUTH_ROOT are required, e.g. ' +
-        'PINGCODE_REST_ROOT=https://pingcode.example.com/open ' +
-        'PINGCODE_AUTH_ROOT=https://pingcode.example.com',
-      );
-    }
-    this.clientId = clientId;
-    this.clientSecret = clientSecret;
-    this.restRoot = restRoot.replace(/\/$/, '');
-    this.authRoot = authRoot.replace(/\/$/, '');
+  constructor({ clientId, clientSecret, restRoot, authRoot, tokenStorePath, redirectUri, scope } = {}) {
+    // Constructor values are DEFAULTS, not a frozen configuration. Only the
+    // fields actually supplied are recorded, so an absent one falls through to
+    // the process env instead of pinning `undefined`.
+    this._fixed = {};
+    if (clientId) this._fixed.clientId = String(clientId);
+    if (clientSecret) this._fixed.clientSecret = String(clientSecret);
+    if (restRoot) this._fixed.restRoot = String(restRoot).replace(/\/$/, '');
+    if (authRoot) this._fixed.authRoot = String(authRoot).replace(/\/$/, '');
+    // OAuth scope requested on authorize — OPTIONAL. When set, PingCode shows it
+    // on the consent page as 请求权限; when absent, no `scope` parameter is sent
+    // and the app's DEFAULT permissions apply. That default is enough for a
+    // normally-configured app: GET /v1/myself was verified to succeed with a real
+    // user token minted through a no-scope authorize. (An earlier comment here
+    // claimed a missing scope meant "no API permissions, every call 403s" — that
+    // is NOT true in general, so do not re-introduce it.) Set PINGCODE_SCOPE only
+    // if YOUR PingCode app requires an explicit scope value.
+    if (scope) this._fixed.scope = String(scope);
     // Sent explicitly on BOTH authorize and token-exchange. PingCode validates
     // it against the app's registered redirect URI list, so each deployment
     // (server IP / ngrok) can send its own and they coexist in one app. Must be
     // registered in the PingCode app or authorize fails with redirect_uri 不匹配.
+    // NOT per-tenant: it is a property of THIS BOX's public URL, not of the app.
     this.redirectUri = redirectUri || null;
-    // OAuth scope requested on authorize. PingCode shows it on the consent page
-    // as 请求权限; if absent the consent shows 请求权限:无 and the user token
-    // gets NO API permissions (every business call 403s even when the user
-    // themselves has access). Set PINGCODE_SCOPE once the app's permitted scope
-    // value is known; left null it preserves the previous (no-scope) behaviour.
-    this.scope = scope || null;
     this.store = new TokenStore(tokenStorePath);
     this.refreshInflight = new Map();
+  }
+
+  /**
+   * The EFFECTIVE app config for the current async flow. Merged per FIELD so a
+   * partially-populated agent Env bag still inherits the operator's defaults.
+   */
+  get app() {
+    return { ...envAppConfig(), ...this._fixed, ...(currentAppConfig() || {}) };
+  }
+
+  get clientId() { return this.app.clientId || null; }
+
+  get clientSecret() { return this.app.clientSecret || null; }
+
+  get restRoot() { return this.app.restRoot || null; }
+
+  get authRoot() { return this.app.authRoot || null; }
+
+  get scope() { return this.app.scope || null; }
+
+  /**
+   * The identity of the app this request is running under — the value every
+   * token slot is stamped with. null when no client id is configured at all.
+   */
+  get appId() { return appIdFor(this.clientId); }
+
+  /**
+   * Assert a usable app config, or throw the message an operator can ACT on.
+   * Called at the top of every leg that talks to PingCode, so a missing config
+   * surfaces as a clear error on the request that needed it — instead of
+   * crashing the shared container at boot for every OTHER tenant.
+   */
+  requireApp() {
+    const a = this.app;
+    const missing = [];
+    if (!a.clientId) missing.push('PINGCODE_CLIENT_ID');
+    if (!a.clientSecret) missing.push('PINGCODE_CLIENT_SECRET');
+    if (!a.restRoot) missing.push('PINGCODE_REST_ROOT');
+    if (!a.authRoot) missing.push('PINGCODE_AUTH_ROOT');
+    if (missing.length) {
+      const err = new Error(
+        `PingCode app is not configured: missing ${missing.join(', ')}. ` +
+        'Set these on the Env tab of the agent that declares this sidecar ' +
+        '(they are read per request from that agent\'s encrypted env), or as ' +
+        'container env on the box for a single-app deployment.',
+      );
+      err.code = 'APP_NOT_CONFIGURED';
+      err.missing = missing;
+      throw err;
+    }
+    return a;
   }
 
   // `redirectUri` may be overridden per attempt (the caller can append a
   // one-time nonce path segment). Whatever is used here MUST be repeated
   // byte-identically in exchangeCode — RFC 6749 §4.1.3.
   authorizeUrl(state, { redirectUri } = {}) {
+    this.requireApp();
     const qs = new URLSearchParams({
       response_type: 'code',
       client_id: this.clientId,
@@ -52,6 +122,7 @@ export class PingCodeOAuth {
   }
 
   async exchangeCode(code, { redirectUri } = {}) {
+    this.requireApp();
     const qs = new URLSearchParams({
       grant_type: 'authorization_code',
       client_id: this.clientId,
@@ -113,6 +184,7 @@ export class PingCodeOAuth {
   }
 
   async refresh(refreshToken) {
+    this.requireApp();
     const qs = new URLSearchParams({
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
@@ -138,19 +210,59 @@ export class PingCodeOAuth {
     };
   }
 
+  /**
+   * Persist a slot, STAMPING the app identity it was minted under unless the
+   * caller supplied one explicitly. Every write goes through here, so a slot
+   * without a `pingcode_app_id` can only ever be a pre-migration legacy row.
+   */
   async saveTokens(mcpToken, tokens) {
-    await this.store.set(mcpToken, tokens);
+    const stamped = { ...tokens };
+    if (stamped.pingcode_app_id === undefined) stamped.pingcode_app_id = this.appId;
+    await this.store.set(mcpToken, stamped);
+  }
+
+  /**
+   * Resolve a slot FOR THE CURRENT APP — the (user, app) key.
+   *
+   * A slot is a PingCode token minted under ONE OAuth client registration. Under
+   * a different client it is meaningless (PingCode will not refresh it) and
+   * using it would silently cross tenants, so a mismatch is REFUSED rather than
+   * attempted.
+   *
+   *   'unknown'    → no such mcp_token
+   *   'other_app'  → the slot belongs to a different PingCode app
+   *
+   * MIGRATION: a slot written before app binding existed has no
+   * `pingcode_app_id`. Back then the box ran exactly ONE app (container-global
+   * env), so the app in force on first use IS the one that minted it — stamp it
+   * and carry on. Idempotent, and it happens at most once per slot.
+   *
+   * @returns {Promise<{ok:true, slot:Object}|{ok:false, reason:'unknown'|'other_app'}>}
+   */
+  async slotFor(mcpToken) {
+    const slot = await this.store.get(mcpToken);
+    if (!slot) return { ok: false, reason: 'unknown' };
+    const current = this.appId;
+    const bound = slot.pingcode_app_id ? String(slot.pingcode_app_id) : null;
+    if (bound && current && bound !== current) return { ok: false, reason: 'other_app' };
+    if (!bound && current) {
+      await this.store.set(mcpToken, { ...slot, pingcode_app_id: current });
+      slot.pingcode_app_id = current;
+    }
+    return { ok: true, slot };
   }
 
   async getStatus(mcpToken) {
-    const t = await this.store.get(mcpToken);
-    if (!t) return { authorized: false };
+    const r = await this.slotFor(mcpToken);
+    if (!r.ok) return { authorized: false, reason: r.reason };
+    const t = r.slot;
     return { authorized: true, expires_at: t.expires_at, granted_at: t.granted_at };
   }
 
   async getValidAccessToken(mcpToken) {
-    const t = await this.store.get(mcpToken);
-    if (!t) return null;
+    const r = await this.slotFor(mcpToken);
+    if (!r.ok) return null;
+    const t = r.slot;
     if (!t.access_token || !t.refresh_token) return null;
     if (t.expires_at - TOKEN_REFRESH_SKEW_MS > Date.now()) return t.access_token;
 
@@ -188,9 +300,9 @@ export class PingCodeOAuth {
     return p;
   }
 
+  /** Back-compat boolean: does this token exist AND belong to the current app? */
   async hasSlot(mcpToken) {
-    const t = await this.store.get(mcpToken);
-    return !!t;
+    return (await this.slotFor(mcpToken)).ok;
   }
 
   async request(mcpToken, method, p, { query, body } = {}) {
@@ -231,22 +343,23 @@ export class PingCodeOAuth {
 }
 
 let singleton = null;
+/**
+ * The process-wide client. Deliberately constructed with NO app config: the
+ * credentials + API roots + scope are resolved PER REQUEST (the injected agent
+ * config, else this container's own env — see the class doc). Only the two
+ * genuinely box-level things are passed: where the shared encrypted token store
+ * lives, and this box's public callback URL.
+ */
 export function getPingCodeOAuth() {
   if (!singleton) {
     const publicBaseUrl = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
     singleton = new PingCodeOAuth({
-      clientId: process.env.PINGCODE_CLIENT_ID,
-      clientSecret: process.env.PINGCODE_CLIENT_SECRET,
-      restRoot: process.env.PINGCODE_REST_ROOT,
-      authRoot: process.env.PINGCODE_AUTH_ROOT,
       // SQLite (encrypted) store. A legacy `.../users.json` value still works:
       // the store maps it to a sibling users.db and migrates the JSON once.
       tokenStorePath: process.env.TOKEN_STORE_PATH || '/data/users.db',
       // Derive the redirect URI from this deployment's public base URL so the
       // server sends its IP callback and local dev sends its ngrok callback.
       redirectUri: publicBaseUrl ? `${publicBaseUrl}/oauth/callback` : null,
-      // Optional: OAuth scope to request on authorize (see PingCode app config).
-      scope: process.env.PINGCODE_SCOPE || null,
     });
   }
   return singleton;

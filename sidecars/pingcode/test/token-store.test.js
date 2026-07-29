@@ -48,6 +48,8 @@ test('encrypt/decrypt round-trips a slot, including unknown fields', async (t) =
     refresh_token: 'rt-secret',
     expires_at: 123, granted_at: 456, created_at: 789,
     pingcode_user_id: 'user-alice',
+    // Second half of the slot key: WHICH OAuth app minted this token.
+    pingcode_app_id: 'app-hash-1',
     some_future_field: { nested: true }, another: 'x',
   };
   await store.set('mcp_a', slot);
@@ -128,10 +130,13 @@ test('migration imports users.json, deletes it, and preserves unknown fields', a
   assert.ok(!fs.existsSync(`${jsonPath}.bak`), 'no plaintext .bak left behind');
   assert.ok(fs.existsSync(path.join(dir, 'users.db')), 'sibling users.db created');
 
-  assert.deepEqual(await store.get('mcp_one'), legacy.mcp_one);
+  // A legacy JSON slot has no app stamp — slots became (user, app)-keyed later —
+  // so it imports with pingcode_app_id NULL and is stamped on first use.
+  assert.deepEqual(await store.get('mcp_one'), { ...legacy.mcp_one, pingcode_app_id: null });
   assert.deepEqual(await store.get('mcp_two'), {
     ...legacy.mcp_two,
-    expires_at: null, granted_at: null, created_at: null, pingcode_user_id: null,
+    expires_at: null, granted_at: null, created_at: null,
+    pingcode_user_id: null, pingcode_app_id: null,
   });
 });
 

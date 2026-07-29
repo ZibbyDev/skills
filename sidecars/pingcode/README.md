@@ -38,17 +38,52 @@ Both audiences share the renew flow: when the ~90-day refresh token dies,
 tool calls return a renew link that re-authorizes **without changing the
 MCP token**, so neither config ever changes.
 
-## Configuration (env)
+## Configuration
 
-All of these go in `.env` (see `.env.example`). **Required, no defaults** —
-the server fails loud at boot when any is missing:
+### Where the PingCode app config comes from — PER REQUEST, not boot
+
+This server is a **multi-tenant** sidecar: ONE process serves N agents that may
+each point at a DIFFERENT PingCode app or instance. So the app credentials are
+**not** boot state. On every request the control-plane sends the declaring
+agent's values (resolved from that agent's ENCRYPTED Env bag) in an
+`x-sidecar-config` header; `src/app-config.js` decodes them and threads them
+through the request with `AsyncLocalStorage`, so two agents' in-flight requests
+can never see each other's config. Precedence, highest first:
+
+1. the per-request injected config (the agent's Env tab),
+2. explicit constructor values (tests/embedders),
+3. this process's own env — the **fallback** for a single-app box whose operator
+   would rather configure the stack than an agent.
+
+Consequences worth knowing:
+
+- **Nothing below is required at boot except `TOKEN_STORE_KEY`.** A missing app
+  config surfaces as a clear per-request error (`/oauth/start` answers 503 and
+  names the missing keys), never as a crashed container that takes every other
+  tenant down with it.
+- **An OAuth flow is bound to the app that started it.** `/oauth/start` snapshots
+  the app identity onto its one-time nonce entry, and the callback exchanges the
+  code against *that* identity — PingCode's redirect carries no agent hint.
+- **Token slots are keyed by (user, app).** Each slot records `pingcode_app_id`
+  (a stable hash of the client id); a bearer minted under app A is refused with
+  403 under app B, and a renew across apps is refused too. Slots written before
+  this existed are stamped with the app in force on first use.
+- On a box where **several** agents declare this sidecar, a URL must say which
+  one: `/sidecars/pingcode/oauth/start?agent=<workflow-uuid>` (the control-plane
+  answers 409 with the candidate list otherwise). The success page emits an MCP
+  URL already carrying that handle.
+
+### The variables
+
+These are the names read from the agent's Env bag **and** from `.env` as the
+fallback (see `.env.example`):
 
 | Var | Meaning |
 |---|---|
 | `PINGCODE_CLIENT_ID` / `PINGCODE_CLIENT_SECRET` | OAuth app created in YOUR PingCode admin console |
 | `PINGCODE_REST_ROOT` | REST API root of your instance, e.g. `https://pingcode.example.com/open` |
 | `PINGCODE_AUTH_ROOT` | Authorize-page root, e.g. `https://pingcode.example.com` |
-| `TOKEN_STORE_KEY` | 32-byte key (hex or base64) encrypting stored PingCode tokens. Generate: `openssl rand -hex 32`. Losing/changing it orphans the store. |
+| `TOKEN_STORE_KEY` | **Box-global, and the ONE thing required at boot.** 32-byte key (hex or base64) encrypting stored PingCode tokens. Generate: `openssl rand -hex 32`. Losing/changing it orphans the store. Not per-tenant: it protects the shared store, not an app. |
 | `PINGCODE_SCOPE` | OAuth scope requested on authorize. **Effectively required** — see [Renew safety](#renew-safety-identity--nonce): with no scope PingCode grants the user token no API permissions, `GET /v1/myself` 403s, and **every renew is refused**. The server warns at boot when it is empty. |
 
 Optional:
