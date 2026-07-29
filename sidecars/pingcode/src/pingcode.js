@@ -1,6 +1,7 @@
 import { fetch } from 'undici';
-import { TokenStore } from './token-store.js';
-import { appIdFor, currentAppConfig, envAppConfig } from './app-config.js';
+import { TokenStore, loadTokenStoreKey } from './token-store.js';
+import { PlatformTokenStore } from './platform-store.js';
+import { appIdFor, currentAppConfig, envAppConfig, effectiveAppConfig } from './app-config.js';
 
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
@@ -25,6 +26,40 @@ const TOKEN_REFRESH_SKEW_MS = 60_000;
  * is the tenant-keyed DATA plane, and every slot records WHICH app minted it
  * (`pingcode_app_id`), so a token from app A can never be used with app B.
  */
+/**
+ * Pick the storage backend from the environment, once.
+ *   ZIBBY_API_BASE + PROJECT_API_TOKEN + ZIBBY_STORE__oauth_tokens  → platform store
+ *   otherwise                                                       → local file
+ * Injected by the control-plane at launch (the store id comes from the agent's
+ * own provisioning), so hosted deployments get the visible store automatically
+ * and standalone ones keep working unchanged.
+ */
+// Per-request store resolution. The store id (and the token the datasets API
+// needs) arrive with EACH request, injected from the DECLARING agent's env bag —
+// that is what makes two deployed PingCode services use two DIFFERENT stores and
+// never share a user's authorization. So the backend is resolved per call, not
+// pinned at construction; instances are cached per store id.
+const _storeCache = new Map();
+
+function resolveTokenStore(fallbackPath) {
+  const cfg = effectiveAppConfig() || {};
+  const apiBase = String(cfg.ZIBBY_API_BASE || process.env.ZIBBY_API_BASE || '').trim();
+  const apiToken = String(cfg.PROJECT_API_TOKEN || process.env.PROJECT_API_TOKEN || '').trim();
+  const storeId = String(cfg.ZIBBY_STORE__oauth_tokens || process.env.ZIBBY_STORE__oauth_tokens || '').trim();
+  if (apiBase && apiToken && storeId) {
+    const cached = _storeCache.get(storeId);
+    if (cached) return cached;
+    const built = new PlatformTokenStore({ apiBase, apiToken, storeId, key: loadTokenStoreKey() });
+    _storeCache.set(storeId, built);
+    return built;
+  }
+  // Standalone deployment (outside Zibby, or platform wiring absent): the local
+  // encrypted file keeps the lego working on its own.
+  let local = _storeCache.get('__local__');
+  if (!local) { local = new TokenStore(fallbackPath); _storeCache.set('__local__', local); }
+  return local;
+}
+
 export class PingCodeOAuth {
   constructor({ clientId, clientSecret, restRoot, authRoot, tokenStorePath, redirectUri, scope } = {}) {
     // Constructor values are DEFAULTS, not a frozen configuration. Only the
@@ -50,9 +85,20 @@ export class PingCodeOAuth {
     // registered in the PingCode app or authorize fails with redirect_uri 不匹配.
     // NOT per-tenant: it is a property of THIS BOX's public URL, not of the app.
     this.redirectUri = redirectUri || null;
-    this.store = new TokenStore(tokenStorePath);
+    // WHERE the per-user authorizations live. Prefer the PLATFORM store (a
+    // first-class Stores-v2 `sqlite` store, visible + manageable on the Storage
+    // page, provisioned per AGENT so two deployed services never share
+    // authorizations); fall back to the local encrypted file when the platform
+    // wiring is absent (a standalone deployment outside Zibby — the lego must
+    // keep running on its own). Both backends expose the same get/set/delete
+    // and the same ciphertext format, so a slot written by one reads with the
+    // other.
+    this._tokenStorePath = tokenStorePath;
     this.refreshInflight = new Map();
   }
+
+  /** The token store for THIS request (see resolveTokenStore). */
+  get store() { return resolveTokenStore(this._tokenStorePath); }
 
   /**
    * The EFFECTIVE app config for the current async flow. Merged per FIELD so a

@@ -57,6 +57,12 @@ export const REQUEST_CONFIG_KEYS = [
   'PINGCODE_REST_ROOT',
   'PINGCODE_AUTH_ROOT',
   'PINGCODE_SCOPE',
+  // WHERE this request's authorizations live + how to reach the platform API.
+  // Injected per request from the DECLARING agent's env bag, so two deployed
+  // services resolve two different stores (see pingcode.js resolveTokenStore).
+  'ZIBBY_STORE__oauth_tokens',
+  'PROJECT_API_TOKEN',
+  'ZIBBY_API_BASE',
 ];
 
 const _appCtx = new AsyncLocalStorage();
@@ -72,6 +78,14 @@ export function appConfigFrom(bag) {
   if (str(b.PINGCODE_REST_ROOT)) cfg.restRoot = str(b.PINGCODE_REST_ROOT).replace(/\/$/, '');
   if (str(b.PINGCODE_AUTH_ROOT)) cfg.authRoot = str(b.PINGCODE_AUTH_ROOT).replace(/\/$/, '');
   if (str(b.PINGCODE_SCOPE)) cfg.scope = str(b.PINGCODE_SCOPE);
+  // WHERE this request's authorizations live. Carried through under their RAW
+  // key names on purpose: they are not PingCode-app fields (they say nothing
+  // about which PingCode app this is), they are the platform wiring the token
+  // store resolves against — so renaming them here would only hide that they
+  // are the very same `ZIBBY_STORE__<name>` / PAT the platform injects.
+  if (str(b.ZIBBY_STORE__oauth_tokens)) cfg.ZIBBY_STORE__oauth_tokens = str(b.ZIBBY_STORE__oauth_tokens);
+  if (str(b.PROJECT_API_TOKEN)) cfg.PROJECT_API_TOKEN = str(b.PROJECT_API_TOKEN);
+  if (str(b.ZIBBY_API_BASE)) cfg.ZIBBY_API_BASE = str(b.ZIBBY_API_BASE).replace(/\/$/, '');
   return cfg;
 }
 
