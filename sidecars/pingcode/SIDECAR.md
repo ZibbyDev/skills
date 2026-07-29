@@ -10,7 +10,7 @@ sha256-pinned in `selfhosted/sidecar/sidecar-versions.json`).
 | Upstream repo | `pingcode-mcp` (first-party; not a third-party vendor) |
 | Runtime | Node **22** (alpine) — uses the BUILTIN `node:sqlite`, no native module |
 | Port / health | `8090` / `GET /health` |
-| Durable state | `/app/data` (declared named volume): encrypted SQLite token store |
+| Durable state | `/data` (declared named volume): encrypted SQLite token store |
 | Box-global secret | `TOKEN_STORE_KEY` (32-byte) — encrypts the shared token store |
 | Per-tenant config | `PINGCODE_CLIENT_ID/SECRET`, `PINGCODE_REST_ROOT/AUTH_ROOT`, `PINGCODE_SCOPE` — injected PER REQUEST from the declaring agent's encrypted Env bag (`x-sidecar-config`); container env is only the fallback |
 | Multi-tenancy | ONE shared container serves N agents pointing at N different PingCode apps; config threaded with `AsyncLocalStorage` (`src/app-config.js`), token slots keyed by **(user, app)** |
