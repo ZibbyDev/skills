@@ -47,16 +47,16 @@ app.listen(PORT, () => {
     `  App config:          per-request (from the declaring agent's Env bag)`
     + `${envConfigured ? ' + container-env fallback present' : ' — no container-env fallback set'}`,
   );
-  // Renews FAIL CLOSED when the consenting PingCode user cannot be resolved via
-  // GET /v1/myself. An empty scope is the configuration in which that call 403s,
-  // so say it once at boot rather than at day 90 when a user clicks renew.
-  if (envConfigured && !process.env.PINGCODE_SCOPE) {
-    console.warn(
-      '  ⚠️  The container-env fallback sets no PINGCODE_SCOPE. Renews require ' +
-      'GET /v1/myself to succeed; with no scope PingCode grants the user token no ' +
-      'API permissions and that call 403s, so a renew under the fallback config ' +
-      'will be REFUSED (fail-closed). Set PINGCODE_SCOPE on the agent Env bag ' +
-      '(preferred) or on the box.',
-    );
-  }
+  // SCOPE is OPTIONAL. Sending none means "ask for the app's default
+  // permissions", which on a normally-configured PingCode app is enough to call
+  // GET /v1/myself — verified against a live app with a real user token. The
+  // previous version of this line claimed a missing scope GUARANTEED a 403 and
+  // therefore a refused renew; that was wrong, and a scary-but-false boot
+  // warning is worse than none. Only set PINGCODE_SCOPE if YOUR PingCode app
+  // requires an explicit scope value (its consent page then shows 请求权限).
+  console.log(
+    `  OAuth scope:         ${process.env.PINGCODE_SCOPE
+      ? process.env.PINGCODE_SCOPE
+      : 'none requested — the app\'s default permissions apply (set PINGCODE_SCOPE only if your PingCode app requires an explicit scope)'}`,
+  );
 });

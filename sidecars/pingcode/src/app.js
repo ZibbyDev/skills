@@ -333,9 +333,10 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
               <p>服务器无法通过 <code>GET /v1/myself</code> 确认刚才授权的是哪个 PingCode 账号,
               因此拒绝把令牌写入这个 MCP_TOKEN(宁可拒绝,也不能把别人的令牌写进你的槽位)。
               <strong>你的原有授权没有被改动。</strong></p>
-              <p class="muted">管理员请检查:PingCode 应用的授权范围 <code>PINGCODE_SCOPE</code>
-              必须覆盖 <code>GET /v1/myself</code>(当前应用对该接口无权限或未配置 scope,
-              返回:${esc(identity?.error || 'unknown error')})。修好后请用户重新点续签链接。</p>
+              <p class="muted">管理员请检查:该 PingCode 应用需要有权限调用
+              <code>GET /v1/myself</code>(返回:${esc(identity?.error || 'unknown error')})。
+              多数应用用默认权限即可,无需配置 scope;若你的应用要求显式授权范围,再设置
+              <code>PINGCODE_SCOPE</code>。修好后请用户重新点续签链接。</p>
               ${restart}`));
           }
 
@@ -371,9 +372,9 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
         // ── first-time flow: mint a fresh MCP_TOKEN ──
         // No slot exists yet, so there is nothing to hijack: a missing identity
         // here cannot hand anyone else's tokens to anyone. We therefore still
-        // issue the token (a deployment whose scope omits /v1/myself but covers
-        // the business endpoints keeps working) — but we say LOUDLY that the slot
-        // is unbindable, because every future renew WILL be refused above.
+        // issue the token (an app that cannot call /v1/myself but can call the
+        // business endpoints keeps working) — but we say LOUDLY that the slot is
+        // unbindable, because every future renew WILL be refused above.
         const mcpToken = newMcpToken();
         await pc.saveTokens(mcpToken, {
           ...tokens,

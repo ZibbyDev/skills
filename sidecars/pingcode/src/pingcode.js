@@ -35,11 +35,14 @@ export class PingCodeOAuth {
     if (clientSecret) this._fixed.clientSecret = String(clientSecret);
     if (restRoot) this._fixed.restRoot = String(restRoot).replace(/\/$/, '');
     if (authRoot) this._fixed.authRoot = String(authRoot).replace(/\/$/, '');
-    // OAuth scope requested on authorize. PingCode shows it on the consent page
-    // as 请求权限; if absent the consent shows 请求权限:无 and the user token
-    // gets NO API permissions (every business call 403s even when the user
-    // themselves has access). Set PINGCODE_SCOPE once the app's permitted scope
-    // value is known; left null it preserves the previous (no-scope) behaviour.
+    // OAuth scope requested on authorize — OPTIONAL. When set, PingCode shows it
+    // on the consent page as 请求权限; when absent, no `scope` parameter is sent
+    // and the app's DEFAULT permissions apply. That default is enough for a
+    // normally-configured app: GET /v1/myself was verified to succeed with a real
+    // user token minted through a no-scope authorize. (An earlier comment here
+    // claimed a missing scope meant "no API permissions, every call 403s" — that
+    // is NOT true in general, so do not re-introduce it.) Set PINGCODE_SCOPE only
+    // if YOUR PingCode app requires an explicit scope value.
     if (scope) this._fixed.scope = String(scope);
     // Sent explicitly on BOTH authorize and token-exchange. PingCode validates
     // it against the app's registered redirect URI list, so each deployment
