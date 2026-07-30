@@ -141,7 +141,9 @@ describe('name→storeId resolution from ZIBBY_STORE__* env', () => {
     expect(out).toMatchObject({ ok: true, store: 'outbox', storeId: 'store_sql1' });
     const [url, opts] = spy.mock.calls[0];
     expect(url).toBe('https://api-test.zibby.app/datasets/stores/store_sql1/sql');
-    expect(JSON.parse(opts.body)).toEqual({ sql: 'SELECT id FROM outbox WHERE status = ?', params: ['scheduled'] });
+    // sqlite_query is a READ tool → it sends readOnly:true so the backend's
+    // assertReadOnly gate refuses any write (security fix 42f020c).
+    expect(JSON.parse(opts.body)).toEqual({ sql: 'SELECT id FROM outbox WHERE status = ?', params: ['scheduled'], readOnly: true });
   });
 
   it('sqlite_exec requires sql (no call when missing)', async () => {
