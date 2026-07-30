@@ -509,16 +509,24 @@ store (or a file tool on either, etc.) is rejected.`,
 
         case 'sqlite_exec':
         case 'sqlite_query': {
-          // Both map to the /sql route on a SQLITE-type store. exec vs query is
-          // guidance for the agent; the backend runs the SQL and (for writes)
-          // persists with optimistic concurrency. A dataset-type store here is
-          // rejected server-side ("not a sqlite store").
+          // Both map to the /sql route on a SQLITE-type store. A dataset-type
+          // store here is rejected server-side ("not a sqlite store").
+          //
+          // exec vs query is NOT merely guidance: sqlite_query is documented as
+          // "Run a SELECT", so it sends readOnly:true and the backend's
+          // assertReadOnly gate (handlers/sqlite-store.js) refuses anything that
+          // writes AND suppresses the save. Without that flag the two tools were
+          // the same full write primitive, so a tool the model is told is a
+          // read could DROP a table — and an agent driven by untrusted content
+          // (invariant #5) is exactly who would be talked into doing it.
+          // sqlite_exec keeps write access, which is its stated purpose.
           const target = resolveStore(args?.store);
           if (target.error) return JSON.stringify({ error: target.error });
           if (typeof args?.sql !== 'string' || !args.sql.trim()) {
             return JSON.stringify({ error: 'sql is required (a non-empty SQL string)' });
           }
           const payload: any = { sql: args.sql };
+          if (name === 'sqlite_query') payload.readOnly = true;
           if (Array.isArray(args?.params)) payload.params = args.params;
           const data = await storeFetch(target.storeId, 'sql', payload);
           return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
