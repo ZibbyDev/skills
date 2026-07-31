@@ -323,7 +323,7 @@ export const linkedinSkill: any = {
   envKeys: [],
   description: 'LinkedIn — (business) list admin Organizations + create DRAFT posts on a company Page, and (personal) PUBLISH a post to your own member profile feed',
 
-  promptFragment: `## LinkedIn (connected)
+  promptFragment: `## LinkedIn
 You can post to LinkedIn two ways — an ORG company Page (business) and your own member PROFILE (personal). Each path needs its own LinkedIn integration connected.
 
 Business (company Page) — DRAFT only:

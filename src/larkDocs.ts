@@ -363,7 +363,7 @@ export const larkDocsSkill: any = {
   description: 'Lark / Feishu Docs — read, create, append, and insert images into Lark documents (docx).',
   envKeys: [],
 
-  promptFragment: `## Lark Docs (connected)
+  promptFragment: `## Lark Docs
 You can read, create, and append Lark/Feishu documents (docx). This reuses the same connected Lark app as messaging.
 - larkdoc_get: pass a Lark doc id OR a full doc URL (a /docx/ or /wiki/ link); returns { ok, documentId, title, url, text } where text is the doc as plain text (truncated to ~20k chars). Use it as reference context.
 - larkdoc_create: create a new doc from a title + markdown/text (#/##/### headings, - bullets, 1. ordered supported); returns { ok, documentId, url }. Share the url.

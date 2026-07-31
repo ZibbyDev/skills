@@ -58,7 +58,7 @@ export const slackSkill: any = {
   envKeys: ['SLACK_BOT_TOKEN', 'SLACK_TEAM_ID'],
   description: 'Slack MCP Server',
 
-  promptFragment: `## Slack (connected)
+  promptFragment: `## Slack
 You have access to the user's Slack workspace. Use these tools:
 - slack_list_channels, slack_post_message, slack_reply_to_thread
 - slack_add_reaction, slack_get_channel_history, slack_get_thread_replies

@@ -146,7 +146,7 @@ export const discordSkill: any = {
   envKeys: ['DISCORD_BOT_TOKEN', 'DISCORD_GUILD_ID'],
   description: 'Discord bot tools (send messages, list channels)',
 
-  promptFragment: `## Discord (connected)
+  promptFragment: `## Discord
 You can post to the user's Discord server as their bot. Tools:
 - discord_send_message(channelId, text) — post a message to a channel (long text is auto-chunked to Discord's 2000-char limit)
 - discord_list_channels(guildId?) — list the server's text channels (id + name) to find where to post; guildId is optional when the bot is in one server`,

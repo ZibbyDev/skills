@@ -379,7 +379,7 @@ export const jiraSkill: any = {
   envKeys: ['ATLASSIAN_ACCESS_TOKEN', 'ATLASSIAN_CLOUD_ID'],
   description: 'Zibby Jira MCP Server (OAuth Bearer)',
 
-  promptFragment: `## Jira (connected)
+  promptFragment: `## Jira
 You have direct access to the user's Jira. Use these tools proactively:
 
 ### Issue tools

@@ -168,7 +168,7 @@ export const gitlabSkill: any = {
   envKeys: ['GITLAB_TOKEN', 'GITLAB_OAUTH_TOKEN', 'GITLAB_INSTANCE_URL', 'GITLAB_API_URL'],
   description: 'GitLab — merge requests, diffs, MR reviews/discussions, issues',
 
-  promptFragment: `## GitLab (connected)
+  promptFragment: `## GitLab
 You have access to the user's GitLab projects via the REST API (cloud gitlab.com OR self-hosted). A "merge request" (MR) is GitLab's pull request. An MR is addressed by a PROJECT (numeric id OR full path like "group/repo") and an \`iid\` (the per-project MR number shown in the URL). For projects, prefer the full path form ("group/subgroup/repo") — it's what users have. Available tools:
 
 ### Discovery

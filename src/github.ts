@@ -56,7 +56,7 @@ export const githubSkill: any = {
   envKeys: ['GITHUB_TOKEN'],
   description: 'GitHub — issues, PRs, commits, code search, file reading',
 
-  promptFragment: `## GitHub (connected)
+  promptFragment: `## GitHub
 You have access to the user's GitHub repositories. Available tools:
 
 ### Discovery

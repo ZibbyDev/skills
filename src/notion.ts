@@ -489,7 +489,7 @@ export const notionSkill: any = {
   requiresIntegration: INTEGRATIONS.NOTION, // see jiraSkill.requiresIntegration for semantics
   description: 'Notion — read pages/databases as context + create pages, append blocks, and insert images',
 
-  promptFragment: `## Notion (connected)
+  promptFragment: `## Notion
 You can read Notion content as context AND write to Notion (create pages, append blocks, insert images).
 - notion_get_page: pass a Notion page id OR a full Notion URL; returns { id, title, url, text } where text is the page flattened to markdown (truncated to ~20k chars). Use the text as reference context.
 - notion_query_database: pass a database id/URL; returns a small list of rows ({ id, title, url, props }). Use to find a specific page, then notion_get_page it.

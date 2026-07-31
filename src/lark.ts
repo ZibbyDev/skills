@@ -99,7 +99,7 @@ export const larkSkill: any = {
   description: 'Lark / Feishu messaging — send messages and reply in threads.',
   envKeys: [],
 
-  promptFragment: `## Lark (connected)
+  promptFragment: `## Lark
 You can send messages and replies on Lark. Use:
 - lark_send_message: post a message to a chat, user, or DM
 - lark_reply: reply to an existing message (threaded)

@@ -284,7 +284,7 @@ export const sentrySkill: any = {
   envKeys: [],
   tools: [],                             // Empty: tools come from the spawned MCP server, not declared here
 
-  promptFragment: `## Sentry (connected)
+  promptFragment: `## Sentry
 You have access to the user's Sentry. Use these tools:
 - sentry_list_projects: List projects in the organization
 - sentry_list_issues: List errors/issues (supports Sentry search query, project filter, sort)

@@ -200,7 +200,7 @@ export const linearSkill: any = {
   envKeys: ['LINEAR_API_KEY', 'LINEAR_OAUTH_TOKEN'],
   description: 'Linear — issues, comments, workflow states (GraphQL API key)',
 
-  promptFragment: `## Linear (connected)
+  promptFragment: `## Linear
 You have direct access to the user's Linear workspace (GraphQL API). Tools:
 
 ### Discovery

@@ -53,7 +53,7 @@ export const planeSkill: any = {
   description: 'Plane — projects, work items, cycles, modules, epics, comments (official MCP, API key)',
   tools: [],                           // empty: tools come from the spawned MCP server, not declared here
 
-  promptFragment: `## Plane (connected)
+  promptFragment: `## Plane
 You have direct access to the user's Plane workspace via the official Plane MCP server. All Plane tools are available under the mcp__plane__* namespace — use them proactively to read and write projects, work items (issues), cycles, modules, epics, sub-issues, comments, labels, states, pages, and workspace data.
 
 - List/get projects and work items, then create/update/delete or search work items as needed.

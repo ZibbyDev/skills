@@ -488,7 +488,7 @@ export const googleDocsSkill: any = {
   requiresIntegration: INTEGRATIONS.GOOGLE, // see jiraSkill.requiresIntegration for semantics
   description: 'Google Docs — create, append to, insert images into, and read Google Docs (drive.file scoped)',
 
-  promptFragment: `## Google Docs (connected)
+  promptFragment: `## Google Docs
 You can create and edit Google Docs for the user. IMPORTANT visibility caveat: the integration uses Google's per-file drive.file scope, so you can only see docs this app CREATED (or the user explicitly picked) — not the user's whole Drive.
 Docs access is PER-USER: each teammate connects their OWN Google account (Integrations → Google Docs). In shared-chat contexts the runtime routes these tools to the SENDER's own Google; a teammate who hasn't connected their own Google gets { ok:false } with connect instructions — for privacy the project owner's Google is NEVER used on someone else's behalf. Relay those instructions rather than retrying.
 - gdocs_create_doc: create a new Google Doc from a title + markdown (headings/bold/bullets/links supported) or plain text; returns { documentId, url }. Share the url with the user.

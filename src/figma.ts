@@ -159,7 +159,7 @@ export const figmaSkill: any = {
   envKeys: [],
   description: 'Figma — read files, nodes and comments; extract dev-handoff specs (sizes/colors/fonts/auto-layout); list versions and image fills; render frames to PNG/JPG/SVG/PDF; browse team projects/files; and post comments',
 
-  promptFragment: `## Figma (connected)
+  promptFragment: `## Figma
 You have access to the user's Figma files via the Figma REST API. Every tool that takes a file accepts EITHER the raw file key OR a full figma.com URL (figma.com/file|design/<key>/...). Node ids accept URL form \`1-23\` or API form \`1:23\` interchangeably. Tools:
 
 ### Identity
