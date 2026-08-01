@@ -17,7 +17,7 @@
  */
 
 import http from 'node:http';
-import { ingest, query, del, health, withEmbedding } from './brain.js';
+import { ingest, query, del, drop, health, withEmbedding } from './brain.js';
 
 // Per-agent embedding overrides carried on the request (set by the control-plane
 // from the deploying agent's snapshotted config). Maps to the env GBrain reads.
@@ -28,8 +28,15 @@ function embedEnvFrom(body) {
   const model = typeof body?.embeddingModel === 'string' ? body.embeddingModel.trim() : '';
   const key = typeof body?.embeddingKey === 'string' ? body.embeddingKey.trim() : '';
   if (model) {
-    env.GBRAIN_EMBEDDING_MODEL = model;
-    if (EMBED_DIMS[model]) env.GBRAIN_EMBEDDING_DIMENSIONS = String(EMBED_DIMS[model]);
+    // PROVIDER-QUALIFY the id. GBrain resolves a model as `<provider>:<model>`;
+    // handed a bare `text-embedding-3-small` it reports provider "unknown" and
+    // every embed pass fails — so the brain ends up vector-capable but empty of
+    // vectors, which searches exactly like a keyword-only brain. The picker
+    // stores bare ids, so normalize here rather than making every caller do it.
+    const qualified = model.includes(':') ? model : `openai:${model}`;
+    env.GBRAIN_EMBEDDING_MODEL = qualified;
+    const bare = qualified.slice(qualified.indexOf(':') + 1);
+    if (EMBED_DIMS[bare]) env.GBRAIN_EMBEDDING_DIMENSIONS = String(EMBED_DIMS[bare]);
   }
   if (key) {
     env.OPENAI_API_KEY = key;   // GBrain reads the embedding key from OPENAI_API_KEY
@@ -114,7 +121,25 @@ async function handleQuery(body) {
   if (!q) return { status: 400, body: { ok: false, error: 'query is required' } };
   const topK = Number.isInteger(body?.topK) && body.topK > 0 ? Math.min(body.topK, 50) : 8;
   const r = await withEmbedding(embedEnvFrom(body), () => query(kbId, q, topK));
-  return { status: 200, body: { ok: true, results: r.results } };
+  // `mode` says how this brain actually searches ('vector' = hybrid vector+BM25,
+  // 'lexical' = keyword only) and `stale` says it was frozen in a mode that
+  // disagrees with the credentials on THIS request. Without them a keyword-only
+  // brain answered semantic queries with an empty list and looked simply empty.
+  return { status: 200, body: { ok: true, results: r.results, mode: r.mode, stale: r.stale } };
+}
+
+/**
+ * DROP — destroy an entire brain (pages, vectors, slug map). Explicit and
+ * irreversible: it exists so deleting a Store can really delete its data, and so
+ * a brain frozen in the wrong search mode can be rebuilt from the caller's
+ * archive. NOTHING calls it implicitly.
+ */
+async function handleDrop(body) {
+  const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
+  if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
+  if (body?.confirm !== true) return { status: 400, body: { ok: false, error: 'dropping a brain deletes all of its data — pass confirm:true' } };
+  const r = await drop(kbId);
+  return { status: 200, body: { ok: true, dropped: r.dropped } };
 }
 
 async function handleDelete(body) {
@@ -132,6 +157,7 @@ const POST_ROUTES = {
   '/ingest': handleIngest,
   '/query': handleQuery,
   '/delete': handleDelete,
+  '/drop': handleDrop,
 };
 
 const server = http.createServer(async (req, res) => {
@@ -188,4 +214,4 @@ if (import.meta.main) {
   });
 }
 
-export { server, handleIngest, handleQuery, handleDelete };
+export { server, handleIngest, handleQuery, handleDelete, handleDrop };

@@ -49,7 +49,35 @@ const EMBED_KEYS = [
   'DASHSCOPE_API_KEY', 'ZHIPU_API_KEY', 'MINIMAX_API_KEY',
 ];
 
+// Read an embedding setting the way the SPAWNED gbrain will see it: the
+// per-request overrides withEmbedding() carries WIN over the container env.
+//
+// This is the whole ballgame. On this platform the embedding key is per-AGENT
+// and arrives ON THE REQUEST — a shared multi-tenant sidecar must never hold one
+// tenant's key as container env (north-star #9). So the container env has no key
+// by design, and a decision that consults only `process.env` concludes "no
+// embeddings" on EVERY request, forever. That is what happened: the key was
+// threaded faithfully into every gbrain subprocess, and then ignored by the one
+// decision that mattered — `ensureBrain` passed `--no-embedding`, which freezes
+// at creation, so every brain became keyword-only for life while its config.json
+// still advertised text-embedding-3-large. Symptom: exact-token queries hit with
+// BM25 scores, semantically-equivalent queries returned nothing.
+function embedSetting(k) {
+  const o = _embedCtx.getStore();
+  const v = (o && o[k] != null) ? o[k] : process.env[k];
+  return v == null ? '' : String(v);
+}
+
 function embeddingsEnabled() {
+  if (embedSetting('GBRAIN_NO_EMBEDDING') === '1') return false;
+  if (embedSetting('GBRAIN_EMBEDDING') === '1') return true;
+  return EMBED_KEYS.some((k) => embedSetting(k).trim().length > 0);
+}
+
+// What the OLD (pre-fix) code would have decided for a brain created before the
+// marker existed — a pure function of container env, so it reconstructs exactly.
+// Used to classify legacy brains instead of guessing.
+function legacyEmbeddingsEnabled() {
   if (process.env.GBRAIN_NO_EMBEDDING === '1') return false;
   if (process.env.GBRAIN_EMBEDDING === '1') return true;
   return EMBED_KEYS.some((k) => (process.env[k] || '').trim().length > 0);
@@ -194,6 +222,17 @@ async function getServe(brainDir) {
   return s;
 }
 
+// Release this brain's persistent `gbrain serve` (and with it the single-writer
+// PGLite lock) so a one-off CLI pass can open the same database. The next
+// serveCall lazily starts a fresh one.
+function stopServe(brainDir) {
+  const s = _serves.get(brainDir);
+  if (!s) return;
+  _serves.delete(brainDir);
+  try { s.proc.stdin.end(); } catch { /* ignore */ }
+  try { s.proc.kill('SIGTERM'); } catch { /* ignore */ }
+}
+
 // Call a gbrain MCP tool on the brain's persistent serve process. Returns the
 // tool's JSON payload (MCP wraps it as content[0].text). Throws on tool error.
 async function serveCall(brainDir, tool, args) {
@@ -240,6 +279,48 @@ async function pathExists(p) {
   try { await access(p); return true; } catch { return false; }
 }
 
+// The brain's OWN record of how it was initialized. gbrain's config.json is NOT
+// usable for this: it writes `embedding_model: openai:text-embedding-3-large`
+// even when created with --no-embedding, so it reports a capability the brain
+// does not have. This marker is written by us, from the decision we actually
+// made, so "is this brain vector-capable?" has a truthful answer.
+function markerPathFor(brainDir) {
+  return join(brainDir, 'adapter', 'embedding.json');
+}
+
+async function readMarker(brainDir) {
+  try {
+    const m = JSON.parse(await readFile(markerPathFor(brainDir), 'utf8'));
+    return (m && typeof m === 'object' && typeof m.embeddings === 'boolean') ? m : null;
+  } catch { return null; }
+}
+
+async function writeMarker(brainDir, embeddings) {
+  try {
+    await mkdir(join(brainDir, 'adapter'), { recursive: true });
+    await writeFile(markerPathFor(brainDir), JSON.stringify({
+      embeddings, model: embedSetting('GBRAIN_EMBEDDING_MODEL') || null, at: new Date().toISOString(),
+    }), 'utf8');
+  } catch { /* the marker is diagnostics — never fail an ingest over it */ }
+}
+
+/**
+ * How this brain SEARCHES, as opposed to how it is configured:
+ *   { mode: 'vector'|'lexical', stale: boolean }
+ * `stale` = the brain was frozen in a mode that disagrees with what this request
+ * can do (almost always: created keyword-only before a key was available, and a
+ * key is present now). It is REPORTED, never acted on — the brain is destroyed
+ * and rebuilt only by an explicit /drop, because a KB may hold pages saved
+ * straight from an editor that exist nowhere else. Silent rebuild = data loss.
+ */
+async function embeddingState(brainDir) {
+  const want = embeddingsEnabled();
+  const marker = await readMarker(brainDir);
+  // No marker → the brain predates it, so reconstruct the old code's decision.
+  const have = marker ? marker.embeddings : legacyEmbeddingsEnabled();
+  return { mode: have ? 'vector' : 'lexical', stale: want !== have };
+}
+
 /** Create + init the kbId's GBrain brain once (idempotent). */
 async function ensureBrain(brainDir) {
   if (_initialized.has(brainDir)) return;
@@ -247,15 +328,51 @@ async function ensureBrain(brainDir) {
   if (await pathExists(configPath)) { _initialized.add(brainDir); return; }
 
   await mkdir(brainDir, { recursive: true });
+  const embeddings = embeddingsEnabled();
   const args = ['init', '--pglite', '--non-interactive', '--json'];
-  if (!embeddingsEnabled()) args.push('--no-embedding');
+  if (!embeddings) {
+    args.push('--no-embedding');
+  } else {
+    // NAME THE MODEL AT INIT. Setting GBRAIN_EMBEDDING_MODEL in the environment
+    // does NOT configure the brain — gbrain takes the model from its init flag
+    // and otherwise writes its own default, which is how a brain asked for
+    // text-embedding-3-small ended up recorded as text-embedding-3-large while
+    // carrying our 1536 dimensions (3-large is natively 3072): a vector space
+    // that matches nothing. The flag wants a PROVIDER-QUALIFIED id.
+    const m = embedSetting('GBRAIN_EMBEDDING_MODEL').trim();
+    if (m) args.push('--embedding-model', m.includes(':') ? m : `openai:${m}`);
+    const dims = embedSetting('GBRAIN_EMBEDDING_DIMENSIONS').trim();
+    if (dims) args.push('--embedding-dimensions', dims);
+  }
   const r = await runGbrain(brainDir, args);
   // init can print a large skillpack suggestion; success is the exit code +
   // the presence of the brain's config.json.
   if (r.code !== 0 && !(await pathExists(configPath))) {
     throw new Error(`gbrain init failed (code ${r.code}): ${(r.stderr || r.stdout || '').slice(0, 400)}`);
   }
+  await writeMarker(brainDir, embeddings);
+  // eslint-disable-next-line no-console
+  console.log(`[gbrain] brain created: embeddings=${embeddings ? 'ON (vector+BM25 hybrid)' : 'OFF (keyword/BM25 only)'}`);
   _initialized.add(brainDir);
+}
+
+/**
+ * DESTROY a whole brain — every page, its vectors and its slug map. The ONLY
+ * way a brain's data goes away: nothing implicit ever deletes one (a store
+ * delete in the control-plane calls this explicitly, and a mode rebuild is
+ * drop-then-reingest from the caller's archive). Idempotent: dropping a brain
+ * that was never created succeeds with dropped:false.
+ */
+export async function drop(kbId) {
+  const brainDir = brainDirFor(kbId);
+  return withBrainLock(brainDir, async () => {
+    const existed = await pathExists(brainDir);
+    if (existed) await rm(brainDir, { recursive: true, force: true });
+    _initialized.delete(brainDir);
+    // eslint-disable-next-line no-console
+    console.log(`[gbrain] drop ${existed ? 'removed' : 'no-op (absent)'}: ${brainDir}`);
+    return { dropped: existed };
+  });
 }
 
 // ── slug↔sourceId map (per brain, our own metadata, outside .gbrain) ──────────
@@ -329,7 +446,35 @@ export async function ingest(kbId, docs) {
       map[slug] = d.sourceId;
     }
     await saveMap(brainDir, map);
-    return { upserted, deleted, chunks };
+
+    // EMBED. `put_page` writes the page and its keyword index — it does NOT
+    // generate vectors; in GBrain that is a separate `gbrain embed` pass. Skip
+    // it and a brain with embeddings ON and a live key still holds ZERO vectors,
+    // so every search silently degrades to keyword-only: the exact words in the
+    // document hit, a paraphrase of them returns nothing. That is precisely how
+    // an 80-document corpus ended up unsearchable by meaning while looking fine.
+    // Once per BATCH (not per doc) and over --stale, so it costs one pass over
+    // what this batch actually changed. `serve` holds the single-writer PGLite
+    // lock, so it has to stand down for the CLI — the next query restarts it.
+    if (upserted > 0 && embeddingsEnabled()) {
+      stopServe(brainDir);
+      const r = await runGbrain(brainDir, ['embed', '--stale']);
+      if (r.code !== 0) {
+        // Non-fatal: the documents ARE stored and keyword-searchable. Say so
+        // loudly rather than failing the ingest — but never pretend it worked.
+        // eslint-disable-next-line no-console
+        console.warn(`[gbrain] embed pass FAILED (code ${r.code}) — documents are stored but NOT vector-searchable: ${(r.stderr || r.stdout || '').slice(0, 300)}`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.log(`[gbrain] embed --stale done for ${upserted} upserted doc(s)`);
+      }
+    }
+
+    // Report HOW this brain searches. A caller that just wrote 80 documents into
+    // a keyword-only brain must be able to find that out from the write itself
+    // — the old contract gave no way to tell vector from lexical, which is how a
+    // whole corpus got indexed the wrong way without a single warning.
+    return { upserted, deleted, chunks, ...(await embeddingState(brainDir)) };
   });
 }
 
@@ -348,7 +493,7 @@ export async function query(kbId, queryText, topK) {
       chunk: hit.chunk_text || hit.chunk || hit.text || '',
       score: typeof hit.score === 'number' ? hit.score : 0,
     }));
-    return { results };
+    return { results, ...(await embeddingState(brainDir)) };
   });
 }
 
