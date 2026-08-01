@@ -30,7 +30,7 @@
 import { spawn } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
-  mkdir, writeFile, readFile, rm, access, readdir, stat as fsStat,
+  mkdir, writeFile, readFile, rm, rename, access, readdir, stat as fsStat,
 } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -382,18 +382,53 @@ function mapPathFor(brainDir) {
   return join(brainDir, 'adapter', 'sourcemap.json');
 }
 
-async function loadMap(brainDir) {
+/**
+ * Read the map, DISTINGUISHING "no map yet" from "unreadable map".
+ *   { ok:true,  map }  — parsed (an absent file is an empty map: a brand-new brain)
+ *   { ok:false, map:{} } — present but unparseable/unreadable
+ * The difference matters for anything that REPORTS on the map (stat's document
+ * count): "0 documents" and "I can't tell" are different answers, and printing
+ * the first when the second is true is a lie about the user's data.
+ */
+async function readMap(brainDir) {
+  let raw;
   try {
-    const raw = await readFile(mapPathFor(brainDir), 'utf8');
+    raw = await readFile(mapPathFor(brainDir), 'utf8');
+  } catch (e) {
+    // ENOENT = never saved = genuinely empty. Any other read error is unknown.
+    return e && e.code === 'ENOENT' ? { ok: true, map: {} } : { ok: false, map: {} };
+  }
+  try {
     const obj = JSON.parse(raw);
-    return obj && typeof obj === 'object' ? obj : {};
-  } catch { return {}; }
+    return obj && typeof obj === 'object' ? { ok: true, map: obj } : { ok: false, map: {} };
+  } catch { return { ok: false, map: {} }; }
 }
 
+/** The map, or {} if it can't be read — for the OPERATIONS, which recover by
+ *  rewriting it. Reporting paths use readMap() and say "unknown" instead. */
+async function loadMap(brainDir) {
+  return (await readMap(brainDir)).map;
+}
+
+/**
+ * ATOMIC replace: write a temp file in the same dir, then rename over the target
+ * (rename is atomic within a filesystem). A plain writeFile truncates first, so
+ * any concurrent reader — a lock-free stat probe, or the next ingest if the
+ * process dies mid-write — can observe a HALF-WRITTEN map and parse it as empty.
+ * That silently turns a populated KB into "0 documents". The temp name carries a
+ * random suffix so two writers can never collide on it.
+ */
 async function saveMap(brainDir, map) {
   const p = mapPathFor(brainDir);
   await mkdir(join(brainDir, 'adapter'), { recursive: true });
-  await writeFile(p, JSON.stringify(map), 'utf8');
+  const tmp = `${p}.${randomBytes(6).toString('hex')}.tmp`;
+  await writeFile(tmp, JSON.stringify(map), 'utf8');
+  try {
+    await rename(tmp, p);
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw e;
+  }
 }
 
 // ── op: soft-delete a slug; returns true iff a page was actually removed ──────
@@ -533,20 +568,28 @@ export async function del(kbId, sourceIds) {
  * { exists:false, sizeBytes:0, docs:0 }, never an init.
  *
  * `docs` = LIVE documents (the slug↔sourceId map, which ingest/delete prune),
- * not chunks and not soft-deleted pages.
+ * not chunks and not soft-deleted pages. It is **null** when the map exists but
+ * can't be read: mid-write bytes must surface as "unknown", never as a confident
+ * 0 that tells the user their populated KB is empty.
  */
 export async function stat(kbId) {
   const brainDir = brainDirFor(kbId);
   if (!(await pathExists(brainDir))) return { exists: false, sizeBytes: 0, docs: 0 };
-  const map = await loadMap(brainDir);
-  return { exists: true, sizeBytes: await dirSizeBytes(brainDir), docs: Object.keys(map).length };
+  const m = await readMap(brainDir);
+  return {
+    exists: true,
+    sizeBytes: await dirSizeBytes(brainDir),
+    docs: m.ok ? Object.keys(m.map).length : null,
+  };
 }
 
 /**
- * Recursive byte size of `dir` (regular files only — a symlink is counted as
- * its own tiny entry, never followed, so a link out of the brain dir can't make
- * one brain report another's bytes). Best-effort per entry: a file that
- * disappears mid-walk (a gbrain temp) contributes 0 instead of failing the probe.
+ * Recursive byte size of `dir`. REGULAR FILES ONLY: a symlink is skipped
+ * entirely (isFile() is false for one, and we never follow it), so a link
+ * pointing out of the brain dir can't make one brain report another's bytes —
+ * the few link-sized bytes it costs us are not worth that risk. Best-effort per
+ * entry: a file that disappears mid-walk (a gbrain temp) contributes 0 instead
+ * of failing the probe.
  */
 async function dirSizeBytes(dir) {
   let total = 0;
