@@ -34,31 +34,41 @@ describe.each([
   });
 
   it('passes those through to the child when set', () => {
-    const saved = { ...process.env };
+    // Restore by DELETING what we set, never `process.env = saved` — that
+    // swaps the special env object for a plain one and drops anything the
+    // runner put there.
+    const set = {
+      [providerKey]: 'provider-token',
+      PROJECT_API_TOKEN: 'run-scoped-placeholder',
+      ZIBBY_ACCOUNT_API_URL: 'https://api.example.test',
+    };
+    Object.assign(process.env, set);
     try {
-      process.env[providerKey] = 'provider-token';
-      process.env.PROJECT_API_TOKEN = 'zby_pat_runscoped';
-      process.env.ZIBBY_ACCOUNT_API_URL = 'https://api-prod.zibby.app';
       const { env } = skill.resolve();
       expect(env[providerKey]).toBe('provider-token');
-      expect(env.PROJECT_API_TOKEN).toBe('zby_pat_runscoped');
-      expect(env.ZIBBY_ACCOUNT_API_URL).toBe('https://api-prod.zibby.app');
+      expect(env.PROJECT_API_TOKEN).toBe('run-scoped-placeholder');
+      expect(env.ZIBBY_ACCOUNT_API_URL).toBe('https://api.example.test');
     } finally {
-      process.env = saved;
+      for (const k of Object.keys(set)) delete process.env[k];
     }
   });
 
   it('copies ONLY declared keys — the child never gets the whole run env', () => {
-    const saved = { ...process.env };
+    // Placeholders deliberately NOT shaped like real credentials: this is a
+    // public repo and a scanner should never have to judge whether a test
+    // fixture is a live key.
+    const set = {
+      [providerKey]: 'provider-token',
+      ANTHROPIC_API_KEY: 'must-not-reach-the-child',
+      AWS_SECRET_ACCESS_KEY: 'must-not-reach-the-child',
+    };
+    Object.assign(process.env, set);
     try {
-      process.env[providerKey] = 't';
-      process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-leak';
-      process.env.AWS_SECRET_ACCESS_KEY = 'must-not-leak';
       const { env } = skill.resolve();
       expect(env.ANTHROPIC_API_KEY).toBeUndefined();
       expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
     } finally {
-      process.env = saved;
+      for (const k of Object.keys(set)) delete process.env[k];
     }
   });
 });
