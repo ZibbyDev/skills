@@ -53,7 +53,15 @@ export const githubSkill: any = {
   serverName: 'github',
   allowedTools: ['mcp__github__*'],
   requiresIntegration: INTEGRATIONS.GITHUB, // see sentrySkill.requiresIntegration for semantics
-  envKeys: ['GITHUB_TOKEN'],
+  // GITHUB_TOKEN is the self-host fast path. The other three are what the
+  // CLOUD path needs: resolveIntegrationToken() calls Zibby's own backend for
+  // the provider token, authenticating with PROJECT_API_TOKEN — and this list
+  // is the ENTIRE env the spawned MCP child gets, so anything missing here is
+  // simply absent in that process. Without them every mcp__github__* call on
+  // cloud died with "No session token. Run `zibby login` first." — reads AND
+  // writes — while the template's node-side ghFetch (same process as the run,
+  // full env) worked fine, which made it look like a write-permission problem.
+  envKeys: ['GITHUB_TOKEN', 'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
   description: 'GitHub — issues, PRs, commits, code search, file reading',
 
   promptFragment: `## GitHub

@@ -165,7 +165,13 @@ export const gitlabSkill: any = {
   // the sentry / linear skills. allowedTools still namespaces them.
   allowedTools: ['mcp__gitlab__*'],
   requiresIntegration: INTEGRATIONS.GITLAB, // see githubSkill.requiresIntegration for semantics
-  envKeys: ['GITLAB_TOKEN', 'GITLAB_OAUTH_TOKEN', 'GITLAB_INSTANCE_URL', 'GITLAB_API_URL'],
+  // …plus what the CLOUD path needs — see the note on githubSkill.envKeys.
+  // This list IS the spawned MCP child's whole env, so resolveIntegrationToken
+  // has no credential to reach Zibby's backend with unless it's named here.
+  envKeys: [
+    'GITLAB_TOKEN', 'GITLAB_OAUTH_TOKEN', 'GITLAB_INSTANCE_URL', 'GITLAB_API_URL',
+    'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV',
+  ],
   description: 'GitLab — merge requests, diffs, MR reviews/discussions, issues',
 
   promptFragment: `## GitLab
