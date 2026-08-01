@@ -10,6 +10,7 @@
  *                 → { ok, upserted, deleted, chunks }
  *   POST /query   { kbId, query, topK }  → { ok, results:[{ sourceId, chunk, score }] }
  *   POST /delete  { kbId, sourceIds:[...] } → { ok, deleted }
+ *   POST /stat    { kbId } → { ok, exists, sizeBytes, docs }
  *   GET  /health  → { ok }
  *
  * Auth: if SIDECAR_AUTH_TOKEN is set, POST routes require
@@ -17,7 +18,7 @@
  */
 
 import http from 'node:http';
-import { ingest, query, del, drop, health, withEmbedding } from './brain.js';
+import { ingest, query, del, drop, stat, health, withEmbedding } from './brain.js';
 
 // Per-agent embedding overrides carried on the request (set by the control-plane
 // from the deploying agent's snapshotted config). Maps to the env GBrain reads.
@@ -153,11 +154,24 @@ async function handleDelete(body) {
   return { status: 200, body: { ok: true, deleted: r.deleted } };
 }
 
+/**
+ * STAT — how big this brain is and how many live documents it holds. Read-only
+ * and side-effect free: an absent brain answers exists:false rather than being
+ * created, so a size probe from a console page can never mint a brain.
+ */
+async function handleStat(body) {
+  const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
+  if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
+  const r = await stat(kbId);
+  return { status: 200, body: { ok: true, ...r } };
+}
+
 const POST_ROUTES = {
   '/ingest': handleIngest,
   '/query': handleQuery,
   '/delete': handleDelete,
   '/drop': handleDrop,
+  '/stat': handleStat,
 };
 
 const server = http.createServer(async (req, res) => {
@@ -214,4 +228,4 @@ if (import.meta.main) {
   });
 }
 
-export { server, handleIngest, handleQuery, handleDelete, handleDrop };
+export { server, handleIngest, handleQuery, handleDelete, handleDrop, handleStat };

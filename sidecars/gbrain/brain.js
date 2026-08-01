@@ -29,7 +29,9 @@
 
 import { spawn } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
+import {
+  mkdir, writeFile, readFile, rm, access, readdir, stat as fsStat,
+} from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -513,6 +515,58 @@ export async function del(kbId, sourceIds) {
     await saveMap(brainDir, map);
     return { deleted };
   });
+}
+
+/**
+ * POST /stat → { exists, sizeBytes, docs }
+ *
+ * What a brain COSTS and how much is in it — the read the control-plane needs to
+ * show a sidecar-backed store's Size the way an object-store-backed one shows
+ * the sum of its prefix. Object-store types sum their S3 prefix; a sidecar type
+ * has no prefix to sum, so the engine has to answer for itself.
+ *
+ * DELIBERATELY lock-free (no withBrainLock): a size probe must never queue
+ * behind a long ingest, and must never make one wait. The consequence is that a
+ * stat taken mid-ingest reports a mid-write size — correct for a "how big is
+ * this" number, and the alternative (a page load blocked behind a 5-minute
+ * corpus ingest) is far worse. Nothing is created: an absent brain is
+ * { exists:false, sizeBytes:0, docs:0 }, never an init.
+ *
+ * `docs` = LIVE documents (the slug↔sourceId map, which ingest/delete prune),
+ * not chunks and not soft-deleted pages.
+ */
+export async function stat(kbId) {
+  const brainDir = brainDirFor(kbId);
+  if (!(await pathExists(brainDir))) return { exists: false, sizeBytes: 0, docs: 0 };
+  const map = await loadMap(brainDir);
+  return { exists: true, sizeBytes: await dirSizeBytes(brainDir), docs: Object.keys(map).length };
+}
+
+/**
+ * Recursive byte size of `dir` (regular files only — a symlink is counted as
+ * its own tiny entry, never followed, so a link out of the brain dir can't make
+ * one brain report another's bytes). Best-effort per entry: a file that
+ * disappears mid-walk (a gbrain temp) contributes 0 instead of failing the probe.
+ */
+async function dirSizeBytes(dir) {
+  let total = 0;
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch { return 0; }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) {
+      // eslint-disable-next-line no-await-in-loop
+      total += await dirSizeBytes(p);
+    } else if (e.isFile()) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        total += (await fsStat(p)).size;
+      } catch { /* vanished mid-walk — count 0 */ }
+    }
+  }
+  return total;
 }
 
 /** GET /health — verify the real gbrain binary is runnable. */
