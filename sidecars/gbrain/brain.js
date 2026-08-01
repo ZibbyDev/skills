@@ -521,11 +521,19 @@ export async function query(kbId, queryText, topK) {
   return withBrainLock(brainDir, async () => {
     await ensureBrain(brainDir);
     const map = await loadMap(brainDir);
-    const out = await serveCall(brainDir, 'query', { query: queryText, limit: topK });
+    // FLOOR THE FETCH DEPTH. GBrain's `limit` is not "top-N of one ranking" —
+    // it also sets each retrieval lane's candidate depth before RRF fusion, so
+    // a small limit LOSES documents outright: the same doc that ranks #1 at
+    // limit 5 is ABSENT at limit 3 (reproduced verbatim — the BM25 lane's
+    // candidates crowd the pool and the vector lane's never make it in). Fetch
+    // at a depth where fusion behaves, then slice to what the caller asked for:
+    // same contract, recall restored.
+    const fetchK = Math.max(Number(topK) || 8, 8);
+    const out = await serveCall(brainDir, 'query', { query: queryText, limit: fetchK });
     const arr = Array.isArray(out) ? out
       : (out && Array.isArray(out.results) ? out.results
         : (out && Array.isArray(out.hits) ? out.hits : []));
-    const results = arr.map((hit) => ({
+    const results = arr.slice(0, Number(topK) || fetchK).map((hit) => ({
       sourceId: map[hit.slug] || hit.slug,
       chunk: hit.chunk_text || hit.chunk || hit.text || '',
       score: typeof hit.score === 'number' ? hit.score : 0,
