@@ -373,6 +373,10 @@ export async function jiraFetch(path, opts: any = {}) {
 
 export const jiraSkill: any = {
   id: 'jira',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'jira',
   allowedTools: ['mcp__jira__*'],
   requiresIntegration: INTEGRATIONS.JIRA, // see sentrySkill.requiresIntegration for semantics

@@ -131,6 +131,10 @@ async function parseOdResponse(res, label) {
 
 export const opendesignSkill: any = {
   id: 'open-design',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'opendesign',
   allowedTools: ['mcp__opendesign__*'],
   // OPTIONAL integration — deliberately NO `requiresIntegration`. Declaring

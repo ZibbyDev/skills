@@ -94,6 +94,10 @@ const OBJECT_TYPE_DESC = 'The CRM object type — one of the common values '
 
 export const hubspotSkill: any = {
   id: 'hubspot',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'hubspot',
   allowedTools: ['mcp__hubspot__*'],
   // HubSpot is a first-class OAuth integration. The backend connect handler

@@ -39,6 +39,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { withBackendSessionEnv } from '../backendSession';
+
 const SESSION_KEYS = ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'] as const;
 
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -75,8 +77,17 @@ function skillExports(mod: Record<string, any>): Array<[string, any]> {
 /**
  * Call resolve() with the session keys guaranteed present, restoring the
  * pre-existing env afterwards (delete what we set; never reassign process.env).
+ *
+ * Resolution goes through withBackendSessionEnv — the SAME wrapper index.ts
+ * applies at registration — so this asserts the EFFECTIVE child env the engine
+ * sees (the platform path), not the raw module export. A skill that declares
+ * `callsBackend: true` therefore satisfies the env contract by declaration
+ * (the single-source contract this suite + the marker test below enforce); a
+ * skill with hand-maintained allowlists keeps passing unchanged (the wrapper
+ * only ADDS missing keys, existing values win).
  */
 function resolveWithSessionEnv(skill: any) {
+  skill = withBackendSessionEnv(skill);
   const placeholders: Record<string, string> = {
     PROJECT_API_TOKEN: 'contract-test-placeholder', // deliberately NOT credential-shaped (public repo)
     ZIBBY_ACCOUNT_API_URL: 'https://api.example.test',
@@ -154,6 +165,24 @@ describe('backend-calling skills forward the session env to their MCP child', ()
       const resolved = resolveWithSessionEnv(mod[exportName]);
       expect(resolved?.command, `${file} ${exportName} must spawn an MCP child in this layout`).toBeTruthy();
     }));
+  });
+
+  it.each(backendCalling)('%s declares callsBackend on every skill export (the single-source marker)', async (file) => {
+    // The MARKER is the single source of truth downstream (index.ts wraps at
+    // registration; the self-host Copilot's turn-local-skills.js reflects it
+    // off the registry to route the per-turn JWT). So whatever THIS suite's
+    // source scan judges backend-calling MUST carry `callsBackend: true` — a
+    // new backend-calling skill that forgets the one-line declaration fails
+    // here, before publish. Helper modules with no skill export are exempt
+    // (their callers' skills carry the contract).
+    const mod = await import(`../${file.replace(/\.ts$/, '')}`);
+    for (const [exportName, skill] of skillExports(mod)) {
+      expect(
+        skill.callsBackend,
+        `${file} ${exportName}: backend-calling (per the source scan) but missing \`callsBackend: true\` — ` +
+        'declare it on the skill object (backendSession.ts guarantees the child env from it)',
+      ).toBe(true);
+    }
   });
 
   it('gitlab (env-token-only today) keeps the session allowlist for the planned OAuth path', async () => {

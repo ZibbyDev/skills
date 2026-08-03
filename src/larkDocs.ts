@@ -377,6 +377,10 @@ function fileTypeArg(args) {
 
 export const larkDocsSkill: any = {
   id: 'lark-docs',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'larkdocs',
   allowedTools: ['mcp__larkdocs__*'],
   requiresIntegration: INTEGRATIONS.LARK, // reuses the connected Lark app (docx scopes)

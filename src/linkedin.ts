@@ -307,6 +307,10 @@ export async function uploadImage(provider, ownerUrn, imagePath, mimeType?: any)
 
 export const linkedinSkill: any = {
   id: 'linkedin',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'linkedin',
   allowedTools: ['mcp__linkedin__*'],
   // NO requiresIntegration. The two capabilities use two DIFFERENT providers

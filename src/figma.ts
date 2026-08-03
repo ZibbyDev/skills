@@ -145,6 +145,10 @@ export function nodeSpec(n, depth) {
 
 export const figmaSkill: any = {
   id: 'figma',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'figma',
   allowedTools: ['mcp__figma__*'],
   // Figma is a paste-token (personal access token) integration. The backend

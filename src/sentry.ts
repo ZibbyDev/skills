@@ -272,6 +272,10 @@ export async function sentryAddComment(issueId, text) {
 
 export const sentrySkill: any = {
   id: 'sentry',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'sentry',                  // MCP server name; tools appear as mcp__sentry__<tool>
   allowedTools: ['mcp__sentry__*'],      // glob for the Agent SDK's tool allowlist
   // External OAuth/credentialed service this skill calls. The backend

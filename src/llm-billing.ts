@@ -66,18 +66,30 @@ import { INTEGRATIONS } from './integrations.js';
  */
 export const openaiBillingSkill = Object.freeze({
   id: 'openai_billing',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   requiresIntegration: INTEGRATIONS.OPENAI_BILLING,
   description: 'OpenAI organization billing/usage admin API (paste sk-admin-... key)',
 });
 
 export const anthropicBillingSkill = Object.freeze({
   id: 'anthropic_billing',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   requiresIntegration: INTEGRATIONS.ANTHROPIC_BILLING,
   description: 'Anthropic organization cost/usage admin API (paste sk-ant-admin-... key)',
 });
 
 export const cursorAdminSkill = Object.freeze({
   id: 'cursor_admin',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   requiresIntegration: INTEGRATIONS.CURSOR_ADMIN,
   description: 'Cursor Team/Enterprise admin API (paste admin key)',
 });

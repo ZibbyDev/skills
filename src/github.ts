@@ -50,6 +50,10 @@ export async function ghFetch(path, opts: any = {}) {
 
 export const githubSkill: any = {
   id: 'github',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'github',
   allowedTools: ['mcp__github__*'],
   requiresIntegration: INTEGRATIONS.GITHUB, // see sentrySkill.requiresIntegration for semantics

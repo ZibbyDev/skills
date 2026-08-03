@@ -483,6 +483,10 @@ const contentArg = (args) => {
 
 export const googleDocsSkill: any = {
   id: 'google-docs',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'gdocs',
   allowedTools: ['mcp__gdocs__*'],
   requiresIntegration: INTEGRATIONS.GOOGLE, // see jiraSkill.requiresIntegration for semantics

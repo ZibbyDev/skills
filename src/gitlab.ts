@@ -160,6 +160,10 @@ function encodeProject(projectId) {
 
 export const gitlabSkill: any = {
   id: 'gitlab',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'gitlab',
   // No MCP server — tools are served directly via handleToolCall, same as
   // the sentry / linear skills. allowedTools still namespaces them.

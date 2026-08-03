@@ -484,6 +484,10 @@ async function uploadImageFile(imagePath) {
 
 export const notionSkill: any = {
   id: 'notion',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'notion',
   allowedTools: ['mcp__notion__*'],
   requiresIntegration: INTEGRATIONS.NOTION, // see jiraSkill.requiresIntegration for semantics

@@ -1,6 +1,6 @@
 {
   "name": "@zibby/skills",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Built-in skill definitions for the Zibby agent-workflow framework",
   "type": "module",
   "main": "dist/index.js",
@@ -139,11 +139,11 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^20.14.0",
     "esbuild": "^0.28.0",
     "eslint": "^10.0.2",
     "globals": "^17.4.0",
     "typescript": "^5.9.3",
-    "@types/node": "^20.14.0",
     "vitest": "^4.1.4"
   }
 }

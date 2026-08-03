@@ -85,6 +85,10 @@ const TRIGGER_TOOL: any = {
 
 export const triggerAgentSkill: any = {
   id: 'trigger-agent',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'trigger',
   allowedTools: ['mcp__trigger__*'],
   envKeys: [],

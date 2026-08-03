@@ -7,6 +7,7 @@
  */
 
 import { registerSkill } from '@zibby/agent-workflow';
+import { withBackendSessionEnv } from './backendSession.js';
 import { browserSkill } from './browser.js';
 import { jiraSkill } from './jira.js';
 import { githubSkill } from './github.js';
@@ -50,49 +51,56 @@ import {
   cursorAdminSkill,
 } from './llm-billing.js';
 
-registerSkill(browserSkill);
-registerSkill(jiraSkill);
-registerSkill(githubSkill);
-registerSkill(gitlabSkill);
-registerSkill(figmaSkill);
-registerSkill(hubspotSkill);
-registerSkill(linearSkill);
-registerSkill(planeSkill);
-registerSkill(opendesignSkill);
-registerSkill(slackSkill);
-registerSkill(larkSkill);
-registerSkill(discordSkill);
-registerSkill(notionSkill);
-registerSkill(linkedinSkill);
-registerSkill(googleDocsSkill);
-registerSkill(larkDocsSkill);
-registerSkill(chatNotifySkill);
-registerSkill(sentrySkill);
-registerSkill(memorySkill);
-registerSkill(testRunnerSkill);
-registerSkill(gitSkill);
-registerSkill(gitWriteSkill);
-registerSkill(skillInstallerSkill);
-registerSkill(coreToolsSkill);
-registerSkill(chatMemorySkill);
-registerSkill(kvMemorySkill);
-registerSkill(datasetStoreSkill);
-registerSkill(artifactSkill);
-registerSkill(chartRenderSkill);
-registerSkill(codeStatsSkill);
-registerSkill(chatProgressSkill);
-registerSkill(socialCardSkill);
-registerSkill(codeScanSkill);
-registerSkill(triggerAgentSkill);
-registerSkill(codebaseMemorySkill);
-registerSkill(gbrainSkill);
-registerSkill(workflowBuilderSkill);
-registerSkill(openaiBillingSkill);
-registerSkill(anthropicBillingSkill);
-registerSkill(cursorAdminSkill);
+// Registration choke point: a skill that declares `callsBackend: true` gets
+// the backend-session env contract enforced here (child env always carries
+// PROJECT_API_TOKEN + ZIBBY_ACCOUNT_API_URL + ZIBBY_ENV) — authors declare
+// ONCE on the skill object instead of hand-maintaining envKeys + resolve()
+// allowlists in lockstep. See src/backendSession.ts.
+const reg = (skill: any) => registerSkill(withBackendSessionEnv(skill));
+
+reg(browserSkill);
+reg(jiraSkill);
+reg(githubSkill);
+reg(gitlabSkill);
+reg(figmaSkill);
+reg(hubspotSkill);
+reg(linearSkill);
+reg(planeSkill);
+reg(opendesignSkill);
+reg(slackSkill);
+reg(larkSkill);
+reg(discordSkill);
+reg(notionSkill);
+reg(linkedinSkill);
+reg(googleDocsSkill);
+reg(larkDocsSkill);
+reg(chatNotifySkill);
+reg(sentrySkill);
+reg(memorySkill);
+reg(testRunnerSkill);
+reg(gitSkill);
+reg(gitWriteSkill);
+reg(skillInstallerSkill);
+reg(coreToolsSkill);
+reg(chatMemorySkill);
+reg(kvMemorySkill);
+reg(datasetStoreSkill);
+reg(artifactSkill);
+reg(chartRenderSkill);
+reg(codeStatsSkill);
+reg(chatProgressSkill);
+reg(socialCardSkill);
+reg(codeScanSkill);
+reg(triggerAgentSkill);
+reg(codebaseMemorySkill);
+reg(gbrainSkill);
+reg(workflowBuilderSkill);
+reg(openaiBillingSkill);
+reg(anthropicBillingSkill);
+reg(cursorAdminSkill);
 
 // Backward-compat alias: MCP_SERVER_REGISTRY used 'slack_notify' as the key
-registerSkill({ ...slackSkill, id: 'slack_notify' });
+reg({ ...slackSkill, id: 'slack_notify' });
 
 // The single authoritative skill-id map now lives in the zero-dep leaf
 // @zibby/skill-ids (see strategy/skills-platform-architecture.md). Re-exported

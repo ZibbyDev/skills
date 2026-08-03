@@ -200,6 +200,10 @@ function pickContent(args) {
 
 export const artifactSkill: any = {
   id: 'artifact',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   // ONE source for toggle metadata — by reference, never a copy (skills-platform rule).
   meta: SKILL_META['artifact'],
   serverName: 'artifact',

@@ -165,6 +165,10 @@ async function storeFetch(storeId, action, payload) {
 
 export const gbrainSkill: any = {
   id: 'gbrain',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'gbrain',
   allowedTools: ['mcp__gbrain__*'],
   // Static toggle metadata by REFERENCE to the single source of truth

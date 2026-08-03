@@ -140,6 +140,10 @@ async function resolveGuildId({ token, guildId: connectedGuildId }: any, argGuil
 
 export const discordSkill: any = {
   id: 'discord',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'discord',
   allowedTools: ['mcp__discord__*'],
   requiresIntegration: INTEGRATIONS.DISCORD, // see sentrySkill.requiresIntegration for semantics

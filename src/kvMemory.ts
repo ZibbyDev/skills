@@ -134,6 +134,10 @@ async function kvMemoryFetch(op, payload) {
 
 export const kvMemorySkill: any = {
   id: 'kv-memory',
+  // Backend-calling: the MCP child talks to Zibby's own backend — the
+  // session-env contract is guaranteed by backendSession.ts at registration
+  // (declare ONCE here; see backend-session-env-contract.test.ts).
+  callsBackend: true,
   serverName: 'kv_memory',
   allowedTools: ['mcp__kv_memory__*'],
   description: 'KV memory — a private, per-agent persistent key→value store across stateless runs (auto-namespaced)',
