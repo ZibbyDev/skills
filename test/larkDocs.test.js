@@ -19,6 +19,7 @@ const {
   parseLarkDocRef,
   markdownToLarkBlocks,
   docWebUrl,
+  wikiWebUrl,
   _resetLarkDocsTokenCache,
 } = await import('../src/larkDocs.js');
 
@@ -49,12 +50,12 @@ describe('larkDocsSkill structure', () => {
     expect(larkDocsSkill.requiresIntegration).toBe('lark');
   });
 
-  it('exposes the docx + comment + image tools', () => {
+  it('exposes the docx + comment + image + wiki tools', () => {
     const names = larkDocsSkill.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       'larkdoc_add_comment', 'larkdoc_append', 'larkdoc_create',
       'larkdoc_get', 'larkdoc_insert_image', 'larkdoc_list_comments',
-      'larkdoc_reply_comment',
+      'larkdoc_reply_comment', 'larkwiki_list_spaces',
     ]);
   });
 
@@ -109,6 +110,15 @@ describe('docWebUrl — region host respected', () => {
   });
   it('builds a larksuite URL otherwise', () => {
     expect(docWebUrl('https://open.larksuite.com', 'Doc1')).toBe('https://www.larksuite.com/docx/Doc1');
+  });
+});
+
+describe('wikiWebUrl — region host respected', () => {
+  it('builds a feishu wiki URL from a feishu host', () => {
+    expect(wikiWebUrl('https://open.feishu.cn', 'Wik1')).toBe('https://feishu.cn/wiki/Wik1');
+  });
+  it('builds a larksuite wiki URL otherwise', () => {
+    expect(wikiWebUrl('https://open.larksuite.com', 'Wik1')).toBe('https://www.larksuite.com/wiki/Wik1');
   });
 });
 
@@ -197,6 +207,139 @@ describe('larkdoc_create', () => {
     const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_create', { markdown: 'x' }));
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/title is required/);
+  });
+
+  it('does NOT touch any wiki endpoint when wikiSpaceId is absent (byte-identical old path)', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ document: { document_id: 'DocPlain', title: 'Plain' } }))
+      .mockResolvedValueOnce(dataReply({ children: [] }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_create', {
+      title: 'Plain', markdown: 'body',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.documentId).toBe('DocPlain');
+    expect(res.url).toBe('https://www.larksuite.com/docx/DocPlain');
+    expect(res.wikiNodeToken).toBeUndefined();
+    expect(res.wikiSpaceId).toBeUndefined();
+    const urls = globalThis.fetch.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes('/wiki/'))).toBe(false);
+  });
+});
+
+// ───────────────────────── larkdoc_create → wiki space ─────────────────────────
+
+describe('larkdoc_create with wikiSpaceId', () => {
+  it('creates a wiki node (obj_type docx) then writes the content into its docx', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ node: { node_token: 'WikNodeTok1', obj_token: 'DocWiki1', obj_type: 'docx' } })) // wiki node create
+      .mockResolvedValueOnce(dataReply({ children: [] })); // append blocks
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_create', {
+      title: 'Team Spec',
+      markdown: '# Heading\nbody',
+      wikiSpaceId: 'space123',
+      parentNodeToken: 'ParentNode9',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.documentId).toBe('DocWiki1');
+    expect(res.wikiSpaceId).toBe('space123');
+    expect(res.wikiNodeToken).toBe('WikNodeTok1');
+    expect(res.url).toBe('https://www.larksuite.com/wiki/WikNodeTok1');
+
+    const calls = globalThis.fetch.mock.calls;
+    // 1. wiki node create in the given space with the parent + docx obj_type.
+    expect(calls[1][0]).toContain('/open-apis/wiki/v2/spaces/space123/nodes');
+    expect(calls[1][1].method).toBe('POST');
+    const nodeBody = JSON.parse(calls[1][1].body);
+    expect(nodeBody).toEqual({
+      obj_type: 'docx', node_type: 'origin', title: 'Team Spec', parent_node_token: 'ParentNode9',
+    });
+    // 2. content written into the BACKING docx (obj_token), standard blocks path.
+    expect(calls[2][0]).toContain('/documents/DocWiki1/blocks/DocWiki1/children');
+    const blocksBody = JSON.parse(calls[2][1].body);
+    expect(blocksBody.children[0].block_type).toBe(3); // heading1
+    // The standalone docx create endpoint was never hit.
+    expect(calls.every(([u]) => !String(u).match(/\/docx\/v1\/documents$/))).toBe(true);
+  });
+
+  it('omits parent_node_token when not provided and skips the content write when empty', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ node: { node_token: 'WikNodeTok2', obj_token: 'DocWiki2', obj_type: 'docx' } }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_create', {
+      title: 'Empty Page', wikiSpaceId: 'space123',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.documentId).toBe('DocWiki2');
+    const nodeBody = JSON.parse(globalThis.fetch.mock.calls[1][1].body);
+    expect(nodeBody).toEqual({ obj_type: 'docx', node_type: 'origin', title: 'Empty Page' });
+    // No blocks append fired (token mint + node create only).
+    expect(globalThis.fetch.mock.calls).toHaveLength(2);
+  });
+
+  it('fail-softs with Lark\'s own error text on a wiki permission failure', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(errReply('permission denied: wiki:node:create'));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_create', {
+      title: 'Spec', wikiSpaceId: 'space123',
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/permission denied: wiki:node:create/);
+  });
+
+  it('fail-softs when the wiki node create returns no obj_token', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ node: { node_token: 'WikOnly' } }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_create', {
+      title: 'Spec', wikiSpaceId: 'space123',
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/no obj_token/);
+  });
+});
+
+// ───────────────────────── larkwiki_list_spaces ─────────────────────────
+
+describe('larkwiki_list_spaces', () => {
+  it('pages through all wiki spaces (has_more + page_token)', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({
+        items: [{ space_id: '111', name: 'Eng Wiki' }, { space_id: '222', name: 'Ops Wiki' }],
+        has_more: true,
+        page_token: 'pageTok2',
+      }))
+      .mockResolvedValueOnce(dataReply({
+        items: [{ space_id: '333', name: 'Product Wiki' }],
+        has_more: false,
+      }));
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkwiki_list_spaces', {}));
+    expect(res.ok).toBe(true);
+    expect(res.count).toBe(3);
+    expect(res.spaces).toEqual([
+      { spaceId: '111', name: 'Eng Wiki' },
+      { spaceId: '222', name: 'Ops Wiki' },
+      { spaceId: '333', name: 'Product Wiki' },
+    ]);
+    const calls = globalThis.fetch.mock.calls;
+    expect(calls[1][0]).toContain('/open-apis/wiki/v2/spaces?page_size=50');
+    expect(calls[1][0]).not.toContain('page_token');
+    // Second page carries the returned page_token.
+    expect(calls[2][0]).toContain('page_token=pageTok2');
+  });
+
+  it('fail-softs with Lark\'s error text (missing wiki scope reaches the model)', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(errReply('permission denied: wiki:space:read'));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkwiki_list_spaces', {}));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/permission denied: wiki:space:read/);
   });
 });
 

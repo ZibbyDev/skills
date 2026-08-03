@@ -27,6 +27,11 @@
  *   POST /open-apis/docx/v1/documents/{id}/blocks/{block}/children
  *        (block == document_id == the doc root) → append blocks at the end
  *   GET  /open-apis/wiki/v2/spaces/get_node?token={t}          → { node:{obj_token,obj_type} }
+ *
+ * Wiki v2 API (write support — requires wiki:node:create / wiki:space:read):
+ *   GET  /open-apis/wiki/v2/spaces?page_size=50[&page_token]   → { items:[{space_id,name}], has_more, page_token }
+ *   POST /open-apis/wiki/v2/spaces/{space_id}/nodes            → { node:{node_token,obj_token,obj_type} }
+ *        (obj_type='docx', node_type='origin', optional parent_node_token)
  */
 
 import { existsSync, statSync, readFileSync } from 'fs';
@@ -51,6 +56,10 @@ function resolveSkillBin() {
 const MAX_TEXT_CHARS = 20000;
 // Lark's blocks/children create endpoint accepts at most 50 children/request.
 const MAX_BLOCK_CHILDREN = 50;
+// Wiki space listing: 50/page (Lark's max) — cap pages so a pathological
+// tenant can't loop forever. 20 pages = up to 1000 spaces, plenty.
+const WIKI_SPACES_PAGE_SIZE = 50;
+const MAX_WIKI_SPACE_PAGES = 20;
 // Cap on uploaded image size. Lark's drive upload_all hard cap is 20MB
 // (validation max 20971520 bytes); we stay at 10MB so a report chart can
 // never bump the platform limit.
@@ -115,6 +124,17 @@ export function docWebUrl(host, id) {
   const h = String(host || '');
   if (h.includes('feishu')) return `https://feishu.cn/docx/${id}`;
   return `https://www.larksuite.com/docx/${id}`;
+}
+
+/**
+ * Derive the human-facing wiki node web URL (same region logic as docWebUrl).
+ * A wiki-resident doc is best shared by its /wiki/<node_token> link — opening
+ * it shows the doc in its wiki-space context.
+ */
+export function wikiWebUrl(host, nodeToken) {
+  const h = String(host || '');
+  if (h.includes('feishu')) return `https://feishu.cn/wiki/${nodeToken}`;
+  return `https://www.larksuite.com/wiki/${nodeToken}`;
 }
 
 /**
@@ -366,7 +386,8 @@ export const larkDocsSkill: any = {
   promptFragment: `## Lark Docs
 You can read, create, and append Lark/Feishu documents (docx). This reuses the same connected Lark app as messaging.
 - larkdoc_get: pass a Lark doc id OR a full doc URL (a /docx/ or /wiki/ link); returns { ok, documentId, title, url, text } where text is the doc as plain text (truncated to ~20k chars). Use it as reference context.
-- larkdoc_create: create a new doc from a title + markdown/text (#/##/### headings, - bullets, 1. ordered supported); returns { ok, documentId, url }. Share the url.
+- larkdoc_create: create a new doc from a title + markdown/text (#/##/### headings, - bullets, 1. ordered supported); returns { ok, documentId, url }. Share the url. To create the doc INSIDE a wiki space, first call larkwiki_list_spaces to find the space id, then pass wikiSpaceId (+ optional parentNodeToken to nest under a wiki node) — the doc is created as a wiki node and the returned url is the wiki link.
+- larkwiki_list_spaces: list the wiki spaces the connected Lark app can see; returns { ok, spaces:[{ spaceId, name }] }. Use it to discover the wikiSpaceId before larkdoc_create.
 - larkdoc_append: append markdown/text to the end of an existing doc (pass the documentId or doc URL).
 - larkdoc_insert_image: append a LOCAL image file (png/jpg, ≤10MB) to the end of a doc — pass { documentId, imagePath, width?, height? } (width/height in px, optional). Returns { ok, documentId, blockId, url }. Use this to deliver a rendered chart/report image into the doc.
 - larkdoc_list_comments: list the comment threads on a doc (pass the documentId or doc URL); returns { ok, comments:[{ commentId, replies:[{ replyId, author, text }] }] }. Use to read the thread you are replying to.
@@ -440,6 +461,50 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
             ? args.title.trim()
             : null;
           if (!title) return JSON.stringify({ ok: false, error: 'title is required' });
+
+          // Wiki path: create the docx AS a wiki node (space / optional parent),
+          // then write the content into its backing docx exactly like the
+          // standalone path. Absent wikiSpaceId → the standalone path below,
+          // byte-identical to the previous behavior.
+          const wikiSpaceId = typeof args?.wikiSpaceId === 'string' && args.wikiSpaceId.trim()
+            ? args.wikiSpaceId.trim()
+            : null;
+          if (wikiSpaceId) {
+            const parentNodeToken = typeof args?.parentNodeToken === 'string' && args.parentNodeToken.trim()
+              ? args.parentNodeToken.trim()
+              : null;
+            const { data, host } = await larkDocsApi(
+              'POST',
+              `/open-apis/wiki/v2/spaces/${encodeURIComponent(wikiSpaceId)}/nodes`,
+              {
+                obj_type: 'docx',
+                node_type: 'origin',
+                title,
+                ...(parentNodeToken ? { parent_node_token: parentNodeToken } : {}),
+              },
+            );
+            const node = data?.node || {};
+            const documentId = node.obj_token;
+            if (!documentId) {
+              return JSON.stringify({ ok: false, error: 'Lark wiki node create returned no obj_token' });
+            }
+
+            const content = contentArg(args);
+            if (content && content.trim()) {
+              const blocks = markdownToLarkBlocks(content);
+              if (blocks.length) await appendBlocks(documentId, blocks);
+            }
+            return JSON.stringify({
+              ok: true,
+              documentId,
+              title,
+              wikiSpaceId,
+              wikiNodeToken: node.node_token || '',
+              // Share the wiki-node URL (opens the doc in its wiki context);
+              // fall back to the raw docx URL if Lark returned no node_token.
+              url: node.node_token ? wikiWebUrl(host, node.node_token) : docWebUrl(host, documentId),
+            });
+          }
 
           const { data, host } = await larkDocsApi('POST', '/open-apis/docx/v1/documents', {
             title,
@@ -520,6 +585,23 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           });
         }
 
+        case 'larkwiki_list_spaces': {
+          const spaces = [];
+          let pageToken = null;
+          for (let page = 0; page < MAX_WIKI_SPACE_PAGES; page++) {
+            const qs = new URLSearchParams({ page_size: String(WIKI_SPACES_PAGE_SIZE) });
+            if (pageToken) qs.set('page_token', pageToken);
+            const { data } = await larkDocsApi('GET', `/open-apis/wiki/v2/spaces?${qs.toString()}`);
+            const items = Array.isArray(data?.items) ? data.items : [];
+            for (const s of items) {
+              spaces.push({ spaceId: String(s?.space_id || ''), name: String(s?.name || '') });
+            }
+            if (!data?.has_more || !data?.page_token) break;
+            pageToken = data.page_token;
+          }
+          return JSON.stringify({ ok: true, count: spaces.length, spaces });
+        }
+
         case 'larkdoc_list_comments': {
           const ref = args?.documentId || args?.url || args?.id || args?.fileToken;
           const parsed = parseLarkDocRef(ref);
@@ -596,16 +678,26 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
     },
     {
       name: 'larkdoc_create',
-      description: 'Create a new Lark/Feishu document (docx) with a title and optional content (markdown: #/##/### headings, - bullets, 1. ordered; or plain text). Returns { ok, documentId, url } — share the url with the user.',
+      description: 'Create a new Lark/Feishu document (docx) with a title and optional content (markdown: #/##/### headings, - bullets, 1. ordered; or plain text). Pass wikiSpaceId (from larkwiki_list_spaces) to create the doc INSIDE a wiki space instead of as a standalone doc — optionally nested under parentNodeToken. Returns { ok, documentId, url } (plus wikiNodeToken when created in a wiki) — share the url with the user.',
       input_schema: {
         type: 'object',
         properties: {
           title: { type: 'string', description: 'Document title.' },
           markdown: { type: 'string', description: 'Document body as markdown (preferred).' },
           text: { type: 'string', description: 'Document body as plain text (used when markdown is absent).' },
-          folderToken: { type: 'string', description: 'Optional Lark drive folder token to create the doc in. Absent = the app root.' },
+          folderToken: { type: 'string', description: 'Optional Lark drive folder token to create the doc in. Absent = the app root. Ignored when wikiSpaceId is set.' },
+          wikiSpaceId: { type: 'string', description: 'Optional wiki space id (from larkwiki_list_spaces) — create the doc as a node inside this wiki space.' },
+          parentNodeToken: { type: 'string', description: 'Optional wiki node token to nest the new doc under (only with wikiSpaceId). Absent = the space root.' },
         },
         required: ['title'],
+      },
+    },
+    {
+      name: 'larkwiki_list_spaces',
+      description: 'List the Lark/Feishu wiki spaces visible to the connected app. Returns { ok, count, spaces:[{ spaceId, name }] }. Use to discover the wikiSpaceId for larkdoc_create.',
+      input_schema: {
+        type: 'object',
+        properties: {},
       },
     },
     {
