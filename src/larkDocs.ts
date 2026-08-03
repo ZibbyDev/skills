@@ -381,7 +381,15 @@ export const larkDocsSkill: any = {
   allowedTools: ['mcp__larkdocs__*'],
   requiresIntegration: INTEGRATIONS.LARK, // reuses the connected Lark app (docx scopes)
   description: 'Lark / Feishu Docs — read, create, append, and insert images into Lark documents (docx).',
-  envKeys: [],
+  // resolveIntegrationToken('lark') calls OUR OWN backend for the app creds
+  // (Lark mints a tenant token from app_id+secret — no single-bearer self-host
+  // fast path exists). envKeys IS the spawned MCP child's ENTIRE environment,
+  // so the session credential that call authenticates with MUST be listed or
+  // the child dies with the misleading CLI-era "No session token. Run `zibby
+  // login` first." (3rd occurrence of this trap — github/gitlab hit it the
+  // same way; same allowlist artifactSkill uses). Deliberately an ALLOWLIST:
+  // no ANTHROPIC_API_KEY / AWS creds reach the child.
+  envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
 
   promptFragment: `## Lark Docs
 You can read, create, and append Lark/Feishu documents (docx). This reuses the same connected Lark app as messaging.
