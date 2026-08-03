@@ -487,6 +487,13 @@ export const notionSkill: any = {
   serverName: 'notion',
   allowedTools: ['mcp__notion__*'],
   requiresIntegration: INTEGRATIONS.NOTION, // see jiraSkill.requiresIntegration for semantics
+  // notionApi resolves its token via resolveIntegrationToken('notion'), which
+  // authenticates to Zibby's backend with the session credential — and the
+  // spawned MCP child's env is ONLY what resolve() returns (no inheritance),
+  // so this allowlist MUST be forwarded or every mcp__notion__* call dies in
+  // the child with a misleading session error (the github/gitlab/lark trap —
+  // see backend-session-env-contract.test.ts).
+  envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
   description: 'Notion — read pages/databases as context + create pages, append blocks, and insert images',
 
   promptFragment: `## Notion
@@ -509,19 +516,25 @@ Do not block the task if Notion is unavailable — these tools return { ok:false
    * called by deterministic node code via handleToolCall — there was no agent
    * tool surface. Now the review agent gathers context itself, so it needs the
    * tools. The bin imports ../dist/notion.js (resolved relative to bin/, like
-   * mcp-sentry.mjs) and dispatches through handleToolCall; auth flows through
-   * the INHERITED env (PROJECT_API_TOKEN → resolveIntegrationToken('notion')),
-   * so no provider-specific env keys are needed here. When unconnected,
-   * handleToolCall returns { ok:false, error } — the agent tolerates it.
+   * mcp-sentry.mjs) and dispatches through handleToolCall. The child does NOT
+   * inherit the run env — the env returned here is its ENTIRE environment, so
+   * the backend-session allowlist (envKeys) MUST be forwarded or
+   * resolveIntegrationToken('notion') dies inside the child with a misleading
+   * session error. When unconnected, handleToolCall returns
+   * { ok:false, error } — the agent tolerates it.
    */
   resolve() {
     const bin = resolveSkillBin();
     if (!bin) return null;
+    const env: any = {};
+    for (const key of this.envKeys) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
     return {
       type: 'stdio',
       command: 'node',
       args: [bin, '../dist/notion.js', 'notionSkill'],
-      env: {},
+      env,
       description: this.description,
       // Force tools into the system prompt instead of deferring behind the
       // SDK's ToolSearch (see github.js / sentry.js resolve()).

@@ -55,8 +55,12 @@ describe('hubspot tool surface', () => {
     }
   });
 
-  it('declares no env keys and requires the hubspot integration', () => {
-    expect(hubspotSkill.envKeys).toEqual([]);
+  it('declares the backend-session env keys and requires the hubspot integration', () => {
+    // hubspotFetch calls resolveIntegrationToken() from INSIDE the MCP child,
+    // whose env is only what resolve() copies from envKeys — so the session
+    // allowlist must be declared (see backend-session-env-contract.test.ts).
+    // No provider token key: the OAuth token itself always comes via the backend.
+    expect(hubspotSkill.envKeys).toEqual(['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV']);
     expect(hubspotSkill.requiresIntegration).toBe(INTEGRATIONS.HUBSPOT);
   });
 });

@@ -501,20 +501,22 @@ These tools return { ok:false, error } on failure — treat an unavailable Googl
   /**
    * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
    * module's googleDocsSkill export, so the AGENT gets real mcp__gdocs__*
-   * tools. Auth flows through the INHERITED env (PROJECT_API_TOKEN →
-   * resolveIntegrationToken('google')), so no provider-specific env keys are
-   * needed here. When unconnected, handleToolCall returns { ok:false, error }
-   * — the agent tolerates it.
+   * tools. The child does NOT inherit the run env — the env returned here is
+   * its ENTIRE environment — so BOTH the backend-session allowlist (what
+   * resolveIntegrationToken('google') needs to call Zibby's backend from
+   * inside the child; the github/gitlab/lark trap, see
+   * backend-session-env-contract.test.ts) AND the Copilot per-turn
+   * injection/gate vars are forwarded explicitly. When unconnected,
+   * handleToolCall returns { ok:false, error } — the agent tolerates it.
    */
   resolve() {
     const bin = resolveSkillBin();
     if (!bin) return null;
-    // Forward the Copilot per-turn injection/gate env EXPLICITLY to the MCP
-    // child (belt-and-braces: stdio children inherit process.env today, but an
-    // env-filtering spawner must never silently drop the SAFETY GATE flag —
-    // that would fail open to the owner's token).
+    // The gate vars keep their fail-CLOSED semantics: an env-filtering spawner
+    // must never silently drop the SAFETY GATE flag — that would fail open to
+    // the owner's token.
     const env: any = {};
-    for (const k of ['ZIBBY_INJECTED_GOOGLE_TOKEN', 'ZIBBY_INJECTED_GOOGLE_EMAIL', 'ZIBBY_SENDER_IS_NON_OWNER', 'ZIBBY_CHAT_STRICT_PERSONAL']) {
+    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_INJECTED_GOOGLE_TOKEN', 'ZIBBY_INJECTED_GOOGLE_EMAIL', 'ZIBBY_SENDER_IS_NON_OWNER', 'ZIBBY_CHAT_STRICT_PERSONAL']) {
       if (process.env[k]) env[k] = process.env[k];
     }
     return {

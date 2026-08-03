@@ -103,9 +103,14 @@ export const hubspotSkill: any = {
   // connected HubSpot integration (mirrored in
   // backend/src/services/skill-integrations.js → INTEGRATIONS.HUBSPOT).
   requiresIntegration: INTEGRATIONS.HUBSPOT,
-  // Token is resolved per-call via the backend (not injected as env), so there
-  // are no env keys to forward to the MCP child.
-  envKeys: [],
+  // The OAuth access token is resolved per-call via the backend — and THAT
+  // call is why these keys exist: resolveIntegrationToken() authenticates to
+  // Zibby's backend with the session credential, and envKeys IS the spawned
+  // MCP child's ENTIRE environment (resolve() copies only these keys), so
+  // without them every mcp__hubspot__* call dies in the child with a
+  // misleading session error (the github/gitlab/lark trap — see
+  // backend-session-env-contract.test.ts).
+  envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
   description: 'HubSpot CRM — search/read/create/update contacts, companies, deals, tickets, notes and feedback submissions via the HubSpot REST API.',
 
   promptFragment: `## HubSpot CRM
@@ -139,7 +144,8 @@ HubSpot's object model is **uniform** — nearly every tool takes an \`objectTyp
     // model gets real mcp__hubspot__* tools. The module arg is resolved
     // RELATIVE TO bin/ at runtime → node_modules/@zibby/skills/dist/hubspot.js
     // in a published install (mirrors figma.js importing ../dist/<mod>.js).
-    // No env to forward: hubspotFetch resolves the token via the backend.
+    // envKeys carries the backend-session allowlist hubspotFetch's
+    // resolveIntegrationToken() call needs INSIDE the child (see envKeys).
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env: any = {};

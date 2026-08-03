@@ -1,8 +1,8 @@
-import { test } from 'node:test';
+import { test } from 'vitest'; // was node:test — broken since the TS migration (../src/*.js no longer exists); vitest transforms the .ts import
 import assert from 'node:assert/strict';
 import {
   sizeBucket, fileExtension, extKind, commitFacts, globToRegExp, globHit, percentileRank, codeStatsSkill,
-} from '../src/codeStats.js';
+} from '../src/codeStats';
 
 test('sizeBucket — fixed deterministic thresholds', () => {
   assert.equal(sizeBucket(2, 1), 'trivial');   // 3

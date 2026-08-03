@@ -406,18 +406,26 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
   /**
    * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
    * module's larkDocsSkill export, so the AGENT gets real mcp__larkdocs__*
-   * tools. Auth flows through the INHERITED env (PROJECT_API_TOKEN →
-   * resolveIntegrationToken('lark')), so no provider-specific env keys are
-   * needed here. When unconnected, handleToolCall returns { ok:false, error }.
+   * tools. The child does NOT inherit the run env — the env returned here is
+   * its ENTIRE environment, so the backend-session allowlist (envKeys) MUST be
+   * forwarded or resolveIntegrationToken('lark') dies inside the child with a
+   * misleading session error. (The 0.2.7 fix declared envKeys but this
+   * resolve() still returned env:{} — the drift the
+   * backend-session-env-contract test now pins.) When unconnected,
+   * handleToolCall returns { ok:false, error }.
    */
   resolve() {
     const bin = resolveSkillBin();
     if (!bin) return null;
+    const env: any = {};
+    for (const key of this.envKeys) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
     return {
       type: 'stdio',
       command: 'node',
       args: [bin, '../dist/larkDocs.js', 'larkDocsSkill'],
-      env: {},
+      env,
       description: this.description,
       // Force tools into the system prompt instead of deferring behind the
       // SDK's ToolSearch (see notion.js / googleDocs.js resolve()).

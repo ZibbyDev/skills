@@ -347,15 +347,18 @@ Notes:
     // as an MCP tool and dispatches each call through handleToolCall — so the
     // model gets real mcp__linkedin__* tools. The module arg is resolved
     // RELATIVE TO bin/ at runtime → node_modules/@zibby/skills/dist/linkedin.js
-    // in a published install (mirrors notion.js / figma.js). Token auth flows
-    // via the backend (PAT) — but the Copilot per-turn injection + fail-CLOSED
-    // gate vars are forwarded EXPLICITLY (belt-and-braces: stdio children
-    // inherit process.env today, but an env-filtering spawner must never
-    // silently drop the safety gate — that would fail open to the owner).
+    // in a published install (mirrors notion.js / figma.js). The child does
+    // NOT inherit the run env — this env is its ENTIRE environment — so BOTH
+    // the backend-session allowlist (what resolveIntegrationToken('linkedin_*')
+    // needs to call Zibby's backend from inside the child; the
+    // github/gitlab/lark trap, see backend-session-env-contract.test.ts) AND
+    // the Copilot per-turn injection + fail-CLOSED gate vars are forwarded
+    // EXPLICITLY (an env-filtering spawner must never silently drop the safety
+    // gate — that would fail open to the owner).
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env: any = {};
-    for (const k of ['ZIBBY_INJECTED_LINKEDIN_TOKEN', 'ZIBBY_INJECTED_LINKEDIN_MEMBER_ID', 'ZIBBY_SENDER_IS_NON_OWNER', 'ZIBBY_CHAT_STRICT_PERSONAL']) {
+    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_INJECTED_LINKEDIN_TOKEN', 'ZIBBY_INJECTED_LINKEDIN_MEMBER_ID', 'ZIBBY_SENDER_IS_NON_OWNER', 'ZIBBY_CHAT_STRICT_PERSONAL']) {
       if (process.env[k]) env[k] = process.env[k];
     }
     return {

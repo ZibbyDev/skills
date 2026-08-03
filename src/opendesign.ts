@@ -137,7 +137,13 @@ export const opendesignSkill: any = {
   // SKILLS.OPEN_DESIGN on a node must NOT gate deploy on a connected
   // integration; the tools resolve the credential lazily and error at call
   // time if it is missing. (Do not add OPEN_DESIGN to any required map.)
-  envKeys: [],
+  // odFetch resolves the credential via resolveIntegrationToken(), which
+  // authenticates to Zibby's backend with the session credential — and envKeys
+  // IS the spawned MCP child's ENTIRE environment (resolve() copies only these
+  // keys), so without them every mcp__opendesign__* call dies in the child
+  // with a misleading session error (the github/gitlab/lark trap — see
+  // backend-session-env-contract.test.ts).
+  envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
   description: 'OpenDesign — list projects/designs, run the design agent, and export decks to PDF/HTML',
 
   promptFragment: `## OpenDesign (optional)
@@ -170,8 +176,9 @@ You may have access to the user's OpenDesign workspace (the Zibby-managed design
     // tools[] as an MCP tool and dispatches each call through handleToolCall —
     // so the model gets real mcp__opendesign__* tools. The module arg is
     // resolved RELATIVE TO bin/ at runtime → node_modules/@zibby/skills/dist/
-    // opendesign.js in a published install (mirrors figma.js / linear.js). No
-    // env to forward: odFetch resolves the credential via the backend.
+    // opendesign.js in a published install (mirrors figma.js / linear.js).
+    // envKeys carries the backend-session allowlist odFetch's
+    // resolveIntegrationToken() call needs INSIDE the child (see envKeys).
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env: any = {};

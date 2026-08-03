@@ -154,9 +154,13 @@ export const figmaSkill: any = {
   // connected Figma integration (mirrored in
   // backend/src/services/skill-integrations.js → INTEGRATIONS.FIGMA).
   requiresIntegration: INTEGRATIONS.FIGMA,
-  // Token is resolved per-call via the backend (not injected as env), so
-  // there are no env keys to forward to the MCP child.
-  envKeys: [],
+  // The Figma PAT is resolved per-call via the backend — and THAT call is the
+  // reason these keys exist: resolveIntegrationToken() authenticates to Zibby's
+  // backend with the session credential, and envKeys IS the spawned MCP child's
+  // ENTIRE environment (resolve() copies only these keys), so without them
+  // every mcp__figma__* call dies in the child with a misleading session error
+  // (the github/gitlab/lark trap — see backend-session-env-contract.test.ts).
+  envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
   description: 'Figma — read files, nodes and comments; extract dev-handoff specs (sizes/colors/fonts/auto-layout); list versions and image fills; render frames to PNG/JPG/SVG/PDF; browse team projects/files; and post comments',
 
   promptFragment: `## Figma
@@ -200,7 +204,8 @@ You have access to the user's Figma files via the Figma REST API. Every tool tha
     // The module arg is resolved RELATIVE TO bin/ at runtime →
     // node_modules/@zibby/skills/dist/figma.js in a published install
     // (mirrors github.js / mcp-sentry.mjs importing ../dist/<mod>.js).
-    // No env to forward: figmaFetch resolves the token via the backend.
+    // envKeys carries the backend-session allowlist figmaFetch's
+    // resolveIntegrationToken() call needs INSIDE the child (see envKeys).
     const bin = resolveSkillBin();
     if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env: any = {};

@@ -32,9 +32,7 @@ export function loadTokenStoreKey(raw = process.env.TOKEN_STORE_KEY) {
       'Generate one with:  openssl rand -hex 32',
     );
   }
-  let key = null;
-  if (/^[0-9a-fA-F]{64}$/.test(s)) key = Buffer.from(s, 'hex');
-  else key = Buffer.from(s, 'base64');
+  const key = /^[0-9a-fA-F]{64}$/.test(s) ? Buffer.from(s, 'hex') : Buffer.from(s, 'base64');
   if (!key || key.length !== 32) {
     throw new Error(
       `TOKEN_STORE_KEY must decode to exactly 32 bytes (got ${key ? key.length : 0}). ` +

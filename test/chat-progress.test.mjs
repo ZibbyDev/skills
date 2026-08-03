@@ -1,6 +1,6 @@
-import { test } from 'node:test';
+import { test } from 'vitest'; // was node:test — broken since the TS migration (../src/*.js no longer exists); vitest transforms the .ts import
 import assert from 'node:assert/strict';
-import { chatProgressSkill } from '../src/chatProgress.js';
+import { chatProgressSkill } from '../src/chatProgress';
 
 function clearEnv() {
   for (const k of ['ZIBBY_PROGRESS_PROVIDER', 'ZIBBY_PROGRESS_CHAT_ID', 'ZIBBY_PROGRESS_MENTION', 'SLACK_CHANNEL', 'LARK_RECEIVE_ID', 'SLACK_BOT_TOKEN']) delete process.env[k];
