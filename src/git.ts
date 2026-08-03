@@ -114,6 +114,12 @@ export const gitSkill: any = {
   id: 'git',
   description: 'Clone and manage git repositories for codebase analysis',
   envKeys: ['GITHUB_TOKEN', 'GITLAB_TOKEN'],
+  // Tools run ONLY inside the assistant strategy's loop (handleToolCall;
+  // resolve() below is null — no MCP server). Under claude/codex/gemini the
+  // tools don't exist, so the engine must not inject the fragment there
+  // (strategy-registry gates on this flag — the 2026-08-02 gitlab-kb-sync run
+  // burned turns hunting for a git_checkout the prompt advertised).
+  inProcessOnly: true,
 
   promptFragment: `## Git Repositories
 You can clone and explore git repositories locally for codebase analysis:
@@ -121,12 +127,11 @@ You can clone and explore git repositories locally for codebase analysis:
 - git_list_repos: List locally cloned repos
 - git_explore: Quick overview of a cloned repo's structure (key files, package.json, routes, etc.)
 
-When a test ticket lacks context, use this workflow:
+When your task needs repository context you don't have yet:
 1. Clone the relevant repo with git_checkout
 2. Use git_explore to understand the project structure
 3. Use shell commands (grep, cat) to read specific files for deeper understanding
-4. Use GitHub/GitLab skills to read related PRs and commits
-5. Build well-informed test specs and save them to files before running tests`,
+4. Use GitHub/GitLab skills to read related PRs and commits when history matters`,
 
   resolve() {
     return null;
