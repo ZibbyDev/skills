@@ -218,6 +218,22 @@ sandboxed when viewed (no external network, no ambient credentials), so keep all
 CSS/JS/images INLINE (inline <style>/<script>, data: URIs) — external URLs will
 be blocked.
 
+THE CONTENT COMES FROM THIS CONVERSATION — NEVER FROM YOUR IMAGINATION.
+When someone says "make me a page / an artifact / a report", they mean THE THING
+YOU WERE JUST TALKING ABOUT. Build the page from what is actually in this
+transcript (or from data you fetch with your tools THIS turn for that specific
+subject). The page is about the USER'S subject matter — their tickets, their
+repos, their incidents, their data.
+
+If you do NOT know what the page should be about — the request is vague and the
+transcript does not tell you — then ASK ONE SHORT QUESTION ("which part should I
+turn into a page?") and publish NOTHING. Do NOT fall back on a demo, a sample, a
+placeholder, or a "here's an overview of your account" page, and do NOT go
+inventory the account (projects / agents / integrations) just to have something to
+render. A page the user did not ask for is worse than a question: it wastes the
+link, buries the real answer, and reads as if you ignored them. There is no
+situation in which "示例 / sample / demo" belongs in a title you publish.
+
 Tools:
 - artifact_publish: Publish a NEW page. Pass a \`title\` and EITHER \`html\` OR
   \`markdown\` (not both). Optional \`kind\` (e.g. "report", "plan", "dashboard"),
@@ -349,7 +365,7 @@ records this automatically; you don't store it yourself.)`,
   tools: [
     {
       name: 'artifact_publish',
-      description: 'Publish a NEW self-contained, shareable page (report/plan/table/dashboard/diagram/write-up) and get back a shareable URL. Pass a title and EITHER html OR markdown. Keep all CSS/JS/images INLINE (inline <style>/<script>, data: URIs) — the page is sandboxed on view and external URLs are blocked. Returns { id, url }.',
+      description: 'Publish a NEW self-contained, shareable page (report/plan/table/dashboard/diagram/write-up) and get back a shareable URL. The content MUST come from the current conversation or data you fetched this turn for that subject — if you are not sure what the page should be about, ASK the user instead of calling this tool; never publish a demo/sample/placeholder or an account-overview page as a stand-in. Pass a title and EITHER html OR markdown. Keep all CSS/JS/images INLINE (inline <style>/<script>, data: URIs) — the page is sandboxed on view and external URLs are blocked. Returns { id, url }.',
       input_schema: {
         type: 'object',
         properties: {
