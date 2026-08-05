@@ -23,11 +23,30 @@ import { ingest, query, del, drop, stat, health, withEmbedding } from './brain.j
 // Per-agent embedding overrides carried on the request (set by the control-plane
 // from the deploying agent's snapshotted config). Maps to the env GBrain reads.
 // The dimension is baked into the store at creation, so we pin it per known model.
+//
+// ⚠️ EMBED_DIMS is a FALLBACK, not the source of truth — it is a SECOND place
+// that has to agree with GBrain's own per-model default, and it does NOT: GBrain
+// records `text-embedding-3-large` at 1536 (schema.sql `embedding_dimensions`),
+// this table says 3072. So the SAME model produced two different vector spaces
+// depending on whether GBRAIN_EMBEDDING_MODEL happened to be set — 2× the vector
+// + HNSW bytes for a brain whose only sin was carrying the env var. An explicit
+// declaration therefore WINS over this table; the table only covers a caller
+// that names a model and says nothing about width.
 const EMBED_DIMS = { 'text-embedding-3-small': 1536, 'text-embedding-3-large': 3072 };
 function embedEnvFrom(body) {
   const env = {};
   const model = typeof body?.embeddingModel === 'string' ? body.embeddingModel.trim() : '';
   const key = typeof body?.embeddingKey === 'string' ? body.embeddingKey.trim() : '';
+  // Declared width (Matryoshka truncation). text-embedding-3-* accept any width
+  // up to the model's native size, and the width is what the pgvector column is
+  // sized to — so this is the ONE knob that decides a KB's vector footprint
+  // (1536 → 512 is ~3× off the vector + HNSW halves of the store). Accepted as a
+  // number or a numeric string; anything else is ignored rather than passed on
+  // as a malformed `--embedding-dimensions` that would fail the brain's init.
+  const rawDims = body?.embeddingDimensions;
+  const dims = Number.isFinite(Number(rawDims)) && Number(rawDims) > 0
+    ? String(Math.floor(Number(rawDims)))
+    : '';
   if (model) {
     // PROVIDER-QUALIFY the id. GBrain resolves a model as `<provider>:<model>`;
     // handed a bare `text-embedding-3-small` it reports provider "unknown" and
@@ -39,6 +58,10 @@ function embedEnvFrom(body) {
     const bare = qualified.slice(qualified.indexOf(':') + 1);
     if (EMBED_DIMS[bare]) env.GBRAIN_EMBEDDING_DIMENSIONS = String(EMBED_DIMS[bare]);
   }
+  // Explicit width wins over the per-model fallback, and stands on its own: a
+  // caller may declare a width WITHOUT naming a model (keeping GBrain's default
+  // model) — that is the whole point of exposing it as an independent knob.
+  if (dims) env.GBRAIN_EMBEDDING_DIMENSIONS = dims;
   if (key) {
     env.OPENAI_API_KEY = key;   // GBrain reads the embedding key from OPENAI_API_KEY
     env.GBRAIN_EMBEDDING = '1'; // a key was supplied → force embeddings on
