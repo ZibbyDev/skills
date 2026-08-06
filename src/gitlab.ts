@@ -158,6 +158,65 @@ function encodeProject(projectId) {
   return /^\d+$/.test(id) ? id : encodeURIComponent(id);
 }
 
+// ── REPO ALLOWLIST ──────────────────────────────────────────────────────────
+// Project Settings says "Agents in this project can only use the selected repos.
+// Anything you leave unchecked stays invisible to this project's agents." For
+// GitHub that is true at the CREDENTIAL layer — an App installation token is
+// minted scoped to the selection, fail-closed. GitLab has no equivalent: a PAT
+// carries its owner's full reach and cannot be narrowed, so until now the
+// promise was kept by nothing at all. Every gitlab-using agent could read every
+// project on the instance; only the Copilot ever LISTED, which is why it showed
+// 12 repos for a project that had selected one.
+//
+// So the boundary is enforced HERE, at the tool layer, on the ONE chokepoint
+// every gitlab tool passes through. ABSENT/EMPTY ⇒ unrestricted, byte-identical
+// to before — a run that injects nothing is unaffected.
+//
+// Paths are compared case-insensitively and slash-normalized (GitLab paths are
+// case-preserving but case-insensitive to look up). A numeric project id is
+// RESOLVED to its path before the check, so `projectId: 42` cannot walk around
+// the list.
+function allowedRepos() {
+  const raw = process.env.GITLAB_ALLOWED_REPOS;
+  if (typeof raw !== 'string' || !raw.trim()) return null; // unrestricted
+  const set = new Set(
+    raw.split(',').map((s) => s.trim().replace(/^\/+|\/+$/g, '').toLowerCase()).filter(Boolean),
+  );
+  return set.size ? set : null;
+}
+
+function isAllowedPath(set, path) {
+  if (!set) return true;
+  const p = String(path || '').trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+  return p !== '' && set.has(p);
+}
+
+/** The project identifier a tool call names, under any of the arg spellings. */
+function namedProject(args) {
+  if (!args || typeof args !== 'object') return null;
+  for (const k of ['projectPath', 'projectId', 'project', 'repo', 'repoPath']) {
+    const v = args[k];
+    if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
+  }
+  return null;
+}
+
+/**
+ * Resolve whatever the caller named to a full path. A numeric id costs one API
+ * call; a path is returned as-is. Returns null when it cannot be resolved — the
+ * caller then DENIES, because an unresolvable target cannot be shown to be
+ * inside the allowlist (fail-closed).
+ */
+async function resolveProjectPath(ident) {
+  if (!/^\d+$/.test(ident)) return ident;
+  try {
+    const proj = await glFetch(`/projects/${encodeProject(ident)}`);
+    return (proj && proj.path_with_namespace) || null;
+  } catch {
+    return null;
+  }
+}
+
 export const gitlabSkill: any = {
   id: 'gitlab',
   // Backend-calling: the MCP child talks to Zibby's own backend — the
@@ -174,6 +233,10 @@ export const gitlabSkill: any = {
   // has no credential to reach Zibby's backend with unless it's named here.
   envKeys: [
     'GITLAB_TOKEN', 'GITLAB_OAUTH_TOKEN', 'GITLAB_INSTANCE_URL', 'GITLAB_API_URL',
+    // The project's repo selection. This list IS the child's whole env, so an
+    // omission here silently disables the allowlist rather than erroring — the
+    // fail-OPEN direction, which is why it belongs next to the token it bounds.
+    'GITLAB_ALLOWED_REPOS',
     'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV',
   ],
   description: 'GitLab — merge requests, diffs, MR reviews/discussions, issues',
@@ -234,6 +297,27 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
 
   async handleToolCall(name, args) {
     try {
+      // ── ALLOWLIST GATE — before any tool runs, and before any result leaves ──
+      // ONE place, because a per-tool check is a list someone forgets to append
+      // to: there are 25+ gitlab tools and every one of them takes a project.
+      const allow = allowedRepos();
+      if (allow) {
+        const ident = namedProject(args);
+        if (ident) {
+          const path = await resolveProjectPath(ident);
+          if (!isAllowedPath(allow, path)) {
+            // Name what IS allowed — a bare "denied" reads to the model as a
+            // transient failure and it retries the same call.
+            return JSON.stringify({
+              error: `Repository "${path || ident}" is not available to this project. `
+                + `This project's agents may only use: ${[...allow].join(', ')}. `
+                + `An owner changes this in Project Settings → Repository access.`,
+              allowedRepos: [...allow],
+            });
+          }
+        }
+      }
+
       switch (name) {
         case 'gitlab_clone': {
           // Clone a GitLab repo locally so the agent can read code OUTSIDE the
@@ -877,7 +961,13 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           params.set('per_page', String(Math.min(cap + 1, 100)));
           if (query) params.set('search', String(query));
           const data = await glFetch(`/projects?${params.toString()}`);
-          const all = Array.isArray(data) ? data : [];
+          let all = Array.isArray(data) ? data : [];
+          // ENUMERATION is the other half of the gate. The pre-call check above
+          // can only judge a project the caller NAMED; this tool names none, so
+          // without this filter the allowlist would still hand back the whole
+          // instance — which is exactly how a project that had selected one repo
+          // was shown twelve.
+          if (allow) all = all.filter((p) => isAllowedPath(allow, p && p.path_with_namespace));
           const truncated = all.length > cap;
           const projects = all.slice(0, cap).map((p) => ({
             fullPath: p.path_with_namespace, // "group/subgroup/repo"
