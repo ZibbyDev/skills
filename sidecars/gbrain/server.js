@@ -11,16 +11,32 @@
  *   POST /query   { kbId, query, topK }  → { ok, results:[{ sourceId, chunk, score }] }
  *   POST /delete  { kbId, sourceIds:[...] } → { ok, deleted }
  *   POST /stat    { kbId } → { ok, exists, sizeBytes, docs }
- *   POST /compact { kbId, olderThanHours?, vacuum? }
- *                 → { ok, purgedCount, vacuumed, beforeBytes, afterBytes, reclaimedBytes }
+ *   POST /drop    { kbId, confirm:true } → { ok, dropped }
+ *   POST /compact { kbId, olderThanHours?, vacuum?:'full'|'light'|'none', halfvec? }
+ *                 → { ok, purgedCount, vacuumMode, vacuumed, beforeBytes,
+ *                     afterBytes, reclaimedBytes, halfvec }
  *   GET  /health  → { ok }
+ *
+ * THREE operations remove data, and they differ by WHAT SURVIVES — that is the
+ * whole vocabulary, and it is why none of them is called "purge" (the word means
+ * "erase everything" to a user and "reclaim freed space" to a DBA, so it can
+ * only ever describe one of these to half the room):
+ *
+ *   /compact  keeps every live document      — only already-deleted data goes
+ *   /drop     keeps the store, empties it    — every document goes
+ *   (control-plane store delete)             — the store goes too
+ *
+ * `/drop` is the engine op behind BOTH of the last two: the store row lives in
+ * the control-plane, so "empty" and "delete the store" differ there, not here.
  *
  * Auth: if SIDECAR_AUTH_TOKEN is set, POST routes require
  * `Authorization: Bearer <token>` (else 401). Unset ⇒ no auth (private network).
  */
 
 import http from 'node:http';
-import { ingest, query, del, drop, stat, compact, health, withEmbedding } from './brain.js';
+import {
+  ingest, query, del, drop, stat, compact, health, withEmbedding, VACUUM_MODE_NAMES,
+} from './brain.js';
 
 // Per-agent embedding overrides carried on the request (set by the control-plane
 // from the deploying agent's snapshotted config). Maps to the env GBrain reads.
@@ -165,9 +181,11 @@ async function handleQuery(body) {
 
 /**
  * DROP — destroy an entire brain (pages, vectors, slug map). Explicit and
- * irreversible: it exists so deleting a Store can really delete its data, and so
- * a brain frozen in the wrong search mode can be rebuilt from the caller's
- * archive. NOTHING calls it implicitly.
+ * irreversible: it exists so deleting a Store can really delete its data, so a
+ * store can be EMPTIED without being deleted (the control-plane keeps the row;
+ * the next ingest/query re-creates an empty brain), and so a brain frozen in the
+ * wrong search mode can be rebuilt from the caller's archive. NOTHING calls it
+ * implicitly, and `confirm:true` is mandatory.
  */
 async function handleDrop(body) {
   const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
@@ -201,17 +219,24 @@ async function handleStat(body) {
 }
 
 /**
- * COMPACT — return the disk a deleted document still occupies.
+ * COMPACT — return the disk a deleted document still occupies. LIVE DOCUMENTS
+ * ARE NEVER TOUCHED; this is the one data-removing op that is not destructive
+ * to anything the user can still see.
  *
  * `/delete` is a SOFT delete (gbrain's 72h recovery window), and a soft-deleted
  * page's chunks, vectors and HNSW entries all stay on disk — so a KB that
  * churns only ever grows. This runs the two steps that actually reclaim:
- * gbrain's own hard purge, then VACUUM FULL. See brain.js `compact` for the
+ * gbrain's own hard purge, then a vacuum. See brain.js `compact` for the
  * measurements showing neither step alone frees a single byte.
  *
  * Safe by default: `olderThanHours` defaults to gbrain's own 72h window, so a
  * plain call can never destroy a delete the user could still undo. Passing 0
  * waives that window and is the caller's explicit choice.
+ *
+ * `vacuum` picks the WEIGHT of the pass — 'full' (default) is the one-off that
+ * gives disk back, 'light' is the routine one that stops the growth, 'none'
+ * purges only. A FIXED vocabulary: anything else is a 400, never a silent
+ * fallback to the heaviest option.
  */
 async function handleCompact(body) {
   const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
@@ -225,9 +250,24 @@ async function handleCompact(body) {
     }
     olderThanHours = n;
   }
-  const vacuum = body?.vacuum !== false;
 
-  const r = await compact(kbId, { olderThanHours, vacuum });
+  const vacuum = body?.vacuum == null ? 'full' : String(body.vacuum);
+  if (!VACUUM_MODE_NAMES.includes(vacuum)) {
+    return {
+      status: 400,
+      body: { ok: false, error: `vacuum must be one of: ${VACUUM_MODE_NAMES.join(', ')}` },
+    };
+  }
+
+  // OPT-IN, never a default: narrowing the vectors to float16 is a ONE-WAY
+  // change to stored data (see brain.js convertToHalfvec). It buys far more
+  // than a narrower dimension does — measured 16.2% off a whole 1536-dim store
+  // in ~3s with nothing re-embedded, vs 7.8% for 1536→512 which needs every
+  // document re-embedded through the provider — but it is the caller's call to
+  // make, so a plain /compact never does it.
+  const halfvec = body?.halfvec === true;
+
+  const r = await compact(kbId, { olderThanHours, vacuum, halfvec });
   return { status: 200, body: { ok: true, ...r } };
 }
 

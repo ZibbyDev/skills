@@ -23,7 +23,14 @@ process.env.GBRAIN_NO_EMBEDDING = '1';
 const DATA_ROOT = mkdtempSync(join(tmpdir(), 'gbrain-smoke-'));
 process.env.GBRAIN_DATA_ROOT = DATA_ROOT;
 
-const { ingest, query, del, compact, health, _internal } = await import('./brain.js');
+const {
+  ingest, query, del, drop, stat, compact, health, sweepIdleBrains, _internal,
+} = await import('./brain.js');
+// The HTTP layer is exercised too — the vacuum-mode vocabulary and the drop
+// confirmation are contract, and a contract asserted only through the in-process
+// function is a contract nobody checked. Importing does NOT start the listener
+// (server.js guards on import.meta.main).
+const { handleCompact, handleDrop } = await import('./server.js');
 
 let passed = 0;
 let failed = 0;
@@ -154,6 +161,15 @@ try {
   assert('compact ran VACUUM (the half gbrain does not provide)',
     forced.vacuumed === true && forced.vacuumError === null,
     JSON.stringify({ vacuumed: forced.vacuumed, err: forced.vacuumError }));
+  assert('the ONE-OFF pass defaults to the heavy full rewrite',
+    forced.vacuumMode === 'full', JSON.stringify(forced.vacuumMode));
+
+  // Nothing left to purge — the repeatable case. Must be a clean no-op, not an
+  // error and not a phantom count.
+  const nothing = await compact(KB, { olderThanHours: 0 });
+  assert('compact with nothing deleted purges 0 and still succeeds',
+    nothing.exists === true && nothing.purgedCount === 0 && nothing.vacuumError === null,
+    JSON.stringify(nothing));
 
   // The store must survive being rewritten: still searchable, still writable,
   // and the purged pages must not resurface.
@@ -165,6 +181,276 @@ try {
   const r9 = await ingest(KB, [{ sourceId: 'doc-post-vacuum',
     markdown: '# After\n\nWritten after the vacuum to prove writes still land.' }]);
   assert('brain still accepts writes after VACUUM FULL', r9.upserted === 1, JSON.stringify(r9));
+
+  // ── 8b. INCREMENTAL vs ONE-OFF — the `vacuum` weight ──────────────────────
+  // 'full' is a whole-table rewrite: the right thing ONCE, the wrong thing on a
+  // timer. 'light' is the routine pass — it returns dead tuples to the free-space
+  // map (so the next ingest REUSES them instead of extending the file) without an
+  // exclusive lock or a second copy of the table. 'none' erases without either.
+  await ingest(KB, [{ sourceId: 'doc-churn', markdown: '# Churn\n\nA document about churn and reuse.' }]);
+  await del(KB, ['doc-churn']);
+
+  const light = await compact(KB, { olderThanHours: 0, vacuum: 'light' });
+  assert('vacuum:light runs the routine pass and reports it as light',
+    light.vacuumMode === 'light' && light.vacuumed === true && light.vacuumError === null,
+    JSON.stringify({ mode: light.vacuumMode, vacuumed: light.vacuumed, err: light.vacuumError }));
+  assert('the light pass still hard-purges (the erase half is not what makes it heavy)',
+    light.purgedCount === 1, JSON.stringify(light));
+  const qL = await query(KB, 'baking sourdough bread', 5);
+  assert('brain is still searchable after the light pass', qL.results.length > 0, `got ${qL.results.length}`);
+  const rL = await ingest(KB, [{ sourceId: 'doc-post-light',
+    markdown: '# Post light\n\nWritten after a routine maintenance pass.' }]);
+  assert('brain still accepts writes after the light pass', rL.upserted === 1, JSON.stringify(rL));
+  const qL2 = await query(KB, 'written after a routine maintenance pass', 5);
+  assert('a doc ingested AFTER the light pass is retrievable',
+    qL2.results.some((r) => r.sourceId === 'doc-post-light'),
+    qL2.results.map((r) => r.sourceId).join(','));
+
+  await ingest(KB, [{ sourceId: 'doc-none', markdown: '# None\n\nErased without any vacuum at all.' }]);
+  await del(KB, ['doc-none']);
+  const none = await compact(KB, { olderThanHours: 0, vacuum: 'none' });
+  assert('vacuum:none purges but runs no vacuum',
+    none.vacuumMode === 'none' && none.vacuumed === false && none.purgedCount === 1,
+    JSON.stringify(none));
+
+  // A FIXED vocabulary. An unknown weight must be REFUSED, never coerced — a
+  // typo that silently runs the heavy rewrite on a 1 GB store is the failure.
+  let modeErr = null;
+  try { await compact(KB, { vacuum: 'FULL' }); } catch (e) { modeErr = String(e && e.message); }
+  assert('an unknown vacuum mode is refused, not coerced',
+    !!modeErr && /unknown vacuum mode/i.test(modeErr), String(modeErr));
+  // …and refused BEFORE the destructive purge step (so a typo costs nothing).
+  const stillThere = await compact(KB, { olderThanHours: 0, vacuum: 'none' });
+  assert('a refused mode did not purge on its way out',
+    stillThere.purgedCount === 0, JSON.stringify(stillThere));
+
+  // ── 8c. the HTTP contract for the same vocabulary ─────────────────────────
+  const httpBad = await handleCompact({ kbId: KB, vacuum: 'sorta' });
+  assert('POST /compact rejects an unknown vacuum mode with 400',
+    httpBad.status === 400 && /vacuum must be one of/.test(httpBad.body.error || ''),
+    JSON.stringify(httpBad));
+  const httpOk = await handleCompact({ kbId: KB, vacuum: 'light' });
+  assert('POST /compact accepts the light mode and echoes it',
+    httpOk.status === 200 && httpOk.body.ok === true && httpOk.body.vacuumMode === 'light',
+    JSON.stringify(httpOk.body));
+  const httpDefault = await handleCompact({ kbId: KB });
+  assert('POST /compact with no vacuum field defaults to full',
+    httpDefault.status === 200 && httpDefault.body.vacuumMode === 'full',
+    JSON.stringify(httpDefault.body));
+
+  // ── 8d. an EMPTY brain (exists, zero live documents) ──────────────────────
+  // Distinct from an ABSENT one: there is a real store here, it just holds
+  // nothing. Maintenance must work on it rather than erroring or reporting the
+  // absent-brain shape.
+  const EMPTY_KB = 'acct3:proj3:store_empty';
+  await ingest(EMPTY_KB, [{ sourceId: 'only-doc', markdown: '# Only\n\nThe one and only document.' }]);
+  await del(EMPTY_KB, ['only-doc']);
+  const emptied = await compact(EMPTY_KB, { olderThanHours: 0 });
+  assert('compact works on a brain whose last document was removed',
+    emptied.exists === true && emptied.purgedCount === 1 && emptied.vacuumError === null,
+    JSON.stringify(emptied));
+  const emptyStat = await stat(EMPTY_KB);
+  assert('an emptied-by-delete brain still EXISTS and reports 0 documents',
+    emptyStat.exists === true && emptyStat.docs === 0, JSON.stringify(emptyStat));
+  const emptyAgain = await compact(EMPTY_KB, { olderThanHours: 0, vacuum: 'light' });
+  assert('a second pass over an empty brain is a clean no-op',
+    emptyAgain.exists === true && emptyAgain.purgedCount === 0 && emptyAgain.vacuumError === null,
+    JSON.stringify(emptyAgain));
+
+  // ── 9. halfvec — narrow the vectors themselves (opt-in, one-way) ───────────
+  // float32 -> float16 in place. No re-embedding: pgvector casts the stored
+  // values, so this is the cheap half of a KB's footprint that a narrower
+  // DIMENSION only buys by re-embedding everything.
+  const noHalf = await compact(KB, { olderThanHours: 0 });
+  assert('compact does NOT convert to halfvec unless asked',
+    noHalf.halfvec === null, JSON.stringify(noHalf.halfvec));
+
+  const conv = await compact(KB, { olderThanHours: 0, halfvec: true });
+  assert('compact halfvec:true narrows the embedding column',
+    conv.halfvec && conv.halfvec.converted === true && /^halfvec\(/.test(conv.halfvec.to || ''),
+    JSON.stringify(conv.halfvec));
+  assert('the HNSW index is rebuilt for halfvec (not left dropped)',
+    conv.halfvec && conv.halfvec.indexesRebuilt >= 1, JSON.stringify(conv.halfvec));
+
+  // Idempotent: a second pass must be a no-op, not an error — this runs inside
+  // a repeatable maintenance action.
+  const again = await compact(KB, { olderThanHours: 0, halfvec: true });
+  assert('halfvec conversion is idempotent',
+    again.halfvec && again.halfvec.converted === false && again.halfvec.reason === 'already halfvec',
+    JSON.stringify(again.halfvec));
+
+  // The store must still work end-to-end on the narrowed column.
+  const q9 = await query(KB, 'baking sourdough bread', 5);
+  assert('brain is still searchable after halfvec conversion', q9.results.length > 0,
+    `got ${q9.results.length}`);
+  const r10 = await ingest(KB, [{ sourceId: 'doc-post-halfvec',
+    markdown: '# Post halfvec\n\nWritten after narrowing the vectors, must still index.' }]);
+  assert('brain still accepts writes after halfvec conversion', r10.upserted === 1, JSON.stringify(r10));
+  const q10 = await query(KB, 'written after narrowing the vectors', 5);
+  assert('a doc ingested AFTER the conversion is retrievable',
+    q10.results.some((r) => r.sourceId === 'doc-post-halfvec'),
+    q10.results.map((r) => r.sourceId).join(','));
+
+  // The routine pass must also work on a narrowed store — the two options are
+  // independent, and a user who converted once still runs maintenance forever.
+  const lightAfterHalf = await compact(KB, { olderThanHours: 0, vacuum: 'light' });
+  assert('the light pass still works after the halfvec conversion',
+    lightAfterHalf.vacuumMode === 'light' && lightAfterHalf.vacuumed === true
+      && lightAfterHalf.vacuumError === null,
+    JSON.stringify({ mode: lightAfterHalf.vacuumMode, err: lightAfterHalf.vacuumError }));
+
+  // ── 10. EMPTY the knowledge base — every document goes, the store stays ────
+  // The control-plane's "Empty knowledge base" is this engine op: erase the
+  // brain and let the next use re-create it. Distinct from compact (which never
+  // touches a live document) and from deleting the store (which also removes the
+  // row the control-plane owns — there is no row down here to remove).
+  const EMPTY_TARGET = 'acct4:proj4:store_wipe';
+  await ingest(EMPTY_TARGET, [
+    { sourceId: 'keep-a', markdown: '# Keep A\n\nA document about migrating a database schema.' },
+    { sourceId: 'keep-b', markdown: '# Keep B\n\nA document about tuning a query planner.' },
+  ]);
+  const beforeWipe = await stat(EMPTY_TARGET);
+  assert('the store to be emptied holds documents first',
+    beforeWipe.exists === true && beforeWipe.docs === 2, JSON.stringify(beforeWipe));
+
+  const wiped = await drop(EMPTY_TARGET);
+  assert('empty reports it removed the brain', wiped.dropped === true, JSON.stringify(wiped));
+  const afterWipe = await stat(EMPTY_TARGET);
+  assert('an emptied store holds nothing and costs nothing',
+    afterWipe.exists === false && afterWipe.sizeBytes === 0 && afterWipe.docs === 0,
+    JSON.stringify(afterWipe));
+  assert('emptying really removed the files (not just the bookkeeping)',
+    !existsSync(_internal.brainDirFor(EMPTY_TARGET)), _internal.brainDirFor(EMPTY_TARGET));
+
+  // The STORE survives: it is immediately usable again, and nothing from before
+  // comes back with it.
+  const qWiped = await query(EMPTY_TARGET, 'migrating a database schema', 5);
+  assert('an emptied store answers queries with nothing (not an error)',
+    qWiped.results.length === 0, qWiped.results.map((r) => r.sourceId).join(','));
+  const rAfterWipe = await ingest(EMPTY_TARGET, [{ sourceId: 'fresh',
+    markdown: '# Fresh\n\nIngested after the knowledge base was emptied.' }]);
+  assert('an emptied store accepts writes again', rAfterWipe.upserted === 1, JSON.stringify(rAfterWipe));
+  const qFresh = await query(EMPTY_TARGET, 'ingested after the knowledge base was emptied', 5);
+  assert('a doc ingested AFTER emptying is retrievable',
+    qFresh.results.some((r) => r.sourceId === 'fresh'),
+    qFresh.results.map((r) => r.sourceId).join(','));
+  assert('emptied documents do NOT resurface after a re-ingest',
+    !qFresh.results.some((r) => r.sourceId === 'keep-a' || r.sourceId === 'keep-b'),
+    qFresh.results.map((r) => r.sourceId).join(','));
+
+  // Emptying a store that was never used must not MINT one (same rule stat and
+  // compact follow) and must not fail.
+  const NEVER = 'acct9:proj9:store_never_created';
+  const wipeAbsent = await drop(NEVER);
+  assert('emptying an absent brain is a no-op that mints nothing',
+    wipeAbsent.dropped === false && !existsSync(_internal.brainDirFor(NEVER)),
+    JSON.stringify(wipeAbsent));
+
+  // Emptying is irreversible, so the HTTP surface demands an explicit confirm —
+  // a bare POST must never erase a knowledge base.
+  const noConfirm = await handleDrop({ kbId: EMPTY_TARGET });
+  assert('POST /drop without confirm:true is refused',
+    noConfirm.status === 400 && /confirm/.test(noConfirm.body.error || ''),
+    JSON.stringify(noConfirm));
+  const stillAlive = await stat(EMPTY_TARGET);
+  assert('the refused empty left the store intact',
+    stillAlive.exists === true && stillAlive.docs === 1, JSON.stringify(stillAlive));
+
+  // Compact after emptying: the brain is gone, so there is nothing to reclaim —
+  // and asking must not re-create it.
+  const compactWiped = await compact(NEVER, { olderThanHours: 0 });
+  assert('compact after emptying reports an absent brain and mints nothing',
+    compactWiped.exists === false && !existsSync(_internal.brainDirFor(NEVER)),
+    JSON.stringify(compactWiped));
+
+  // ── 11. AUTOMATIC reclaim on idle — the incremental path, unattended ───────
+  // The customer bug is "the store only ever grows". Nobody is going to press a
+  // button every week, so the cheap half has to happen on its own. These
+  // assertions are ordered so the NEGATIVE ones mean something: the sweep is
+  // first PROVEN to fire, with the same call and the same arguments, before any
+  // test claims it did not.
+  const AUTO_KB = 'acct5:proj5:store_auto';
+  const autoDir = _internal.brainDirFor(AUTO_KB);
+  // Drive the brain past the idle threshold by ARGUMENT — no fake clock, no
+  // reaching into internals, and no five-minute wait.
+  const idleNow = () => Date.now() + _internal.SERVE_IDLE_MS + 1;
+
+  await ingest(AUTO_KB, [
+    { sourceId: 'auto-a', markdown: '# Auto A\n\nA document about scheduling background maintenance work.' },
+    { sourceId: 'auto-b', markdown: '# Auto B\n\nA document about reclaiming storage automatically.' },
+  ]);
+  await del(AUTO_KB, ['auto-a']);
+
+  // POSITIVE FIRST. Window 0 = "every soft delete is past its recovery window",
+  // which is the only way to observe a purge without waiting 72 real hours.
+  process.env.AUTO_RECLAIM_WINDOW_HOURS = '0';
+  const fired = (await sweepIdleBrains(idleNow())).filter((r) => r.brainDir === autoDir)[0];
+  assert('an idle sweep reclaims WITHOUT any operator call',
+    !!fired && fired.action === 'reclaimed' && fired.purgedCount === 1,
+    JSON.stringify(fired));
+  assert('the automatic pass is the LIGHT one — never VACUUM FULL',
+    !!fired && fired.vacuumMode === 'light', JSON.stringify(fired && fired.vacuumMode));
+  const qAuto = await query(AUTO_KB, 'reclaiming storage automatically', 5);
+  assert('the store is still searchable after an automatic sweep',
+    qAuto.results.some((r) => r.sourceId === 'auto-b'),
+    qAuto.results.map((r) => r.sourceId).join(','));
+
+  // Nothing written since → nothing to do. The sweep must still RELEASE the
+  // brain (idle reaping is its other job) but must not reopen it to vacuum.
+  const clean = (await sweepIdleBrains(idleNow())).filter((r) => r.brainDir === autoDir)[0];
+  assert('an idle sweep skips a brain nothing has written to',
+    !!clean && clean.action === 'reaped' && clean.reason === 'unchanged',
+    JSON.stringify(clean));
+
+  // SPARED: a delete still inside the recovery window survives the sweep. The
+  // sweep is known to fire (above), so this is a real negative.
+  await ingest(AUTO_KB, [{ sourceId: 'auto-c', markdown: '# Auto C\n\nA document deleted only moments ago.' }]);
+  await del(AUTO_KB, ['auto-c']);
+  process.env.AUTO_RECLAIM_WINDOW_HOURS = '72';
+  const spared = (await sweepIdleBrains(idleNow())).filter((r) => r.brainDir === autoDir)[0];
+  assert('the automatic pass runs but SPARES a delete inside the recovery window',
+    !!spared && spared.action === 'reclaimed' && spared.purgedCount === 0,
+    JSON.stringify(spared));
+
+  // OFF-SWITCH: with AUTO_RECLAIM=0 the same brain, dirty and idle, is only
+  // reaped. Proven meaningful by the identical setup firing above.
+  await ingest(AUTO_KB, [{ sourceId: 'auto-d', markdown: '# Auto D\n\nAnother document, about switches.' }]);
+  await del(AUTO_KB, ['auto-d']);
+  process.env.AUTO_RECLAIM_WINDOW_HOURS = '0';
+  process.env.AUTO_RECLAIM = '0';
+  const off = (await sweepIdleBrains(idleNow())).filter((r) => r.brainDir === autoDir)[0];
+  assert('AUTO_RECLAIM=0 stops the automatic pass (reap only)',
+    !!off && off.action === 'reaped' && off.reason === 'disabled', JSON.stringify(off));
+
+  // …and the debt it declined to pay is still owed: switch back on, and the very
+  // next sweep collects it. (This is also what proves the "off" case above was
+  // the switch and not an empty queue.)
+  //
+  // TWO pages, not one — auto-d, which the disabled sweep declined, AND auto-c,
+  // which the in-window sweep spared. That count is the strongest evidence in
+  // this section: both negatives above really did leave data behind, exactly as
+  // claimed, rather than passing because nothing was ever there to purge.
+  delete process.env.AUTO_RECLAIM;
+  await query(AUTO_KB, 'switches', 3);   // re-open the brain the reap released
+  const backOn = (await sweepIdleBrains(idleNow())).filter((r) => r.brainDir === autoDir)[0];
+  assert('re-enabling collects the debt BOTH negatives left behind',
+    !!backOn && backOn.action === 'reclaimed' && backOn.purgedCount === 2,
+    JSON.stringify(backOn));
+
+  // A brain that is NOT idle is never touched — the sweep must not interrupt a
+  // store somebody is using.
+  await ingest(AUTO_KB, [{ sourceId: 'auto-e', markdown: '# Auto E\n\nA document in an actively used store.' }]);
+  await del(AUTO_KB, ['auto-e']);
+  const busy = (await sweepIdleBrains(Date.now())).filter((r) => r.brainDir === autoDir)[0];
+  assert('a brain still in use is left completely alone', busy === undefined,
+    JSON.stringify(busy));
+
+  // An emptied/absent brain must never be resurrected by the sweep.
+  const beforeDirs = existsSync(_internal.brainDirFor(NEVER));
+  await sweepIdleBrains(idleNow());
+  assert('the sweep never resurrects a brain that does not exist',
+    beforeDirs === false && !existsSync(_internal.brainDirFor(NEVER)));
+  delete process.env.AUTO_RECLAIM_WINDOW_HOURS;
 } catch (e) {
   failed += 1;
   console.log(`FAIL  unexpected error — ${e?.stack || e}`);

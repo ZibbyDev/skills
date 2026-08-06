@@ -45,7 +45,7 @@ by a restricted-grammar `slug`. The adapter maps injectively with
 (`<brainDir>/adapter/sourcemap.json`) so query results are reported by
 `sourceId`.
 
-## HTTP contract (unchanged)
+## HTTP contract
 
 ```
 POST /ingest   { kbId, docs: [{ sourceId, markdown, deleted? }] }
@@ -54,6 +54,13 @@ POST /query    { kbId, query, topK }
                → { ok:true, results: [{ sourceId, chunk, score }] }
 POST /delete   { kbId, sourceIds: [...] }
                → { ok:true, deleted:<n> }
+POST /stat     { kbId }
+               → { ok:true, exists, sizeBytes, docs }
+POST /drop     { kbId, confirm:true }
+               → { ok:true, dropped:<bool> }
+POST /compact  { kbId, olderThanHours?, vacuum?:'full'|'light'|'none', halfvec? }
+               → { ok:true, purgedCount, vacuumMode, vacuumed, halfvec,
+                   beforeBytes, afterBytes, reclaimedBytes }
 GET  /health   → { ok:true }
 ```
 
@@ -61,6 +68,61 @@ GET  /health   → { ok:true }
 `/delete` soft-removes the source (it disappears from query results). On error:
 HTTP `4xx`/`5xx` with `{ ok:false, error }`. Missing `kbId`/`docs`/`query`/
 `sourceIds` → `400`.
+
+### Removing data — three operations, told apart by what SURVIVES
+
+None of them is called "purge": the word means "erase everything" to a user and
+"reclaim freed space" to a DBA, so it can only ever describe one of these to half
+the room.
+
+| | Live documents | The store | Route |
+|---|---|---|---|
+| **Reclaim space** | kept | kept | `POST /compact` |
+| **Empty the knowledge base** | erased | kept | `POST /drop` |
+| **Delete the store** | erased | erased | control-plane `DELETE` (calls `/drop`) |
+
+`/delete` is a **soft** delete — GBrain keeps a 72h recovery window, and a
+soft-deleted page's chunks, vectors and HNSW entries stay on disk. GBrain ships
+no `VACUUM` and PGLite runs no autovacuum daemon, so without `/compact` a
+churning KB only ever grows. Measured on an 80-doc brain with 30 deletes:
+
+```
+soft delete                       79,688 KB → 80,728 KB   (+1 MB — it GROWS)
++ purge_deleted_pages (hard)      80,728 KB → 80,720 KB   (unchanged)
++ VACUUM FULL                     80,720 KB → 65,904 KB   (−14.8 MB)
+```
+
+`reclaimedBytes` is **signed**: `VACUUM FULL` is itself WAL-logged, so on a small
+store the new WAL can outweigh what it frees (measured 42.7 MB → 59.4 MB). That
+is reported honestly rather than clamped to zero.
+
+### One-off vs incremental — the `vacuum` weight
+
+| Mode | What it does | Cost |
+|---|---|---|
+| `full` (default) | `VACUUM FULL` — gives bytes back to the filesystem | rewrites every table, ACCESS EXCLUSIVE lock, needs room for a second copy, ~17 MB/s |
+| `light` | `VACUUM (ANALYZE)` — returns dead tuples to the free-space map so the next write REUSES them | O(dead tuples), no exclusive lock, no rewrite |
+| `none` | hard purge only | — |
+
+A fixed vocabulary: an unrecognized value is a `400`, never coerced.
+
+**`light` also runs automatically**, unattended, when a brain goes idle — the
+moment its persistent `gbrain serve` is about to be reaped anyway, so nothing is
+contending for the single-writer lock and the work is free to the user. That is
+what actually fixes "the store only ever grows"; `full` is the operator-triggered
+"give me the bytes back now" and is **never** scheduled. The automatic pass skips
+any brain nothing has written to, and never resurrects a reaped one.
+
+### halfvec (opt-in, ONE-WAY)
+
+`{ halfvec: true }` narrows `content_chunks.embedding` from `vector(N)` (float32)
+to `halfvec(N)` (float16) in place and rebuilds the HNSW index. pgvector casts the
+stored values, so there is **no re-embedding and no API call** — measured 16.2%
+off a whole 1536-dim store in ~3s. Compare cutting the *dimension* 1536→512,
+which needs every document re-embedded and measured only 7.8%.
+
+Idempotent (a second pass is a no-op) but **irreversible**: float16 precision
+cannot be recovered by widening the column back. Never a default.
 
 **Auth:** if `SIDECAR_AUTH_TOKEN` is set, POST routes require
 `Authorization: Bearer <that token>` (else `401`).
@@ -73,6 +135,10 @@ HTTP `4xx`/`5xx` with `{ ok:false, error }`. Missing `kbId`/`docs`/`query`/
 | `SIDECAR_AUTH_TOKEN` | *(unset)* | If set, Bearer token required on POST routes |
 | `GBRAIN_DATA_ROOT` | `/data` | Root under which per-kbId brains live |
 | `GBRAIN_OP_TIMEOUT_MS` | `120000` | Per-operation subprocess timeout |
+| `GBRAIN_SERVE_IDLE_MS` | `300000` | How long a brain must be untouched before it is reclaimed + released |
+| `GBRAIN_SERVE_STOP_TIMEOUT_MS` | `5000` | Grace period before a `gbrain serve` that won't stop is SIGKILLed |
+| `AUTO_RECLAIM` | *(on)* | `0`/`false`/`off` ⇒ disable the automatic idle reclaim entirely (idle reaping continues) |
+| `AUTO_RECLAIM_WINDOW_HOURS` | `72` | Recovery window the automatic pass hard-purges past — GBrain's own default |
 | `GBRAIN_NO_EMBEDDING` | *(unset)* | `1` ⇒ init brains keyword-only (fully offline) |
 | `GBRAIN_EMBEDDING` | *(unset)* | `1` ⇒ force embeddings on (must supply a key) |
 | `OPENAI_API_KEY` (or `ZEROENTROPY_API_KEY`, `VOYAGE_API_KEY`, …) | *(unset)* | Embeddings provider key GBrain reads directly |

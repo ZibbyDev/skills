@@ -224,15 +224,46 @@ async function getServe(brainDir) {
   return s;
 }
 
-// Release this brain's persistent `gbrain serve` (and with it the single-writer
-// PGLite lock) so a one-off CLI pass can open the same database. The next
-// serveCall lazily starts a fresh one.
+// How long to let `gbrain serve` shut down cleanly before SIGKILL.
+const SERVE_STOP_TIMEOUT_MS = Number(process.env.GBRAIN_SERVE_STOP_TIMEOUT_MS) || 5_000;
+
+/**
+ * Release this brain's persistent `gbrain serve` — and with it the single-writer
+ * PGLite lock and every open fd it holds — so a one-off CLI pass, a direct
+ * PGLite open, or an `rm` of the brain dir can proceed. The next serveCall
+ * lazily starts a fresh one.
+ *
+ * AWAITS THE PROCESS'S ACTUAL EXIT. Signalling is not stopping: `kill()` only
+ * queues the signal, so the old code returned while the child was still running
+ * with the whole brain open — and on the container's overlayfs, removing a file
+ * another process still holds open FAILS, silently, mid-walk. That is not
+ * theoretical: `drop` looked like it worked (it logged "removed", `rm` threw
+ * nothing) while the brain dir came back untouched — SAME INODE, SAME MTIME, so
+ * the store had never been erased at all. Anything that deletes or reopens a
+ * brain must await this, not fire it.
+ *
+ * Always resolves — a child that ignores SIGTERM is SIGKILLed, and a child that
+ * somehow survives both still releases the caller rather than wedging it.
+ */
 function stopServe(brainDir) {
   const s = _serves.get(brainDir);
-  if (!s) return;
+  if (!s) return Promise.resolve();
   _serves.delete(brainDir);
-  try { s.proc.stdin.end(); } catch { /* ignore */ }
-  try { s.proc.kill('SIGTERM'); } catch { /* ignore */ }
+  if (s.proc.exitCode != null) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hard); clearTimeout(cap);
+      resolve();
+    };
+    s.proc.once('exit', done);
+    const hard = setTimeout(() => { try { s.proc.kill('SIGKILL'); } catch { /* gone */ } }, SERVE_STOP_TIMEOUT_MS);
+    const cap = setTimeout(done, SERVE_STOP_TIMEOUT_MS + 1_000);
+    try { s.proc.stdin.end(); } catch { /* ignore */ }
+    try { s.proc.kill('SIGTERM'); } catch { /* ignore */ }
+  });
 }
 
 // Call a gbrain MCP tool on the brain's persistent serve process. Returns the
@@ -247,15 +278,113 @@ async function serveCall(brainDir, tool, args) {
   try { return JSON.parse(text); } catch { return text; }
 }
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [dir, s] of _serves) {
-    if (now - s.lastUsed > SERVE_IDLE_MS) {
-      try { s.proc.stdin.end(); } catch { /* ignore */ }
-      try { s.proc.kill('SIGTERM'); } catch { /* ignore */ }
-      _serves.delete(dir);
-    }
+// ── AUTOMATIC reclaim on idle ───────────────────────────────────────────────
+// The bug this exists for is "the KB only ever GROWS" — a customer store reached
+// 954 MB / 4793 documents and could only go up. Stopping the growth is therefore
+// the fix; giving bytes back is a separate, heavier, operator-triggered thing.
+// So the automatic pass is deliberately the CHEAP half, and only the cheap half:
+//
+//   AUTOMATIC  hard-purge past the recovery window + VACUUM (ANALYZE)
+//   MANUAL     VACUUM FULL — see `compact`, never scheduled
+//
+// Why the purge is automatic and not a policy change: gbrain's own schema says
+// the 72h window is a RECOVERY window and that a purge phase hard-deletes past
+// it. Upstream always assumed something would sweep; nothing ever did. Keeping a
+// page whose recovery window expired is not a feature, it is the leak.
+//
+// Why VACUUM FULL is not: it takes an ACCESS EXCLUSIVE lock, rewrites every
+// table, needs room for a second copy, and is itself WAL-logged — measured
+// making a small store NET BIGGER (42.7 MB → 59.4 MB). At ~17 MB/s that is
+// minutes on a real store. Nothing that expensive and that lock-hungry belongs
+// on a timer.
+//
+// WHEN: when a brain goes IDLE — the moment its persistent serve is about to be
+// reaped anyway. That is the one instant where nothing is contending for the
+// single-writer PGLite lock, so the work is free to the user, and it needs no
+// new timer, no new state and no per-request hook (hanging it off every ingest
+// would both run far too often and fight the write path for the lock).
+//
+// WHAT IT WILL NOT DO: it never resurrects a reaped brain to clean it (it only
+// ever looks at brains already open), never touches an untouched brain (the
+// dirty counter below), and never runs the heavy mode.
+const _dirty = new Map(); // brainDir → writes since the last reclaim
+
+/** Record that this brain now owes a maintenance pass. */
+function markDirty(brainDir, writes) {
+  if (writes > 0) _dirty.set(brainDir, (_dirty.get(brainDir) || 0) + writes);
+}
+
+// Off-switch + window, read PER SWEEP (not at import) so the knobs are honestly
+// testable and an operator changing them needs no code path of their own.
+// Brand-neutral names — these are new knobs (CLAUDE.md).
+function autoReclaimEnabled() {
+  return !/^(0|false|off|no)$/i.test(String(process.env.AUTO_RECLAIM ?? '').trim());
+}
+function autoReclaimWindowHours() {
+  const n = Number(process.env.AUTO_RECLAIM_WINDOW_HOURS);
+  return Number.isFinite(n) && n >= 0 ? n : 72;   // gbrain's own recovery window
+}
+
+/**
+ * One pass over the OPEN brains: reclaim + release the ones that have gone idle.
+ *
+ * `now` is a parameter rather than a `Date.now()` inside so a test can drive a
+ * brain past the idle threshold without faking a clock or mutating internals —
+ * which is what makes "the sweep did NOT fire here" a claim worth anything: the
+ * same call, with the same arguments, is PROVEN to fire in the positive case.
+ *
+ * Returns one entry per brain it considered, so the caller (and the test) can
+ * see what happened instead of inferring it from side effects.
+ */
+export async function sweepIdleBrains(now = Date.now()) {
+  const out = [];
+  const enabled = autoReclaimEnabled();
+  const olderThanHours = autoReclaimWindowHours();
+  for (const [brainDir, s] of Array.from(_serves)) {
+    if (now - s.lastUsed <= SERVE_IDLE_MS) continue;
+    // eslint-disable-next-line no-await-in-loop
+    if (!enabled) { await stopServe(brainDir); out.push({ brainDir, action: 'reaped', reason: 'disabled' }); continue; }
+    // eslint-disable-next-line no-await-in-loop
+    if (!_dirty.get(brainDir)) { await stopServe(brainDir); out.push({ brainDir, action: 'reaped', reason: 'unchanged' }); continue; }
+    // Queue behind any in-flight request rather than racing it — PGLite is
+    // single-writer, so correctness is not optional here. The cost of that
+    // choice is bounded: this only runs on a brain untouched for the whole idle
+    // window, and only ever runs the LIGHT pass, so a request that lands in the
+    // gap waits seconds, not the minutes a full rewrite would take.
+    // Snapshot the idleness we judged on. The re-check below asks "did anything
+    // touch this brain while we queued?" — which is a comparison of lastUsed
+    // against ITSELF, not against a clock. Comparing `Date.now()` to `lastUsed`
+    // here would be reading a different clock from the one the caller passed in,
+    // and made every swept brain look freshly active.
+    const lastUsedAtQueue = s.lastUsed;
+    // eslint-disable-next-line no-await-in-loop
+    const r = await withBrainLock(brainDir, async () => {
+      // A request may have run while we were queued — it, not us, now owns this
+      // brain's idleness. Stand down rather than reaching into a live store.
+      if (s.lastUsed !== lastUsedAtQueue) return { action: 'skipped', reason: 'became-active' };
+      if (!(await pathExists(brainDir))) { await stopServe(brainDir); return { action: 'skipped', reason: 'gone' }; }
+      const res = await reclaim(brainDir, { olderThanHours, mode: 'light', label: 'auto-reclaim' });
+      return { action: 'reclaimed', purgedCount: res.purgedCount, vacuumMode: res.vacuumMode, reclaimedBytes: res.reclaimedBytes };
+    }).catch((e) => ({ action: 'failed', reason: String((e && e.message) || e).slice(0, 200) }));
+    // `reclaim` already released the serve (the vacuum needs the lock it holds);
+    // this settles the skip/fail paths, and is a resolved no-op otherwise.
+    // eslint-disable-next-line no-await-in-loop
+    await stopServe(brainDir);
+    out.push({ brainDir, ...r });
   }
+  return out;
+}
+
+let _sweeping = false;
+setInterval(() => {
+  // Never overlap: a light pass on a large brain can outlive the interval, and a
+  // second sweep entering behind it would queue on the same per-brain lock and
+  // pile up.
+  if (_sweeping) return;
+  _sweeping = true;
+  sweepIdleBrains()
+    .catch((e) => console.warn(`[gbrain] auto-reclaim sweep failed: ${(e && e.message) || e}`))
+    .finally(() => { _sweeping = false; });
 }, 60_000).unref?.();
 
 /**
@@ -364,13 +493,32 @@ async function ensureBrain(brainDir) {
  * delete in the control-plane calls this explicitly, and a mode rebuild is
  * drop-then-reingest from the caller's archive). Idempotent: dropping a brain
  * that was never created succeeds with dropped:false.
+ *
+ * This is ALSO how "empty this knowledge base but keep the store" is served —
+ * the store row lives in the control-plane, not here, so erasing the brain and
+ * letting the next ingest/query `ensureBrain` a fresh one IS an empty store.
+ * There is deliberately no second `/empty` route: one engine op, named once,
+ * with the store-level word applied at the layer that owns stores. It also
+ * beats "delete every document one by one" outright — instant, no per-slug
+ * round trip over thousands of pages, and it returns 100% of the bytes without
+ * needing a vacuum at all (the directory is gone).
  */
 export async function drop(kbId) {
   const brainDir = brainDirFor(kbId);
   return withBrainLock(brainDir, async () => {
     const existed = await pathExists(brainDir);
+    // RELEASE THE PERSISTENT SERVE FIRST. `gbrain serve` holds the whole PGLite
+    // brain OPEN, and unlinking a file an fd is still on does not take the data
+    // away from the process that has it — so without this the "emptied" store
+    // kept answering queries from the deleted database until the 5-minute idle
+    // reap happened to kill it. Caught by smoke: after an empty, a query still
+    // returned the erased documents (as raw slugs, the sourcemap being gone).
+    // Stop it BEFORE the rm, and AWAIT it — see stopServe: a signalled-but-alive
+    // child makes the rm fail silently on overlayfs and the store survives intact.
+    await stopServe(brainDir);
     if (existed) await rm(brainDir, { recursive: true, force: true });
     _initialized.delete(brainDir);
+    _dirty.delete(brainDir);
     // eslint-disable-next-line no-console
     console.log(`[gbrain] drop ${existed ? 'removed' : 'no-op (absent)'}: ${brainDir}`);
     return { dropped: existed };
@@ -399,11 +547,58 @@ export async function drop(kbId) {
  * `olderThanHours` is gbrain's own recovery window and defaults to its 72 —
  * pass 0 only when the caller has accepted that in-window deletes become
  * unrecoverable.
+ *
+ * ── ONE-OFF vs INCREMENTAL: that is what `vacuum` selects ────────────────────
+ * VACUUM FULL is the only thing that gives BYTES BACK TO THE FILESYSTEM, and it
+ * is also a full-table rewrite: it takes an ACCESS EXCLUSIVE lock, needs room
+ * for a second copy of the table while it runs, and costs O(live data) —
+ * measured ~17 MB/s, so ~1 minute for the ~1 GB store this was built for. That
+ * is exactly right ONCE, and exactly wrong as something you run often.
+ *
+ * Plain `VACUUM (ANALYZE)` is the incremental half. It gives NOTHING back to
+ * the filesystem — it returns dead tuples to the table's own free-space map, so
+ * the NEXT ingest reuses those pages instead of extending the file. The store
+ * stops GROWING rather than shrinking. It costs O(dead tuples), takes no
+ * exclusive lock and needs no second copy, and the ANALYZE refreshes the
+ * planner statistics that a large churn invalidates.
+ *
+ *   vacuum: 'full'  → hard purge + VACUUM FULL   — one-off reclaim, gives disk back
+ *   vacuum: 'light' → hard purge + VACUUM ANALYZE — routine pass, stops the growth
+ *   vacuum: 'none'  → hard purge only             — reclaim nothing, just erase
+ *
+ * A FIXED vocabulary, validated by the caller (server.js) — an unrecognized
+ * value is REJECTED, never coerced to a default, because coercion here silently
+ * runs the wrong weight of operation on a customer's 1 GB store.
+ *
+ * The 'light' pass ALSO runs BY ITSELF, automatically, when a brain goes idle —
+ * see `sweepIdleBrains`. 'full' never does.
  */
-export async function compact(kbId, { olderThanHours = 72, vacuum = true } = {}) {
+export async function compact(kbId, { olderThanHours = 72, vacuum = 'full', halfvec = false } = {}) {
+  // REJECT an unknown mode rather than coercing it, and reject it BEFORE the
+  // hard purge — a typo must not cost the caller a destructive step it then
+  // can't finish. server.js validates first, so this only fires for an
+  // in-process caller (the smoke harness, a drainer); for those, silently
+  // running the HEAVY rewrite on a 1 GB store is exactly the failure this guard
+  // exists to prevent.
+  const mode = String(vacuum);
+  if (!Object.prototype.hasOwnProperty.call(VACUUM_MODES, mode)) {
+    throw new Error(`unknown vacuum mode '${mode}' (expected one of: ${VACUUM_MODE_NAMES.join(', ')})`);
+  }
   const brainDir = brainDirFor(kbId);
   if (!(await pathExists(brainDir))) return { exists: false, reclaimedBytes: 0 };
-  return withBrainLock(brainDir, async () => {
+  return withBrainLock(brainDir, () => reclaim(brainDir, { olderThanHours, mode, halfvec, label: 'compact' }));
+}
+
+/**
+ * The reclaim itself — purge, then vacuum. Factored out of `compact` because the
+ * AUTOMATIC idle sweep runs the exact same steps and must not be a second
+ * implementation of them (the pair would drift, and the drift would be silent).
+ *
+ * PRECONDITION: the caller holds this brain's lock and has verified the brain
+ * exists. Both callers do; nothing else may call it.
+ */
+async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label }) {
+  {
     const beforeBytes = await dirSizeBytes(brainDir);
 
     // 1. Hard-delete through gbrain itself. purge_deleted_pages is marked
@@ -415,17 +610,28 @@ export async function compact(kbId, { olderThanHours = 72, vacuum = true } = {})
     const purgedCount = Number(purged && purged.count) || 0;
 
     // 2. VACUUM needs the single-writer PGLite lock, which the persistent serve
-    //    holds. Drop it first; the next serveCall lazily starts a fresh one.
-    stopServe(brainDir);
+    //    holds. Drop it first — AWAITED, so the lock is genuinely released before
+    //    we open the store ourselves — and the next serveCall starts a fresh one.
+    await stopServe(brainDir);
+
+    // The work below IS the debt this brain owed. Clearing the marker here (not
+    // at the top) means a failure leaves it dirty and the next sweep retries.
+    _dirty.delete(brainDir);
 
     let vacuumed = false;
     let vacuumError = null;
-    if (vacuum) {
+    let halfvecResult = null;
+    if (mode !== 'none' || halfvec) {
       try {
-        await vacuumFull(brainDir);
-        vacuumed = true;
+        // ONE store session for both: the halfvec rewrite leaves dead tuples of
+        // its own, so converting and then vacuuming in the same open is both
+        // cheaper and the only order that actually returns the narrowed bytes.
+        await withStore(brainDir, async (db) => {
+          if (halfvec) halfvecResult = await convertToHalfvec(db);
+          if (mode !== 'none') { await db.query(VACUUM_MODES[mode]); vacuumed = true; }
+        });
       } catch (e) {
-        // A failed VACUUM must not lose the purge: report it and keep the
+        // A failure here must not lose the purge: report it and keep the
         // (already durable) hard-delete rather than throwing the whole call.
         vacuumError = String((e && e.message) || e).slice(0, 300);
       }
@@ -441,37 +647,62 @@ export async function compact(kbId, { olderThanHours = 72, vacuum = true } = {})
     // (large, churned stores — the 80-doc brain above reclaimed 14.8 MB).
     const reclaimedBytes = beforeBytes - afterBytes;
     // eslint-disable-next-line no-console
-    console.log(`[gbrain] compact ${brainDir}: purged=${purgedCount} vacuumed=${vacuumed} `
+    console.log(`[gbrain] ${label} ${brainDir}: purged=${purgedCount} vacuum=${mode}${vacuumed ? '' : '(failed)'} `
+      + `${halfvecResult && halfvecResult.converted ? 'halfvec=yes ' : ''}`
       + `${beforeBytes} → ${afterBytes} bytes (${reclaimedBytes >= 0 ? 'reclaimed' : 'GREW BY'} `
       + `${Math.abs(reclaimedBytes)})`);
     return {
       exists: true,
       purgedCount,
+      // WHICH weight of vacuum ran — the caller renders a very different promise
+      // for 'full' ("disk returned") than for 'light' ("growth stopped"), so it
+      // must not have to infer it from the flag it happened to send.
+      vacuumMode: mode,
       vacuumed,
       vacuumError,
+      halfvec: halfvecResult,
       beforeBytes,
       afterBytes,
       reclaimedBytes,
     };
-  });
+  }
 }
 
 /**
- * VACUUM FULL the brain's PGLite store, opened directly.
+ * The FIXED vacuum vocabulary → the SQL each one runs. One map, so the accepted
+ * values and the statements can never drift apart, and `Object.keys` is the
+ * single list server.js validates against (rather than a second copy of the
+ * spelling in a route handler).
+ *
+ * 'light' is `VACUUM (ANALYZE)`, not bare `VACUUM`: after the churn that makes a
+ * store worth vacuuming, its planner statistics are stale too, and refreshing
+ * them is the cheap part of a pass that is already walking the table.
+ */
+const VACUUM_MODES = {
+  full: 'VACUUM FULL',
+  light: 'VACUUM (ANALYZE)',
+  none: null,
+};
+export const VACUUM_MODE_NAMES = Object.keys(VACUUM_MODES);
+
+/**
+ * Open the brain's PGLite store DIRECTLY, run `fn(db)`, always close.
  *
  * The extension set MUST match what gbrain opens with (pglite-engine.ts:302):
- * VACUUM FULL rewrites every table including content_chunks, whose `embedding`
- * is a pgvector type — without the vector extension loaded the rewrite fails
- * with `could not access file "$libdir/vector"`.
+ * anything touching content_chunks trips over its pgvector-typed `embedding`
+ * column and fails with `could not access file "$libdir/vector"` without them.
  *
  * @electric-sql/pglite is resolved from gbrain's own node_modules rather than
  * declared here on purpose: there must be exactly ONE PGLite build touching a
  * given store. Sharing gbrain's copy makes that true by construction instead of
  * by a version pin that could silently drift out of step with the vendored
  * commit. A mismatch cannot pass silently either — an incompatible build fails
- * to open the store and surfaces as vacuumError.
+ * to open the store and surfaces as the caller's error field.
+ *
+ * The CALLER must have released the persistent `gbrain serve` first (PGLite is
+ * single-writer) — see stopServe.
  */
-async function vacuumFull(brainDir) {
+async function withStore(brainDir, fn) {
   const [{ PGlite }, { vector }, { pg_trgm }] = await Promise.all([
     import('@electric-sql/pglite'),
     import('@electric-sql/pglite/vector'),
@@ -482,10 +713,60 @@ async function vacuumFull(brainDir) {
   });
   try {
     await db.waitReady;
-    await db.query('VACUUM FULL');
+    return await fn(db);
   } finally {
     try { await db.close(); } catch { /* already closed */ }
   }
+}
+
+/**
+ * Narrow content_chunks.embedding from vector(N) (float32) to halfvec(N)
+ * (float16) IN PLACE — pgvector casts the stored values, so there is NO
+ * re-embedding and no API call. Halves the vector bytes AND the HNSW index
+ * built on them; measured 16.2% off a whole 1536-dim store in ~3s.
+ *
+ * Why this and not a narrower vector: cutting the DIMENSION (1536→512) requires
+ * re-embedding every document through the provider and measured only 7.8%,
+ * because the vector is one part of a store, not all of it. Halving the
+ * ELEMENT WIDTH gets more, instantly, with nothing to recompute.
+ *
+ * gbrain needs no change to read it: pgvector's distance operators are defined
+ * on halfvec too, so the SQL gbrain generates keeps working (verified — queries
+ * still return mode=vector, and new ingests still embed and land).
+ *
+ * ONE-WAY: float16 has ~3 decimal digits of mantissa, so the discarded
+ * precision cannot be recovered by widening the column back. Recall impact is
+ * negligible for cosine ranking (the standard result behind pgvector's halfvec
+ * support), but it is a real, permanent change of stored data.
+ *
+ * IDEMPOTENT: an already-halfvec column returns converted:false and touches
+ * nothing, so this is safe to include in a repeatable maintenance action.
+ */
+async function convertToHalfvec(db) {
+  const col = (await db.query(`
+    SELECT format_type(a.atttypid, a.atttypmod) AS typ
+      FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+     WHERE c.relname = 'content_chunks' AND a.attname = 'embedding'`)).rows[0];
+  const typ = col && col.typ ? String(col.typ) : '';
+  if (!typ) return { converted: false, reason: 'no embedding column' };
+  if (/^halfvec/.test(typ)) return { converted: false, reason: 'already halfvec', from: typ };
+
+  const dims = Number((typ.match(/\((\d+)\)/) || [])[1] || 0);
+  if (!dims) return { converted: false, reason: `unrecognized column type '${typ}'` };
+
+  // The HNSW index must go first and come back after: a vector_cosine_ops index
+  // cannot sit on a halfvec column, and rebuilding it is also what shrinks the
+  // index half (it is built FROM the narrowed values).
+  const idx = (await db.query(`
+    SELECT indexname FROM pg_indexes
+     WHERE tablename = 'content_chunks'
+       AND indexdef ILIKE '%hnsw%' AND indexdef ILIKE '%(embedding %'`)).rows;
+  for (const r of idx) await db.query(`DROP INDEX IF EXISTS ${r.indexname}`);
+  await db.query(`ALTER TABLE content_chunks ALTER COLUMN embedding TYPE halfvec(${dims})`);
+  for (const r of idx) {
+    await db.query(`CREATE INDEX ${r.indexname} ON content_chunks USING hnsw (embedding halfvec_cosine_ops)`);
+  }
+  return { converted: true, from: typ, to: `halfvec(${dims})`, indexesRebuilt: idx.length };
 }
 
 // ── slug↔sourceId map (per brain, our own metadata, outside .gbrain) ──────────
@@ -605,7 +886,7 @@ export async function ingest(kbId, docs) {
     // what this batch actually changed. `serve` holds the single-writer PGLite
     // lock, so it has to stand down for the CLI — the next query restarts it.
     if (upserted > 0 && embeddingsEnabled()) {
-      stopServe(brainDir);
+      await stopServe(brainDir);
       const r = await runGbrain(brainDir, ['embed', '--stale']);
       if (r.code !== 0) {
         // Non-fatal: the documents ARE stored and keyword-searchable. Say so
@@ -617,6 +898,12 @@ export async function ingest(kbId, docs) {
         console.log(`[gbrain] embed --stale done for ${upserted} upserted doc(s)`);
       }
     }
+
+    // Every upsert leaves the old row version behind and every delete leaves the
+    // whole page behind, so this batch is exactly the debt the idle sweep pays.
+    // Counting writes (rather than sweeping on time alone) is what keeps a
+    // never-written brain from being reopened and vacuumed for nothing.
+    markDirty(brainDir, upserted + deleted);
 
     // Report HOW this brain searches. A caller that just wrote 80 documents into
     // a keyword-only brain must be able to find that out from the write itself
@@ -667,6 +954,9 @@ export async function del(kbId, sourceIds) {
       delete map[slug];
     }
     await saveMap(brainDir, map);
+    // A soft-deleted page keeps its chunks, vectors and index entries until
+    // something hard-purges it — this is the write that most needs the sweep.
+    markDirty(brainDir, deleted);
     return { deleted };
   });
 }
@@ -743,4 +1033,10 @@ export async function health() {
   return true;
 }
 
-export const _internal = { brainDirFor, slugForSourceId, embeddingsEnabled, parseGbrainJson };
+export const _internal = {
+  brainDirFor, slugForSourceId, embeddingsEnabled, parseGbrainJson,
+  // The idle threshold the sweep measures against — exported so a test can drive
+  // a brain past it by ARGUMENT (sweepIdleBrains(now + SERVE_IDLE_MS + 1)) rather
+  // than by mutating internal state or waiting five real minutes.
+  SERVE_IDLE_MS,
+};
