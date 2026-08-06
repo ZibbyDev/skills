@@ -396,15 +396,7 @@ export const larkDocsSkill: any = {
   envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
 
   promptFragment: `## Lark Docs
-You can read, create, and append Lark/Feishu documents (docx). This reuses the same connected Lark app as messaging.
-- larkdoc_get: pass a Lark doc id OR a full doc URL (a /docx/ or /wiki/ link); returns { ok, documentId, title, url, text } where text is the doc as plain text (truncated to ~20k chars). Use it as reference context.
-- larkdoc_create: create a new doc from a title + markdown/text (#/##/### headings, - bullets, 1. ordered supported); returns { ok, documentId, url }. Share the url. To create the doc INSIDE a wiki space, first call larkwiki_list_spaces to find the space id, then pass wikiSpaceId (+ optional parentNodeToken to nest under a wiki node) — the doc is created as a wiki node and the returned url is the wiki link.
-- larkwiki_list_spaces: list the wiki spaces the connected Lark app can see; returns { ok, spaces:[{ spaceId, name }] }. Use it to discover the wikiSpaceId before larkdoc_create.
-- larkdoc_append: append markdown/text to the end of an existing doc (pass the documentId or doc URL).
-- larkdoc_insert_image: append a LOCAL image file (png/jpg, ≤10MB) to the end of a doc — pass { documentId, imagePath, width?, height? } (width/height in px, optional). Returns { ok, documentId, blockId, url }. Use this to deliver a rendered chart/report image into the doc.
-- larkdoc_list_comments: list the comment threads on a doc (pass the documentId or doc URL); returns { ok, comments:[{ commentId, replies:[{ replyId, author, text }] }] }. Use to read the thread you are replying to.
-- larkdoc_reply_comment: reply INSIDE an existing comment thread — pass { documentId, commentId, text }. Use this to answer a user who @mentioned Zibby in a doc comment (reply in the SAME commentId).
-- larkdoc_add_comment: post a NEW top-level comment on a doc — pass { documentId, text }.
+You can read, create, and append Lark/Feishu documents (docx), and read/post/reply to their comments. This reuses the same connected Lark app as messaging. Each \`larkdoc_*\` / \`larkwiki_*\` tool documents its own params and return shape in its tool description — they are not restated here.
 These tools return { ok:false, error } on failure — treat an unavailable Lark connection as "cannot read/deliver to Lark Docs" and continue rather than blocking the task.`,
 
   /**
