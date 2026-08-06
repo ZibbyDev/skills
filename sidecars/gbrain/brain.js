@@ -377,6 +377,117 @@ export async function drop(kbId) {
   });
 }
 
+/**
+ * RECLAIM disk a deleted document still occupies. Measured, not assumed
+ * (2026-08-06, 80-doc brain, 30 docs deleted = 43%):
+ *
+ *   soft delete (what `delete` does)  79,688 KB → 80,728 KB   (+1 MB, GROWS)
+ *   + purge_deleted_pages (hard)      80,728 KB → 80,720 KB   (unchanged)
+ *   + VACUUM FULL                     80,720 KB → 65,904 KB   (-14.8 MB)
+ *
+ * BOTH halves are required and NEITHER is enough alone — that pair is the whole
+ * reason a KB only ever grows. gbrain's `delete_page` is a soft delete by
+ * design (72h recovery window); its own `purge_deleted_pages` then hard-deletes
+ * past that window, cascading content_chunks/page_links/chunk_relations. But
+ * gbrain has NO VACUUM anywhere in its source and no raw-SQL op, so a hard
+ * delete only returns rows to the free-space map — the file never shrinks.
+ * PGLite runs no autovacuum daemon either, so nothing ever does it implicitly.
+ *
+ * Hence: purge through gbrain (it owns the cascade), then VACUUM through the
+ * PGLite store directly, which is the half gbrain does not offer.
+ *
+ * `olderThanHours` is gbrain's own recovery window and defaults to its 72 —
+ * pass 0 only when the caller has accepted that in-window deletes become
+ * unrecoverable.
+ */
+export async function compact(kbId, { olderThanHours = 72, vacuum = true } = {}) {
+  const brainDir = brainDirFor(kbId);
+  if (!(await pathExists(brainDir))) return { exists: false, reclaimedBytes: 0 };
+  return withBrainLock(brainDir, async () => {
+    const beforeBytes = await dirSizeBytes(brainDir);
+
+    // 1. Hard-delete through gbrain itself. purge_deleted_pages is marked
+    //    admin+localOnly, but BOTH of those filters live in serve-http.ts —
+    //    the stdio `gbrain serve` this adapter drives applies neither.
+    const purged = await serveCall(brainDir, 'purge_deleted_pages', {
+      older_than_hours: olderThanHours,
+    });
+    const purgedCount = Number(purged && purged.count) || 0;
+
+    // 2. VACUUM needs the single-writer PGLite lock, which the persistent serve
+    //    holds. Drop it first; the next serveCall lazily starts a fresh one.
+    stopServe(brainDir);
+
+    let vacuumed = false;
+    let vacuumError = null;
+    if (vacuum) {
+      try {
+        await vacuumFull(brainDir);
+        vacuumed = true;
+      } catch (e) {
+        // A failed VACUUM must not lose the purge: report it and keep the
+        // (already durable) hard-delete rather than throwing the whole call.
+        vacuumError = String((e && e.message) || e).slice(0, 300);
+      }
+    }
+
+    const afterBytes = await dirSizeBytes(brainDir);
+    // Signed on purpose: VACUUM FULL rewrites every table, and that rewrite is
+    // itself WAL-logged. On a SMALL brain the new WAL segments outweigh what
+    // the rewrite frees and the directory ends up BIGGER (measured: a 42.7 MB
+    // smoke brain went to 59.4 MB). Clamping this at 0 would report that as
+    // "reclaimed nothing" instead of "cost you 17 MB" — the caller must be able
+    // to see it, so compaction stays worth doing only where it actually pays
+    // (large, churned stores — the 80-doc brain above reclaimed 14.8 MB).
+    const reclaimedBytes = beforeBytes - afterBytes;
+    // eslint-disable-next-line no-console
+    console.log(`[gbrain] compact ${brainDir}: purged=${purgedCount} vacuumed=${vacuumed} `
+      + `${beforeBytes} → ${afterBytes} bytes (${reclaimedBytes >= 0 ? 'reclaimed' : 'GREW BY'} `
+      + `${Math.abs(reclaimedBytes)})`);
+    return {
+      exists: true,
+      purgedCount,
+      vacuumed,
+      vacuumError,
+      beforeBytes,
+      afterBytes,
+      reclaimedBytes,
+    };
+  });
+}
+
+/**
+ * VACUUM FULL the brain's PGLite store, opened directly.
+ *
+ * The extension set MUST match what gbrain opens with (pglite-engine.ts:302):
+ * VACUUM FULL rewrites every table including content_chunks, whose `embedding`
+ * is a pgvector type — without the vector extension loaded the rewrite fails
+ * with `could not access file "$libdir/vector"`.
+ *
+ * @electric-sql/pglite is resolved from gbrain's own node_modules rather than
+ * declared here on purpose: there must be exactly ONE PGLite build touching a
+ * given store. Sharing gbrain's copy makes that true by construction instead of
+ * by a version pin that could silently drift out of step with the vendored
+ * commit. A mismatch cannot pass silently either — an incompatible build fails
+ * to open the store and surfaces as vacuumError.
+ */
+async function vacuumFull(brainDir) {
+  const [{ PGlite }, { vector }, { pg_trgm }] = await Promise.all([
+    import('@electric-sql/pglite'),
+    import('@electric-sql/pglite/vector'),
+    import('@electric-sql/pglite/contrib/pg_trgm'),
+  ]);
+  const db = new PGlite(join(brainDir, '.gbrain', 'brain.pglite'), {
+    extensions: { vector, pg_trgm },
+  });
+  try {
+    await db.waitReady;
+    await db.query('VACUUM FULL');
+  } finally {
+    try { await db.close(); } catch { /* already closed */ }
+  }
+}
+
 // ── slug↔sourceId map (per brain, our own metadata, outside .gbrain) ──────────
 function mapPathFor(brainDir) {
   return join(brainDir, 'adapter', 'sourcemap.json');

@@ -11,6 +11,8 @@
  *   POST /query   { kbId, query, topK }  → { ok, results:[{ sourceId, chunk, score }] }
  *   POST /delete  { kbId, sourceIds:[...] } → { ok, deleted }
  *   POST /stat    { kbId } → { ok, exists, sizeBytes, docs }
+ *   POST /compact { kbId, olderThanHours?, vacuum? }
+ *                 → { ok, purgedCount, vacuumed, beforeBytes, afterBytes, reclaimedBytes }
  *   GET  /health  → { ok }
  *
  * Auth: if SIDECAR_AUTH_TOKEN is set, POST routes require
@@ -18,7 +20,7 @@
  */
 
 import http from 'node:http';
-import { ingest, query, del, drop, stat, health, withEmbedding } from './brain.js';
+import { ingest, query, del, drop, stat, compact, health, withEmbedding } from './brain.js';
 
 // Per-agent embedding overrides carried on the request (set by the control-plane
 // from the deploying agent's snapshotted config). Maps to the env GBrain reads.
@@ -39,10 +41,19 @@ function embedEnvFrom(body) {
   const key = typeof body?.embeddingKey === 'string' ? body.embeddingKey.trim() : '';
   // Declared width (Matryoshka truncation). text-embedding-3-* accept any width
   // up to the model's native size, and the width is what the pgvector column is
-  // sized to — so this is the ONE knob that decides a KB's vector footprint
-  // (1536 → 512 is ~3× off the vector + HNSW halves of the store). Accepted as a
-  // number or a numeric string; anything else is ignored rather than passed on
-  // as a malformed `--embedding-dimensions` that would fail the brain's init.
+  // sized to — so this is the ONE knob that decides a KB's vector footprint.
+  //
+  // How much that is worth, MEASURED (2026-08-06, same 80 docs / 611 chunks
+  // ingested twice, dimension the only variable): 1536 → 79,692 KB on disk,
+  // 512 → 73,452 KB. That is 7.8%, NOT the "~3× smaller store" this comment
+  // used to claim — cutting the width cuts only the vector TOAST + HNSW index
+  // (10.6 MB of a 28.6 MB database, and of a 77.8 MB directory once PGLite's
+  // ~28 MB base and 32 MB of WAL are counted). Scale the saving off the VECTOR
+  // share of a store, never off the store's total size. Reclaiming deleted
+  // documents (see brain.js `compact`) is the bigger lever on a churning KB.
+  //
+  // Accepted as a number or a numeric string; anything else is ignored rather
+  // than passed on as a malformed `--embedding-dimensions` that would fail init.
   const rawDims = body?.embeddingDimensions;
   const dims = Number.isFinite(Number(rawDims)) && Number(rawDims) > 0
     ? String(Math.floor(Number(rawDims)))
@@ -189,12 +200,44 @@ async function handleStat(body) {
   return { status: 200, body: { ok: true, ...r } };
 }
 
+/**
+ * COMPACT — return the disk a deleted document still occupies.
+ *
+ * `/delete` is a SOFT delete (gbrain's 72h recovery window), and a soft-deleted
+ * page's chunks, vectors and HNSW entries all stay on disk — so a KB that
+ * churns only ever grows. This runs the two steps that actually reclaim:
+ * gbrain's own hard purge, then VACUUM FULL. See brain.js `compact` for the
+ * measurements showing neither step alone frees a single byte.
+ *
+ * Safe by default: `olderThanHours` defaults to gbrain's own 72h window, so a
+ * plain call can never destroy a delete the user could still undo. Passing 0
+ * waives that window and is the caller's explicit choice.
+ */
+async function handleCompact(body) {
+  const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
+  if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
+
+  let olderThanHours = 72;
+  if (body?.olderThanHours != null) {
+    const n = Number(body.olderThanHours);
+    if (!Number.isFinite(n) || n < 0) {
+      return { status: 400, body: { ok: false, error: 'olderThanHours must be a number >= 0' } };
+    }
+    olderThanHours = n;
+  }
+  const vacuum = body?.vacuum !== false;
+
+  const r = await compact(kbId, { olderThanHours, vacuum });
+  return { status: 200, body: { ok: true, ...r } };
+}
+
 const POST_ROUTES = {
   '/ingest': handleIngest,
   '/query': handleQuery,
   '/delete': handleDelete,
   '/drop': handleDrop,
   '/stat': handleStat,
+  '/compact': handleCompact,
 };
 
 const server = http.createServer(async (req, res) => {
@@ -251,4 +294,4 @@ if (import.meta.main) {
   });
 }
 
-export { server, handleIngest, handleQuery, handleDelete, handleDrop, handleStat };
+export { server, handleIngest, handleQuery, handleDelete, handleDrop, handleStat, handleCompact };

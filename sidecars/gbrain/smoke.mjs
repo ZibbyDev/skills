@@ -23,7 +23,7 @@ process.env.GBRAIN_NO_EMBEDDING = '1';
 const DATA_ROOT = mkdtempSync(join(tmpdir(), 'gbrain-smoke-'));
 process.env.GBRAIN_DATA_ROOT = DATA_ROOT;
 
-const { ingest, query, del, health, _internal } = await import('./brain.js');
+const { ingest, query, del, compact, health, _internal } = await import('./brain.js');
 
 let passed = 0;
 let failed = 0;
@@ -122,6 +122,49 @@ try {
   assert('other-kb ingest does not leak into this kb',
     !q7.results.some((r) => r.sourceId === 'doc-beta'),
     q7.results.map((r) => r.sourceId).join(','));
+
+  // ── 8. compact — reclaim the disk a deleted doc still occupies ─────────────
+  // A soft delete leaves chunks+vectors on disk and gbrain ships no VACUUM, so
+  // without this a KB only ever grows. Both halves must run: purge (gbrain's
+  // own cascade) then VACUUM FULL (ours, straight against the PGLite store).
+  const absent = await compact('acct9:proj9:store_never_created');
+  assert('compact on an absent brain is exists:false and mints nothing',
+    absent.exists === false && !existsSync(_internal.brainDirFor('acct9:proj9:store_never_created')),
+    JSON.stringify(absent));
+
+  await ingest(KB, [
+    { sourceId: 'doc-doomed-a', markdown: '# Doomed A\n\nContent that will be purged.' },
+    { sourceId: 'doc-doomed-b', markdown: '# Doomed B\n\nMore content that will be purged.' },
+  ]);
+  await del(KB, ['doc-doomed-a', 'doc-doomed-b']);
+
+  // Default window is gbrain's 72h, so a just-deleted page must NOT be purged:
+  // compact must never destroy a delete the user could still undo.
+  const safe = await compact(KB);
+  assert('compact defaults to the 72h window and spares a fresh delete',
+    safe.purgedCount === 0, JSON.stringify(safe));
+
+  // Waiving the window purges them, and VACUUM must actually have run.
+  // THREE, not two: `doc-temp` was soft-deleted back in step 5 and has been
+  // sitting on disk ever since — chunks, vectors and all. That is precisely the
+  // condition compact exists to clear, so the count asserts it gets swept too.
+  const forced = await compact(KB, { olderThanHours: 0 });
+  assert('compact olderThanHours:0 hard-purges every soft-deleted page',
+    forced.purgedCount === 3, JSON.stringify(forced));
+  assert('compact ran VACUUM (the half gbrain does not provide)',
+    forced.vacuumed === true && forced.vacuumError === null,
+    JSON.stringify({ vacuumed: forced.vacuumed, err: forced.vacuumError }));
+
+  // The store must survive being rewritten: still searchable, still writable,
+  // and the purged pages must not resurface.
+  const q8 = await query(KB, 'baking sourdough bread', 5);
+  assert('brain is still searchable after VACUUM FULL', q8.results.length > 0);
+  assert('purged pages do not resurface after compact',
+    !q8.results.some((r) => r.sourceId === 'doc-doomed-a' || r.sourceId === 'doc-doomed-b'),
+    q8.results.map((r) => r.sourceId).join(','));
+  const r9 = await ingest(KB, [{ sourceId: 'doc-post-vacuum',
+    markdown: '# After\n\nWritten after the vacuum to prove writes still land.' }]);
+  assert('brain still accepts writes after VACUUM FULL', r9.upserted === 1, JSON.stringify(r9));
 } catch (e) {
   failed += 1;
   console.log(`FAIL  unexpected error — ${e?.stack || e}`);
