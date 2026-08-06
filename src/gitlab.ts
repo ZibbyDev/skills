@@ -35,6 +35,11 @@
  *                           the value it is handed.
  *   - GITLAB_API_URL        full `/api/v4` base override (rarely needed). If
  *                           set it wins over GITLAB_INSTANCE_URL.
+ *   - GITLAB_INSTANCES      OPTIONAL. A JSON TABLE of several connected GitLab
+ *                           servers, for a project whose selected repos span
+ *                           more than one of them. ABSENT ⇒ the single-server
+ *                           trio above is used exactly as before. See the
+ *                           MULTI-INSTANCE ROUTING block below.
  *
  * When a backend GitLab OAuth handler lands, swap glFetch's auth + base to
  * resolveIntegrationToken('gitlab') — the tool surface stays the same.
@@ -53,6 +58,7 @@
  */
 
 import { existsSync } from 'fs';
+import { AsyncLocalStorage } from 'async_hooks';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
@@ -73,14 +79,155 @@ function resolveSkillBin() {
   return existsSync(candidate) ? candidate : null;
 }
 
+// ── MULTI-INSTANCE ROUTING ──────────────────────────────────────────────────
+// An account can connect SEVERAL GitLab servers, and one project can select
+// repos that span them — e.g. two on a self-managed http://gitlab:8929 and one
+// on https://gitlab.com. The env trio above names exactly ONE server, so the
+// repos living on the other were simply unreachable. "Just try the other host"
+// is not the fix either: server A's token sent to server B is both a wrong
+// answer and a credential handed to a host it does not belong to.
+//
+// So the environment may instead carry a TABLE:
+//
+//   GITLAB_INSTANCES=[{"host":"http://gitlab:8929","token":"…",
+//                      "repos":["root/kb-demo","root/meter-shop"]},
+//                     {"host":"https://gitlab.com","token":"…",
+//                      "repos":["zibby-group/Zibby-project"]}]
+//
+// ABSENT ⇒ none of this runs and the single-server path is byte-identical to
+// before. PRESENT ⇒ the table is the ONE source for BOTH questions the runtime
+// has to answer: WHICH repos are reachable (the allowlist is the union of its
+// `repos`, DERIVED — so GITLAB_ALLOWED_REPOS is not a second place that has to
+// agree with it) and WHICH host+token a given call uses. There is deliberately
+// no "first instance" fallback anywhere: a path no entry claims is refused.
+
+type GitlabInstance = {
+  webHost: string; // scheme+host, no trailing slash, no /api/vN
+  apiBase: string; // webHost + /api/v4
+  token: string;
+  repos: Set<string>; // normalized paths this server owns
+};
+
+/**
+ * The ONE normalisation for a project path, shared by the allowlist and the
+ * routing table. GitLab paths are case-preserving but case-insensitive to look
+ * up, and users paste them with stray slashes.
+ */
+function normalizeRepoPath(p) {
+  return String(p ?? '').trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+}
+
+let instancesCache: { raw: string; value: GitlabInstance[] } | null = null;
+
+/**
+ * Parse GITLAB_INSTANCES. Every rejection is LOUD — a table that is present but
+ * unusable must not silently degrade into "one server, and two thirds of the
+ * project's repos are invisible", which is the exact bug this exists to fix.
+ *
+ * No message ever echoes the parsed value or a token: entries are named by
+ * INDEX and host only (security invariant #4).
+ */
+function parseInstances(raw: string): GitlabInstance[] {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('GITLAB_INSTANCES is set but is not valid JSON. Expected an array of { host, token, repos: [...] }.');
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error('GITLAB_INSTANCES must be a non-empty JSON array of { host, token, repos: [...] }.');
+  }
+  const out: GitlabInstance[] = [];
+  const ownerOf = new Map<string, number>();
+  parsed.forEach((entry: any, i: number) => {
+    const rawHost = entry && typeof entry.host === 'string' ? entry.host.trim().replace(/\/+$/, '') : '';
+    const token = entry && typeof entry.token === 'string' ? entry.token.trim() : '';
+    const repos = entry && Array.isArray(entry.repos) ? entry.repos : null;
+    if (!rawHost) throw new Error(`GITLAB_INSTANCES[${i}] is missing "host".`);
+    if (!token) throw new Error(`GITLAB_INSTANCES[${i}] (${rawHost}) is missing "token".`);
+    if (!repos || repos.length === 0) {
+      throw new Error(`GITLAB_INSTANCES[${i}] (${rawHost}) declares no "repos" — an entry that routes nothing is a config error, not an empty selection.`);
+    }
+    const webHost = rawHost.replace(/\/api\/v\d+$/, '');
+    const set = new Set<string>();
+    for (const r of repos) {
+      const p = normalizeRepoPath(r);
+      if (!p) continue;
+      const prev = ownerOf.get(p);
+      if (prev !== undefined && prev !== i) {
+        // Two servers claiming one path makes routing a coin toss, and the
+        // losing repo would be silently answered by the wrong server.
+        throw new Error(`GITLAB_INSTANCES claims "${p}" on more than one server (${out[prev].webHost} and ${webHost}). A repo path must name exactly one server.`);
+      }
+      ownerOf.set(p, i);
+      set.add(p);
+    }
+    if (set.size === 0) throw new Error(`GITLAB_INSTANCES[${i}] (${rawHost}) declares no usable "repos".`);
+    out.push({
+      webHost,
+      apiBase: /\/api\/v\d+$/.test(rawHost) ? rawHost : `${webHost}/api/v4`,
+      token,
+      repos: set,
+    });
+  });
+  return out;
+}
+
+/** The connected-server table, or null when the env carries the single-server trio. */
+function gitlabInstances(): GitlabInstance[] | null {
+  const raw = process.env.GITLAB_INSTANCES;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  if (instancesCache && instancesCache.raw === raw) return instancesCache.value;
+  const value = parseInstances(raw);
+  instancesCache = { raw, value };
+  return value;
+}
+
+/**
+ * The server the CURRENT call is routed to. Bound ONCE by handleToolCall, after
+ * the gate has worked out which server owns the repo the call names, and read
+ * by the four endpoint accessors below — so every outbound byte of a tool call
+ * (REST and `git clone` alike, including the calls nested inside a tool) uses
+ * one consistent host+token pair chosen in ONE place.
+ *
+ * AsyncLocalStorage rather than a module-level "current instance": the MCP
+ * child can have several tool calls in flight, and a shared mutable slot would
+ * let one call's host be paired with another call's token — the precise
+ * cross-server credential leak this feature exists to prevent.
+ */
+const routedInstance = new AsyncLocalStorage<GitlabInstance>();
+
+const UNROUTED = 'GitLab: this call was not routed to a connected server. '
+  + 'With GITLAB_INSTANCES set, every call must name a project one of the declared servers owns.';
+
+/**
+ * The server this call must use, or null in single-server mode (where the env
+ * trio below answers instead).
+ *
+ * The throw is the fail-closed: in multi-server mode an UNROUTED call has no
+ * defensible host or token, so it must not pick one. That is a structural
+ * guarantee rather than a per-tool list someone forgets to append to — the ONE
+ * tool that legitimately has no single server (gitlab_list_projects) binds each
+ * instance explicitly instead.
+ */
+function activeInstance(): GitlabInstance | null {
+  const routed = routedInstance.getStore();
+  if (routed) return routed;
+  if (gitlabInstances()) throw new Error(UNROUTED);
+  return null;
+}
+
 /**
  * Base API url. Resolution order:
+ *   0. the routed instance      — when GITLAB_INSTANCES is in play
  *   1. GITLAB_API_URL          — explicit /api/v4 base, used verbatim
  *   2. GITLAB_INSTANCE_URL     — the integration's host; we append /api/v4
  *   3. https://gitlab.com      — cloud default
  * Works for BOTH gitlab.com (cloud) and any self-hosted instanceUrl.
  */
 function gitlabApiBase() {
+  const routed = activeInstance();
+  if (routed) return routed.apiBase;
   const explicit = process.env.GITLAB_API_URL;
   if (explicit) return explicit.replace(/\/+$/, '');
   // GITLAB_URL is the name the workflow-executor actually injects (from the
@@ -91,8 +238,10 @@ function gitlabApiBase() {
   return `${host}/api/v4`;
 }
 
-/** Resolve the GitLab auth headers from env. */
+/** Resolve the GitLab auth headers from the routed instance, else from env. */
 function gitlabAuthHeaders() {
+  const routed = activeInstance();
+  if (routed) return { 'PRIVATE-TOKEN': routed.token };
   if (process.env.GITLAB_OAUTH_TOKEN) {
     return { Authorization: `Bearer ${process.env.GITLAB_OAUTH_TOKEN}` };
   }
@@ -139,6 +288,8 @@ export async function glFetch(path, opts: any = {}) {
  * API base but WITHOUT the /api/vN suffix. Works for gitlab.com + self-hosted.
  */
 function gitlabWebHost() {
+  const routed = activeInstance();
+  if (routed) return routed.webHost;
   const explicit = process.env.GITLAB_API_URL;
   const host = (process.env.GITLAB_URL || process.env.GITLAB_INSTANCE_URL
     || (explicit ? explicit.replace(/\/api\/v\d+\/?$/, '') : '')
@@ -148,6 +299,8 @@ function gitlabWebHost() {
 
 /** The token used to auth a git clone over HTTPS (oauth token or PAT). */
 function gitlabCloneToken() {
+  const routed = activeInstance();
+  if (routed) return routed.token;
   return process.env.GITLAB_OAUTH_TOKEN || process.env.GITLAB_TOKEN || null;
 }
 
@@ -177,17 +330,25 @@ function encodeProject(projectId) {
 // RESOLVED to its path before the check, so `projectId: 42` cannot walk around
 // the list.
 function allowedRepos() {
+  // With a server table, the union of its `repos` IS the selection. DERIVING it
+  // (rather than also requiring GITLAB_ALLOWED_REPOS to be set and to agree)
+  // keeps ONE place deciding what is reachable — CLAUDE.md's two-places rule.
+  // parseInstances rejects an entry with no repos, so this is never empty.
+  const instances = gitlabInstances();
+  if (instances) {
+    const union = new Set<string>();
+    for (const inst of instances) for (const p of inst.repos) union.add(p);
+    return union;
+  }
   const raw = process.env.GITLAB_ALLOWED_REPOS;
   if (typeof raw !== 'string' || !raw.trim()) return null; // unrestricted
-  const set = new Set(
-    raw.split(',').map((s) => s.trim().replace(/^\/+|\/+$/g, '').toLowerCase()).filter(Boolean),
-  );
+  const set = new Set(raw.split(',').map(normalizeRepoPath).filter(Boolean));
   return set.size ? set : null;
 }
 
 function isAllowedPath(set, path) {
   if (!set) return true;
-  const p = String(path || '').trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+  const p = normalizeRepoPath(path);
   return p !== '' && set.has(p);
 }
 
@@ -217,6 +378,797 @@ async function resolveProjectPath(ident) {
   }
 }
 
+/**
+ * Resolve what a tool call named to { path, instance } — the ONE place that
+ * decides both "which repo is this" and "which server owns it".
+ *
+ *  - single-server (no table): `instance` is null and `path` is exactly what
+ *    resolveProjectPath() returned before. Unchanged.
+ *  - multi-server: the entry whose `repos` claims the path wins. A NUMERIC id
+ *    is probed against each server IN TURN, each with its OWN token, because a
+ *    project id is only meaningful on the server that issued it — so
+ *    `projectId: 42` cannot walk onto a host that never minted it.
+ *
+ * `instance: null` in multi-server mode means nothing claims it; the caller
+ * then denies. There is no "first instance" fallback by design.
+ */
+async function routeNamedProject(ident: string, instances: GitlabInstance[] | null) {
+  if (!instances) return { path: await resolveProjectPath(ident), instance: null as GitlabInstance | null };
+  if (!/^\d+$/.test(ident)) {
+    const p = normalizeRepoPath(ident);
+    return { path: ident, instance: instances.find((i) => i.repos.has(p)) || null };
+  }
+  let firstResolved: string | null = null;
+  for (const inst of instances) {
+    const path = await routedInstance.run(inst, () => resolveProjectPath(ident));
+    if (!path) continue;
+    if (firstResolved === null) firstResolved = path;
+    // The path must be claimed by the SERVER THAT RESOLVED IT. Id 42 on server
+    // A naming a path server B owns is a different project that happens to
+    // share a name — allowing it would answer from the wrong host.
+    if (inst.repos.has(normalizeRepoPath(path))) return { path, instance: inst };
+  }
+  return { path: firstResolved, instance: null as GitlabInstance | null };
+}
+
+/**
+ * Dispatch ONE gitlab_* tool. Lifted out of handleToolCall so the whole
+ * dispatch — every nested glFetch, and the clone's host+token — can be run
+ * INSIDE the routed instance (AsyncLocalStorage). Routing therefore cannot
+ * be forgotten by a tool: it is bound around the switch, not inside a case.
+ */
+async function dispatchTool(name, args) {
+  switch (name) {
+    case 'gitlab_clone': {
+      // Clone a GitLab repo locally so the agent can read code OUTSIDE the
+      // MR diff (callers, shared types, cross-repo contracts). Mirrors
+      // github_clone. Accepts a full project PATH ("group/repo") or a
+      // numeric projectId (resolved to its path via the API).
+      const { projectPath, projectId, destination, branch } = args || {};
+      let path = projectPath && String(projectPath).trim();
+      if (!path && projectId != null) {
+        if (/^\d+$/.test(String(projectId))) {
+          const proj = await glFetch(`/projects/${encodeProject(projectId)}`);
+          path = proj?.path_with_namespace;
+        } else {
+          path = String(projectId).trim();
+        }
+      }
+      if (!path) return JSON.stringify({ error: 'projectPath (e.g. "group/repo") or a numeric projectId is required' });
+
+      const token = gitlabCloneToken();
+      if (!token) return JSON.stringify({ error: 'GitLab is not connected (no token to authenticate the clone).' });
+
+      const { execSync } = await import('child_process');
+      const { join, resolve: resolvePath } = await import('path');
+      const { existsSync, mkdirSync } = await import('fs');
+
+      // Default into the workspace's .zibby/repos (same convention as the
+      // git skill) so the agent's Read/Grep/Glob tools can reach it.
+      const baseDir = destination
+        ? resolvePath(destination)
+        : resolvePath(process.cwd(), '.zibby', 'repos');
+      const repoName = path.split('/').filter(Boolean).pop();
+      const destPath = join(baseDir, repoName);
+      mkdirSync(baseDir, { recursive: true });
+
+      if (existsSync(destPath)) {
+        return JSON.stringify({ success: true, path: destPath, message: `Already cloned at ${destPath}`, alreadyCloned: true });
+      }
+
+      const host = gitlabWebHost().replace(/^https?:\/\//, '');
+      const scheme = gitlabWebHost().startsWith('http://') ? 'http' : 'https';
+      const repoUrl = `${scheme}://oauth2:${token}@${host}/${path}.git`;
+      const branchFlag = branch ? `--branch "${String(branch).replace(/"/g, '')}" ` : '';
+      try {
+        execSync(`git clone --depth 1 ${branchFlag}${repoUrl} "${destPath}"`, {
+          stdio: 'pipe',
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        });
+        // SECURITY (§5): strip `oauth2:<token>@host` the clone baked into
+        // .git/config so the untrusted-input agent can't `cat .git/config`
+        // to exfiltrate the GitLab token. Deterministic push nodes re-inject
+        // transiently at push time. See scrubClonedRemoteSync.
+        const cleanUrl = `${scheme}://${host}/${path}.git`;
+        scrubClonedRemoteSync(execSync, destPath, cleanUrl, token, 'gitlab_clone');
+        const contents = execSync(`ls -la "${destPath}"`, { encoding: 'utf-8' });
+        return JSON.stringify({
+          success: true,
+          path: destPath,
+          message: `Cloned ${path} to ${destPath}`,
+          contents: contents.split('\n').slice(0, 30).join('\n'),
+        });
+      } catch (err) {
+        // Never leak the token in an error string: git's stderr / execSync's
+        // error echo the full `git clone <repoUrl>` command, which carries
+        // `oauth2:<token>@host`. Redact the literal token AND the whole
+        // authenticated URL userinfo (defense in depth).
+        const safe = String(err.message || err)
+          .split(token).join('***')
+          .replace(/oauth2:[^@]*@/g, 'oauth2:***@');
+        return JSON.stringify({ error: `Clone failed: ${safe}` });
+      }
+    }
+
+    case 'gitlab_create_mr': {
+      // OPEN a merge request. DETERMINISTIC provider-API call via glFetch
+      // (the same PRIVATE-TOKEN/OAuth auth chokepoint every other gitlab_*
+      // tool uses) — so the returned pr_url is a REAL GitLab url
+      // (response.web_url), never one the agent invents.
+      //   POST /projects/{id}/merge_requests { source_branch, target_branch,
+      //                                        title, description }
+      // `project` is the numeric id OR the "group/repo" path (encodeProject
+      // handles both). `source_branch` must already be pushed; `target_branch`
+      // defaults to the project's default branch (looked up when omitted).
+      //
+      // Expected BUSINESS errors are returned as { success:false,
+      // skippedReason } instead of throwing — these are normal "nothing to
+      // open" outcomes, not failures:
+      //   - 409: an MR for this source/target already exists
+      //   - 400: source == target, branch missing, or no changes
+      // Genuine auth/transport errors (401/403/5xx/network) still throw
+      // (caught by the outer wrapper → { error }).
+      const project = args?.project ?? args?.projectId;
+      const sourceBranch = args?.source_branch ?? args?.sourceBranch;
+      const { title } = args || {};
+      if (!project || !sourceBranch || !title) {
+        return JSON.stringify({ error: 'project (id or "group/repo" path), source_branch, and title are required' });
+      }
+      const proj = encodeProject(project);
+      // Default target to the project's default branch when not supplied.
+      let targetBranch = args?.target_branch ?? args?.targetBranch;
+      if (!targetBranch) {
+        try {
+          const info = await glFetch(`/projects/${proj}`);
+          targetBranch = info.default_branch || 'main';
+        } catch {
+          targetBranch = 'main';
+        }
+      }
+      const payload: any = {
+        source_branch: String(sourceBranch),
+        target_branch: String(targetBranch),
+        title: String(title),
+        description: args?.description ? String(args.description) : '',
+      };
+      try {
+        const mr = await glFetch(`/projects/${proj}/merge_requests`, { method: 'POST', body: payload });
+        return JSON.stringify({
+          success: true,
+          pr_url: mr.web_url,
+          number: mr.iid,
+          branch: payload.source_branch,
+          targetBranch: payload.target_branch,
+          project: String(project),
+          provider: 'gitlab',
+          state: mr.state,
+        });
+      } catch (err) {
+        // glFetch throws `GitLab API <status>: <body>`. 409 (MR already
+        // exists) and 400 (source==target / branch missing / no changes) are
+        // the expected-business class for MR creation.
+        const msg = String(err.message || err);
+        if (/GitLab API (409|400)/.test(msg)) {
+          return JSON.stringify({
+            success: false,
+            branch: payload.source_branch,
+            targetBranch: payload.target_branch,
+            project: String(project),
+            provider: 'gitlab',
+            skippedReason: msg,
+          });
+        }
+        throw err; // genuine auth/transport error → outer wrapper → { error }
+      }
+    }
+
+    case 'gitlab_accept_mr': {
+      // ACCEPT (merge) a merge request. DETERMINISTIC provider-API call via
+      // glFetch (the SAME PRIVATE-TOKEN/OAuth auth chokepoint every other
+      // gitlab_* tool uses — no new auth) — so a reported merge SHA is the
+      // REAL merge_commit_sha from GitLab's response, never fabricated.
+      //   PUT /projects/{id}/merge_requests/{iid}/merge
+      //       { squash?, merge_commit_message?, merge_when_pipeline_succeeds? }
+      // `project` is the numeric id OR the "group/repo" path (encodeProject
+      // handles both); `iid` is the per-project MR number.
+      //
+      // Expected NON-FATAL outcomes (the MR simply can't be merged right
+      // now) are returned as { success:false, skippedReason } instead of
+      // throwing — these are normal "not mergeable yet" states, not failures:
+      //   - 405: MR not mergeable (draft/WIP, conflicts, discussions unresolved)
+      //   - 406: merge conflict / branch can't be merged
+      //   - 404: MR (or project) not found
+      // Genuine auth/transport errors (401/403/5xx/network) still throw
+      // (caught by the outer wrapper → { error }).
+      const project = args?.project ?? args?.projectId;
+      const { iid } = args || {};
+      if (!project || !iid) {
+        return JSON.stringify({ error: 'project (id or "group/repo" path) and iid are required' });
+      }
+      const proj = encodeProject(project);
+      const payload: any = {};
+      if (args.squash != null) payload.squash = !!args.squash;
+      if (args.mergeCommitMessage) payload.merge_commit_message = String(args.mergeCommitMessage);
+      if (args.mergeWhenPipelineSucceeds != null) {
+        payload.merge_when_pipeline_succeeds = !!args.mergeWhenPipelineSucceeds;
+      }
+      try {
+        const mr = await glFetch(`/projects/${proj}/merge_requests/${iid}/merge`, {
+          method: 'PUT',
+          body: payload,
+        });
+        return JSON.stringify({
+          success: true,
+          merged: true,
+          sha: mr.merge_commit_sha ?? mr.sha ?? null,
+          iid: mr.iid ?? iid,
+          project: String(project),
+          provider: 'gitlab',
+          state: mr.state,
+        });
+      } catch (err) {
+        // glFetch throws `GitLab API <status>: <body>`. 405/406/404 are the
+        // expected "can't merge right now" class for a merge call.
+        const msg = String(err.message || err);
+        if (/GitLab API (405|406|404)/.test(msg)) {
+          return JSON.stringify({
+            success: false,
+            iid,
+            project: String(project),
+            provider: 'gitlab',
+            skippedReason: msg,
+          });
+        }
+        throw err; // genuine auth/transport error → outer wrapper → { error }
+      }
+    }
+
+    case 'gitlab_get_mr': {
+      const { projectId, iid } = args || {};
+      if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
+      const mr = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests/${iid}`);
+      return JSON.stringify({
+        iid: mr.iid,
+        projectId: mr.project_id,
+        title: mr.title,
+        description: (mr.description || '').slice(0, 5000),
+        state: mr.state,
+        author: mr.author?.username,
+        sourceBranch: mr.source_branch,
+        targetBranch: mr.target_branch,
+        draft: mr.draft ?? mr.work_in_progress ?? false,
+        mergeStatus: mr.merge_status,
+        changesCount: mr.changes_count,
+        labels: Array.isArray(mr.labels) ? mr.labels : [],
+        webUrl: mr.web_url,
+        createdAt: mr.created_at,
+        updatedAt: mr.updated_at,
+        mergedAt: mr.merged_at,
+        // SHAs needed to anchor inline discussion comments on the diff.
+        diffRefs: mr.diff_refs || null,
+      });
+    }
+
+    case 'gitlab_get_mr_changes': {
+      const { projectId, iid } = args || {};
+      if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
+      // /changes returns the MR plus a `changes[]` array of per-file diffs.
+      const data = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests/${iid}/changes`);
+      const changes = Array.isArray(data.changes) ? data.changes : [];
+      return JSON.stringify({
+        iid: data.iid,
+        total: changes.length,
+        // Pass these straight to gitlab_post_mr_discussion for inline anchoring.
+        diffRefs: data.diff_refs || null,
+        files: changes.map((c) => ({
+          oldPath: c.old_path,
+          newPath: c.new_path,
+          newFile: !!c.new_file,
+          deletedFile: !!c.deleted_file,
+          renamedFile: !!c.renamed_file,
+          diff: typeof c.diff === 'string' ? c.diff.slice(0, 3000) : '',
+        })),
+      });
+    }
+
+    case 'gitlab_list_commits': {
+      // Repository commit LISTING — the window/date-range source of truth.
+      // Built for metering/insights agents: gitlab_clone is SHALLOW (depth
+      // 1), so listing history via a clone silently truncates to one
+      // commit; this hits GET /repository/commits (since/until/ref/paging,
+      // with_stats) instead. Purely additive — no existing tool covered
+      // commit listing (the tool set was MR/issue-centric).
+      const { projectId, since, until, refName, page, perPage, withStats } = args || {};
+      if (!projectId) return JSON.stringify({ error: 'projectId is required' });
+      const params = new URLSearchParams();
+      params.set('per_page', String(Math.min(Number(perPage) || 50, 100)));
+      params.set('page', String(Number(page) || 1));
+      if (since) params.set('since', since);
+      if (until) params.set('until', until);
+      if (refName) params.set('ref_name', refName);
+      if (withStats !== false) params.set('with_stats', 'true');
+      const data = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits?${params.toString()}`);
+      const commits = (Array.isArray(data) ? data : []).map((c) => ({
+        id: c.id,
+        shortId: c.short_id,
+        title: c.title,
+        authorName: c.author_name,
+        authorEmail: c.author_email,
+        authoredDate: c.authored_date,
+        committedDate: c.committed_date,
+        parentIds: Array.isArray(c.parent_ids) ? c.parent_ids : [],
+        // with_stats=true → additions/deletions/total per commit (size
+        // signals without a per-commit diff call).
+        stats: c.stats || null,
+      }));
+      // A FULL page ⇒ more pages may exist — callers MUST keep paging.
+      return JSON.stringify({
+        page: Number(page) || 1,
+        count: commits.length,
+        hasMore: commits.length >= (Math.min(Number(perPage) || 50, 100)),
+        commits,
+      });
+    }
+    case 'gitlab_get_commit': {
+      // One commit's detail + (optionally) its per-file diffs — what a
+      // scorer needs to judge a commit it found via gitlab_list_commits.
+      const { projectId, sha, includeDiff, includeMrs } = args || {};
+      if (!projectId || !sha) return JSON.stringify({ error: 'projectId and sha are required' });
+      const c = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}`);
+      // includeMrs (ADDITIVE, default false): the MRs that CONTAIN this
+      // commit — the evidence link for contribution reporting (an MR page
+      // carries description + review history; a bare commit doesn't).
+      // Best-effort: an error yields [].
+      let mergeRequests;
+      if (includeMrs) {
+        try {
+          const mrs = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}/merge_requests`);
+          mergeRequests = (Array.isArray(mrs) ? mrs : []).map((m) => ({
+            iid: m.iid,
+            title: m.title,
+            state: m.state,
+            webUrl: m.web_url,
+          }));
+        } catch { mergeRequests = []; }
+      }
+      let files;
+      if (includeDiff !== false) {
+        const diffs = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}/diff`);
+        files = (Array.isArray(diffs) ? diffs : []).map((d) => ({
+          oldPath: d.old_path,
+          newPath: d.new_path,
+          newFile: !!d.new_file,
+          deletedFile: !!d.deleted_file,
+          renamedFile: !!d.renamed_file,
+          // Same per-file cap as gitlab_get_mr_changes — enough to judge
+          // the nature/complexity of a change without unbounded payloads.
+          diff: typeof d.diff === 'string' ? d.diff.slice(0, 3000) : '',
+        }));
+      }
+      return JSON.stringify({
+        id: c.id,
+        shortId: c.short_id,
+        title: c.title,
+        message: typeof c.message === 'string' ? c.message.slice(0, 2000) : '',
+        authorName: c.author_name,
+        authorEmail: c.author_email,
+        authoredDate: c.authored_date,
+        committedDate: c.committed_date,
+        parentIds: Array.isArray(c.parent_ids) ? c.parent_ids : [],
+        stats: c.stats || null,
+        webUrl: c.web_url,
+        ...(files ? { filesChanged: files.length, files } : {}),
+        ...(mergeRequests ? { mergeRequests } : {}),
+      });
+    }
+    case 'gitlab_list_mrs': {
+      const { projectId, state, targetBranch, sourceBranch, authorUsername, labels, search, sort, orderBy, limit } = args || {};
+      if (!projectId) return JSON.stringify({ error: 'projectId is required' });
+      const params = new URLSearchParams();
+      params.set('state', state || 'opened'); // opened | closed | merged | locked | all
+      params.set('per_page', String(limit || 20));
+      params.set('order_by', orderBy || 'updated_at'); // created_at | updated_at | title
+      params.set('sort', sort || 'desc');
+      if (targetBranch) params.set('target_branch', targetBranch);
+      if (sourceBranch) params.set('source_branch', sourceBranch);
+      if (authorUsername) params.set('author_username', authorUsername);
+      if (labels) params.set('labels', Array.isArray(labels) ? labels.join(',') : labels);
+      if (search) params.set('search', search);
+      const data = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests?${params.toString()}`);
+      const mrs = (Array.isArray(data) ? data : []).map((m) => ({
+        iid: m.iid,
+        title: m.title,
+        state: m.state,
+        author: m.author?.username,
+        sourceBranch: m.source_branch,
+        targetBranch: m.target_branch,
+        draft: m.draft ?? m.work_in_progress ?? false,
+        labels: Array.isArray(m.labels) ? m.labels : [],
+        webUrl: m.web_url,
+        createdAt: m.created_at,
+        updatedAt: m.updated_at,
+      }));
+      return JSON.stringify({ count: mrs.length, mergeRequests: mrs });
+    }
+
+    case 'gitlab_list_mr_notes': {
+      const { projectId, iid, limit } = args || {};
+      if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
+      const notes = await glFetch(
+        `/projects/${encodeProject(projectId)}/merge_requests/${iid}/notes?per_page=${limit || 50}&sort=asc&order_by=created_at`,
+      );
+      return JSON.stringify({
+        total: Array.isArray(notes) ? notes.length : 0,
+        notes: (Array.isArray(notes) ? notes : []).map((n) => ({
+          id: n.id,
+          author: n.author?.username,
+          body: (n.body || '').slice(0, 1000),
+          system: !!n.system,
+          createdAt: n.created_at,
+        })),
+      });
+    }
+
+    case 'gitlab_post_mr_note': {
+      // General (non-inline) comment on an MR.
+      const { projectId, iid, body } = args || {};
+      if (!projectId || !iid || !body) return JSON.stringify({ error: 'projectId, iid, and body are required' });
+      const note = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests/${iid}/notes`, {
+        method: 'POST',
+        body: { body: String(body) },
+      });
+      return JSON.stringify({ ok: true, id: note.id, createdAt: note.created_at });
+    }
+
+    case 'gitlab_post_mr_discussion': {
+      // Inline review comment anchored to a file/line in the MR diff.
+      //
+      // GitLab anchors inline discussions with a `position` object that
+      // carries the MR's diff_refs (base/start/head SHAs) plus the file
+      // path and line. Provide newLine for added/changed lines (RIGHT side
+      // of the diff) and/or oldLine for removed/context lines (LEFT side).
+      // diff_refs come from gitlab_get_mr / gitlab_get_mr_changes; if the
+      // caller omits them we fetch the MR to resolve them.
+      const { projectId, iid, path, oldPath, newLine, oldLine, body } = args || {};
+      if (!projectId || !iid || !path || !body) {
+        return JSON.stringify({ error: 'projectId, iid, path, and body are required' });
+      }
+      if (newLine == null && oldLine == null) {
+        return JSON.stringify({ error: 'newLine (added/changed line) or oldLine (removed/context line) is required to anchor an inline comment' });
+      }
+      const proj = encodeProject(projectId);
+      let diffRefs = args.diffRefs || null;
+      if (!diffRefs) {
+        const mr = await glFetch(`/projects/${proj}/merge_requests/${iid}`);
+        diffRefs = mr.diff_refs || null;
+      }
+      if (!diffRefs || !diffRefs.head_sha) {
+        return JSON.stringify({ error: 'could not resolve diff_refs for this MR — cannot anchor an inline comment. Use gitlab_post_mr_note instead.' });
+      }
+      const position: any = {
+        base_sha: diffRefs.base_sha,
+        start_sha: diffRefs.start_sha,
+        head_sha: diffRefs.head_sha,
+        position_type: 'text',
+        new_path: path,
+        old_path: oldPath || path,
+      };
+      if (newLine != null) position.new_line = Number(newLine);
+      if (oldLine != null) position.old_line = Number(oldLine);
+      try {
+        const disc = await glFetch(`/projects/${proj}/merge_requests/${iid}/discussions`, {
+          method: 'POST',
+          body: { body: String(body), position },
+        });
+        return JSON.stringify({ ok: true, discussionId: disc.id });
+      } catch (e) {
+        // A bad line anchor is the common GitLab failure (the line must be
+        // part of the diff). Surface a clear, actionable error.
+        return JSON.stringify({
+          ok: false,
+          error: `inline anchor rejected (${e.message}). The line must be part of the MR diff. Fall back to gitlab_post_mr_note with the file/line in the text.`,
+        });
+      }
+    }
+
+    case 'gitlab_create_mr_review': {
+      // Convenience: post a full review in one call — a summary NOTE plus
+      // optional inline DISCUSSIONS. GitLab has no single "create review"
+      // call like GitHub, so this just composes gitlab_post_mr_note +
+      // gitlab_post_mr_discussion. Inline failures are non-fatal so one
+      // mis-positioned comment doesn't drop the whole review.
+      const { projectId, iid, body, comments } = args || {};
+      if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
+      const proj = encodeProject(projectId);
+
+      const inline = Array.isArray(comments)
+        ? comments.filter((c) => c && c.path && c.body && (c.newLine != null || c.oldLine != null))
+        : [];
+
+      if (!body && inline.length === 0) {
+        return JSON.stringify({ error: 'a review needs a body and/or inline comments' });
+      }
+
+      let diffRefs = args.diffRefs || null;
+      if (inline.length > 0 && !diffRefs) {
+        const mr = await glFetch(`/projects/${proj}/merge_requests/${iid}`);
+        diffRefs = mr.diff_refs || null;
+      }
+
+      // DEDUP: read the MR's existing discussions to find (a) fingerprints of
+      // inline comments THIS bot already posted (hidden zbfp markers) and (b)
+      // the review-summary note to UPDATE. So a RE-review (new commit / re-
+      // @mention) only posts NEW findings + refreshes one summary, instead of
+      // piling up duplicate threads. Best-effort: on any read failure, treat
+      // as "nothing posted yet" and post everything (never blocks a review).
+      const existingFps = new Set();
+      let summaryNoteId = null;
+      try {
+        for (let page = 1; page <= 20; page += 1) {
+          const disc = await glFetch(`/projects/${proj}/merge_requests/${iid}/discussions?per_page=100&page=${page}`);
+          if (!Array.isArray(disc) || disc.length === 0) break;
+          for (const d of disc) {
+            for (const n of (d.notes || [])) {
+              const fp = extractFp(n.body);
+              if (fp) existingFps.add(fp);
+              if (summaryNoteId == null && hasSummaryMarker(n.body)) summaryNoteId = n.id;
+            }
+          }
+          if (disc.length < 100) break;
+        }
+      } catch { /* best-effort — post everything */ }
+
+      // Summary note: UPDATE the existing one (if any) instead of re-posting.
+      let notePosted = false;
+      let summaryUpdated = false;
+      if (body) {
+        const summaryBody = `${String(body)}${SUMMARY_MARKER}`;
+        try {
+          if (summaryNoteId != null) {
+            await glFetch(`/projects/${proj}/merge_requests/${iid}/notes/${summaryNoteId}`, {
+              method: 'PUT', body: { body: summaryBody },
+            });
+            summaryUpdated = true;
+          } else {
+            await glFetch(`/projects/${proj}/merge_requests/${iid}/notes`, {
+              method: 'POST', body: { body: summaryBody },
+            });
+          }
+          notePosted = true;
+        } catch (e) {
+          // fall back to a plain post so the summary is never lost
+          await glFetch(`/projects/${proj}/merge_requests/${iid}/notes`, { method: 'POST', body: { body: summaryBody } });
+          notePosted = true;
+        }
+      }
+
+      // Inline: drop findings already posted (by content fingerprint); stamp
+      // the survivors with a marker so the NEXT review recognizes them.
+      const { toPost, skipped: inlineSkipped } = dedupeInline(inline, existingFps);
+
+      let inlinePosted = 0;
+      const inlineErrors = [];
+      if (toPost.length > 0 && diffRefs) {
+        for (const c of toPost) {
+          const position: any = {
+            base_sha: diffRefs.base_sha,
+            start_sha: diffRefs.start_sha,
+            head_sha: diffRefs.head_sha,
+            position_type: 'text',
+            new_path: c.path,
+            old_path: c.oldPath || c.path,
+          };
+          if (c.newLine != null) position.new_line = Number(c.newLine);
+          if (c.oldLine != null) position.old_line = Number(c.oldLine);
+          try {
+            await glFetch(`/projects/${proj}/merge_requests/${iid}/discussions`, {
+              method: 'POST',
+              body: { body: String(c.body), position },
+            });
+            inlinePosted += 1;
+          } catch (e) {
+            inlineErrors.push(`${c.path}:${c.newLine ?? c.oldLine} — ${e.message}`);
+          }
+        }
+      } else if (toPost.length > 0 && !diffRefs) {
+        inlineErrors.push('no diff_refs available — inline comments skipped (pass diffRefs from gitlab_get_mr)');
+      }
+
+      return JSON.stringify({
+        ok: true,
+        notePosted,
+        summaryUpdated,
+        inlinePosted,
+        inlineSkipped: inlineSkipped || undefined,
+        inlineErrors: inlineErrors.length ? inlineErrors : undefined,
+      });
+    }
+
+    case 'gitlab_get_discussion': {
+      // Read a single MR DISCUSSION (the GitLab analog of a GitHub review
+      // thread): all its notes plus the diff position the discussion is
+      // anchored to (file + line). Used by the conversational
+      // comment-response flow to answer a human's reply to the bot's review
+      // discussion IN CONTEXT.
+      //
+      // GET /projects/{id}/merge_requests/{iid}/discussions/{discussion_id}
+      // returns { id, notes: [...] }; the FIRST note carries the `position`
+      // (new_path / new_line / old_line / diff SHAs) when it's an inline
+      // diff discussion. We surface that anchor + every note in order.
+      const { projectId, iid, discussionId } = args || {};
+      if (!projectId || !iid || !discussionId) {
+        return JSON.stringify({ error: 'projectId, iid, and discussionId are required' });
+      }
+      const disc = await glFetch(
+        `/projects/${encodeProject(projectId)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}`,
+      );
+      const notes = Array.isArray(disc.notes) ? disc.notes : [];
+      const anchor = notes.find((n) => n.position) || null;
+      const pos = anchor ? anchor.position : null;
+      return JSON.stringify({
+        discussionId: disc.id,
+        individualNote: !!disc.individual_note,
+        path: pos ? (pos.new_path || pos.old_path || null) : null,
+        newLine: pos ? (pos.new_line ?? null) : null,
+        oldLine: pos ? (pos.old_line ?? null) : null,
+        diffRefs: pos
+          ? { base_sha: pos.base_sha, start_sha: pos.start_sha, head_sha: pos.head_sha }
+          : null,
+        notes: notes.map((n) => ({
+          id: n.id,
+          author: n.author?.username,
+          body: (n.body || '').slice(0, 4000),
+          system: !!n.system,
+          createdAt: n.created_at,
+        })),
+      });
+    }
+
+    case 'gitlab_reply_discussion': {
+      // Reply IN-THREAD to an existing MR discussion (the conversational
+      // reply — a new note appended to the SAME discussion, NOT a fresh
+      // review). Mirrors:
+      // POST /projects/{id}/merge_requests/{iid}/discussions/{discussion_id}/notes
+      const { projectId, iid, discussionId, body } = args || {};
+      if (!projectId || !iid || !discussionId || !body) {
+        return JSON.stringify({ error: 'projectId, iid, discussionId, and body are required' });
+      }
+      const note = await glFetch(
+        `/projects/${encodeProject(projectId)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}/notes`,
+        { method: 'POST', body: { body: String(body) } },
+      );
+      return JSON.stringify({ ok: true, id: note.id, createdAt: note.created_at });
+    }
+
+    // ---- Discovery (the provider-agnostic "list accessible repos/projects"
+    // capability — the GitLab side of github_list_repos). Lets a cross-repo
+    // review agent enumerate the projects this token can see so it can clone
+    // a RELATED project when a change's correctness depends on it. Same
+    // input ({ query?, limit? }) and same normalized output shape as
+    // github_list_repos: an array of { fullPath, name, webUrl, defaultBranch,
+    // visibility } plus a `truncated` flag. Accessible set = whatever the
+    // token/bot can see (membership=true scopes to the caller's projects). ----
+    case 'gitlab_list_projects': {
+      const { query, limit } = args || {};
+      // Cap results: default 50, hard max 200 (mirrors github_list_repos).
+      const cap = Math.min(Number(limit) > 0 ? Number(limit) : 50, 200);
+      const params = new URLSearchParams();
+      params.set('membership', 'true'); // only projects the token is a member of
+      params.set('simple', 'true'); // lighter payload (still carries the fields we map)
+      params.set('order_by', 'last_activity_at');
+      params.set('sort', 'desc');
+      // Fetch one extra so we can tell the caller the list was truncated.
+      params.set('per_page', String(Math.min(cap + 1, 100)));
+      if (query) params.set('search', String(query));
+      const page = async () => {
+        const data = await glFetch(`/projects?${params.toString()}`);
+        return Array.isArray(data) ? data : [];
+      };
+      // ENUMERATION is the other half of BOTH jobs.
+      //
+      // Of the GATE: the pre-call check can only judge a project the caller
+      // NAMED; this tool names none, so without a filter the allowlist would
+      // still hand back the whole instance — which is exactly how a project
+      // that had selected one repo was shown twelve.
+      //
+      // And of ROUTING: this is the one tool with no single server to route to,
+      // so it asks EVERY declared one. A single-host enumeration would report
+      // only the repos on whichever server the env happened to name, which is
+      // the same invisibility the table exists to fix. Each server is asked
+      // with ITS OWN token and its answer filtered by ITS OWN repos, so a path
+      // another server owns can never arrive via the wrong host.
+      const instances = gitlabInstances();
+      const allow = allowedRepos();
+      const all: Array<{ p: any, host: string | null }> = [];
+      for (const inst of (instances || [null])) {
+        const rows = inst ? await routedInstance.run(inst, page) : await page();
+        for (const p of rows) {
+          if (isAllowedPath(inst ? inst.repos : allow, p && p.path_with_namespace)) {
+            all.push({ p, host: inst ? inst.webHost : null });
+          }
+        }
+      }
+      const truncated = all.length > cap;
+      const projects = all.slice(0, cap).map(({ p, host }) => ({
+        fullPath: p.path_with_namespace, // "group/subgroup/repo"
+        name: p.name,
+        webUrl: p.web_url,
+        defaultBranch: p.default_branch || null,
+        visibility: p.visibility || null, // private | internal | public
+        // Only when there is more than one server to tell apart — the
+        // single-server response shape stays byte-identical.
+        ...(host ? { host } : {}),
+      }));
+      return JSON.stringify({ count: projects.length, truncated, projects });
+    }
+
+    // ---- Issues (ticket context for a tracker/review agent) ----
+    case 'gitlab_list_issues': {
+      const { projectId, state, labels, assigneeUsername, authorUsername, updatedAfter, search, sort, orderBy, limit } = args || {};
+      if (!projectId) return JSON.stringify({ error: 'projectId is required' });
+      const params = new URLSearchParams();
+      params.set('state', state || 'opened'); // opened | closed | all
+      params.set('per_page', String(limit || 30));
+      params.set('order_by', orderBy || 'updated_at'); // created_at | updated_at
+      params.set('sort', sort || 'desc');
+      if (labels) params.set('labels', Array.isArray(labels) ? labels.join(',') : labels);
+      if (assigneeUsername) params.set('assignee_username', assigneeUsername);
+      if (authorUsername) params.set('author_username', authorUsername);
+      if (updatedAfter) params.set('updated_after', updatedAfter); // ISO-8601 polling cursor
+      if (search) params.set('search', search);
+      const data = await glFetch(`/projects/${encodeProject(projectId)}/issues?${params.toString()}`);
+      const issues = (Array.isArray(data) ? data : []).map((i) => ({
+        iid: i.iid,
+        title: i.title,
+        state: i.state,
+        labels: Array.isArray(i.labels) ? i.labels : [],
+        author: i.author?.username,
+        assignees: (i.assignees || []).map((a) => a.username),
+        userNotesCount: i.user_notes_count,
+        webUrl: i.web_url,
+        createdAt: i.created_at,
+        updatedAt: i.updated_at,
+      }));
+      return JSON.stringify({ count: issues.length, issues });
+    }
+
+    case 'gitlab_get_issue': {
+      const { projectId, iid } = args || {};
+      if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
+      const i = await glFetch(`/projects/${encodeProject(projectId)}/issues/${iid}`);
+      return JSON.stringify({
+        iid: i.iid,
+        projectId: i.project_id,
+        title: i.title,
+        description: (i.description || '').slice(0, 5000),
+        state: i.state,
+        labels: Array.isArray(i.labels) ? i.labels : [],
+        author: i.author?.username,
+        assignees: (i.assignees || []).map((a) => a.username),
+        milestone: i.milestone?.title || null,
+        webUrl: i.web_url,
+        createdAt: i.created_at,
+        updatedAt: i.updated_at,
+        closedAt: i.closed_at,
+      });
+    }
+
+    case 'gitlab_add_issue_comment': {
+      // addComment (also the path for recording an MR link on a ticket).
+      const { projectId, iid, body } = args || {};
+      if (!projectId || !iid || !body) return JSON.stringify({ error: 'projectId, iid, and body are required' });
+      const note = await glFetch(`/projects/${encodeProject(projectId)}/issues/${iid}/notes`, {
+        method: 'POST',
+        body: { body: String(body) },
+      });
+      return JSON.stringify({ ok: true, id: note.id, createdAt: note.created_at });
+    }
+
+    default:
+      return JSON.stringify({ error: `Unknown tool: ${name}` });
+  }
+}
+
 export const gitlabSkill: any = {
   id: 'gitlab',
   // Backend-calling: the MCP child talks to Zibby's own backend — the
@@ -232,11 +1184,21 @@ export const gitlabSkill: any = {
   // This list IS the spawned MCP child's whole env, so resolveIntegrationToken
   // has no credential to reach Zibby's backend with unless it's named here.
   envKeys: [
-    'GITLAB_TOKEN', 'GITLAB_OAUTH_TOKEN', 'GITLAB_INSTANCE_URL', 'GITLAB_API_URL',
+    // GITLAB_URL is the name the workflow-executor actually injects; omitting
+    // it left the child falling back to https://gitlab.com while the run
+    // process talked to the self-managed host. Found by the envKeys tripwire in
+    // gitlab-multi-instance.test.ts, which pins this list against every
+    // process.env.GITLAB_* this module reads.
+    'GITLAB_TOKEN', 'GITLAB_OAUTH_TOKEN', 'GITLAB_URL', 'GITLAB_INSTANCE_URL', 'GITLAB_API_URL',
     // The project's repo selection. This list IS the child's whole env, so an
     // omission here silently disables the allowlist rather than erroring — the
     // fail-OPEN direction, which is why it belongs next to the token it bounds.
     'GITLAB_ALLOWED_REPOS',
+    // The multi-server table (host + token + repos per connected GitLab). Same
+    // fail-open hazard: absent here, the child sees one server and two thirds
+    // of a spanning project's repos are simply unreachable. It carries TOKENS —
+    // never log it, never echo it in an error, never return it (invariant #4).
+    'GITLAB_INSTANCES',
     'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV',
   ],
   description: 'GitLab — merge requests, diffs, MR reviews/discussions, issues',
@@ -245,7 +1207,7 @@ export const gitlabSkill: any = {
 You have access to the user's GitLab projects via the REST API (cloud gitlab.com OR self-hosted). A "merge request" (MR) is GitLab's pull request. An MR is addressed by a PROJECT (numeric id OR full path like "group/repo") and an \`iid\` (the per-project MR number shown in the URL). For projects, prefer the full path form ("group/subgroup/repo") — it's what users have. Available tools:
 
 ### Discovery
-- gitlab_list_projects: List the projects this token can access (the ones you're a member of), optionally filtered by a search query. Use to find a RELATED project worth cloning for cross-repo context.
+- gitlab_list_projects: List the projects available to this Zibby project, optionally filtered by a search query. Use to find a RELATED project worth cloning for cross-repo context. A project's repos may live on SEVERAL connected GitLab servers; the list is merged across all of them, and each entry then carries the \`host\` it lives on. Address a project by its full path either way — the right server is chosen for you.
 - gitlab_clone: Clone a project locally (shallow, auto-authenticated) to read code OUTSIDE the MR diff — callers, shared types, an existing util, or a cross-repo dependency. After cloning, use Grep/Glob/Read on the returned path. Clone SPARINGLY (only when correctness needs context beyond the diff).
 
 ### Merge requests
@@ -297,15 +1259,24 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
 
   async handleToolCall(name, args) {
     try {
-      // ── ALLOWLIST GATE — before any tool runs, and before any result leaves ──
-      // ONE place, because a per-tool check is a list someone forgets to append
-      // to: there are 25+ gitlab tools and every one of them takes a project.
+      // ── ALLOWLIST + ROUTING GATE — before any tool runs, and before any
+      // result leaves. ONE place, because a per-tool check is a list someone
+      // forgets to append to: there are 25+ gitlab tools and every one of them
+      // takes a project. The same resolution answers both questions — MAY this
+      // project reach the repo, and WHICH connected server owns it.
+      const instances = gitlabInstances();
       const allow = allowedRepos();
+      let route: GitlabInstance | null = null;
       if (allow) {
         const ident = namedProject(args);
         if (ident) {
-          const path = await resolveProjectPath(ident);
-          if (!isAllowedPath(allow, path)) {
+          const { path, instance } = await routeNamedProject(ident, instances);
+          // `!instance` in multi-server mode is its own refusal, not a
+          // duplicate of the allowlist check: a numeric id can resolve on
+          // server A to a path server B owns, which passes the UNION allowlist
+          // while naming a project A never minted. Answering it would mean
+          // asking the wrong host.
+          if (!isAllowedPath(allow, path) || (instances && !instance)) {
             // Name what IS allowed — a bare "denied" reads to the model as a
             // transient failure and it retries the same call.
             return JSON.stringify({
@@ -315,735 +1286,14 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
               allowedRepos: [...allow],
             });
           }
+          route = instance;
         }
       }
 
-      switch (name) {
-        case 'gitlab_clone': {
-          // Clone a GitLab repo locally so the agent can read code OUTSIDE the
-          // MR diff (callers, shared types, cross-repo contracts). Mirrors
-          // github_clone. Accepts a full project PATH ("group/repo") or a
-          // numeric projectId (resolved to its path via the API).
-          const { projectPath, projectId, destination, branch } = args || {};
-          let path = projectPath && String(projectPath).trim();
-          if (!path && projectId != null) {
-            if (/^\d+$/.test(String(projectId))) {
-              const proj = await glFetch(`/projects/${encodeProject(projectId)}`);
-              path = proj?.path_with_namespace;
-            } else {
-              path = String(projectId).trim();
-            }
-          }
-          if (!path) return JSON.stringify({ error: 'projectPath (e.g. "group/repo") or a numeric projectId is required' });
-
-          const token = gitlabCloneToken();
-          if (!token) return JSON.stringify({ error: 'GitLab is not connected (no token to authenticate the clone).' });
-
-          const { execSync } = await import('child_process');
-          const { join, resolve: resolvePath } = await import('path');
-          const { existsSync, mkdirSync } = await import('fs');
-
-          // Default into the workspace's .zibby/repos (same convention as the
-          // git skill) so the agent's Read/Grep/Glob tools can reach it.
-          const baseDir = destination
-            ? resolvePath(destination)
-            : resolvePath(process.cwd(), '.zibby', 'repos');
-          const repoName = path.split('/').filter(Boolean).pop();
-          const destPath = join(baseDir, repoName);
-          mkdirSync(baseDir, { recursive: true });
-
-          if (existsSync(destPath)) {
-            return JSON.stringify({ success: true, path: destPath, message: `Already cloned at ${destPath}`, alreadyCloned: true });
-          }
-
-          const host = gitlabWebHost().replace(/^https?:\/\//, '');
-          const scheme = gitlabWebHost().startsWith('http://') ? 'http' : 'https';
-          const repoUrl = `${scheme}://oauth2:${token}@${host}/${path}.git`;
-          const branchFlag = branch ? `--branch "${String(branch).replace(/"/g, '')}" ` : '';
-          try {
-            execSync(`git clone --depth 1 ${branchFlag}${repoUrl} "${destPath}"`, {
-              stdio: 'pipe',
-              env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-            });
-            // SECURITY (§5): strip `oauth2:<token>@host` the clone baked into
-            // .git/config so the untrusted-input agent can't `cat .git/config`
-            // to exfiltrate the GitLab token. Deterministic push nodes re-inject
-            // transiently at push time. See scrubClonedRemoteSync.
-            const cleanUrl = `${scheme}://${host}/${path}.git`;
-            scrubClonedRemoteSync(execSync, destPath, cleanUrl, token, 'gitlab_clone');
-            const contents = execSync(`ls -la "${destPath}"`, { encoding: 'utf-8' });
-            return JSON.stringify({
-              success: true,
-              path: destPath,
-              message: `Cloned ${path} to ${destPath}`,
-              contents: contents.split('\n').slice(0, 30).join('\n'),
-            });
-          } catch (err) {
-            // Never leak the token in an error string: git's stderr / execSync's
-            // error echo the full `git clone <repoUrl>` command, which carries
-            // `oauth2:<token>@host`. Redact the literal token AND the whole
-            // authenticated URL userinfo (defense in depth).
-            const safe = String(err.message || err)
-              .split(token).join('***')
-              .replace(/oauth2:[^@]*@/g, 'oauth2:***@');
-            return JSON.stringify({ error: `Clone failed: ${safe}` });
-          }
-        }
-
-        case 'gitlab_create_mr': {
-          // OPEN a merge request. DETERMINISTIC provider-API call via glFetch
-          // (the same PRIVATE-TOKEN/OAuth auth chokepoint every other gitlab_*
-          // tool uses) — so the returned pr_url is a REAL GitLab url
-          // (response.web_url), never one the agent invents.
-          //   POST /projects/{id}/merge_requests { source_branch, target_branch,
-          //                                        title, description }
-          // `project` is the numeric id OR the "group/repo" path (encodeProject
-          // handles both). `source_branch` must already be pushed; `target_branch`
-          // defaults to the project's default branch (looked up when omitted).
-          //
-          // Expected BUSINESS errors are returned as { success:false,
-          // skippedReason } instead of throwing — these are normal "nothing to
-          // open" outcomes, not failures:
-          //   - 409: an MR for this source/target already exists
-          //   - 400: source == target, branch missing, or no changes
-          // Genuine auth/transport errors (401/403/5xx/network) still throw
-          // (caught by the outer wrapper → { error }).
-          const project = args?.project ?? args?.projectId;
-          const sourceBranch = args?.source_branch ?? args?.sourceBranch;
-          const { title } = args || {};
-          if (!project || !sourceBranch || !title) {
-            return JSON.stringify({ error: 'project (id or "group/repo" path), source_branch, and title are required' });
-          }
-          const proj = encodeProject(project);
-          // Default target to the project's default branch when not supplied.
-          let targetBranch = args?.target_branch ?? args?.targetBranch;
-          if (!targetBranch) {
-            try {
-              const info = await glFetch(`/projects/${proj}`);
-              targetBranch = info.default_branch || 'main';
-            } catch {
-              targetBranch = 'main';
-            }
-          }
-          const payload: any = {
-            source_branch: String(sourceBranch),
-            target_branch: String(targetBranch),
-            title: String(title),
-            description: args?.description ? String(args.description) : '',
-          };
-          try {
-            const mr = await glFetch(`/projects/${proj}/merge_requests`, { method: 'POST', body: payload });
-            return JSON.stringify({
-              success: true,
-              pr_url: mr.web_url,
-              number: mr.iid,
-              branch: payload.source_branch,
-              targetBranch: payload.target_branch,
-              project: String(project),
-              provider: 'gitlab',
-              state: mr.state,
-            });
-          } catch (err) {
-            // glFetch throws `GitLab API <status>: <body>`. 409 (MR already
-            // exists) and 400 (source==target / branch missing / no changes) are
-            // the expected-business class for MR creation.
-            const msg = String(err.message || err);
-            if (/GitLab API (409|400)/.test(msg)) {
-              return JSON.stringify({
-                success: false,
-                branch: payload.source_branch,
-                targetBranch: payload.target_branch,
-                project: String(project),
-                provider: 'gitlab',
-                skippedReason: msg,
-              });
-            }
-            throw err; // genuine auth/transport error → outer wrapper → { error }
-          }
-        }
-
-        case 'gitlab_accept_mr': {
-          // ACCEPT (merge) a merge request. DETERMINISTIC provider-API call via
-          // glFetch (the SAME PRIVATE-TOKEN/OAuth auth chokepoint every other
-          // gitlab_* tool uses — no new auth) — so a reported merge SHA is the
-          // REAL merge_commit_sha from GitLab's response, never fabricated.
-          //   PUT /projects/{id}/merge_requests/{iid}/merge
-          //       { squash?, merge_commit_message?, merge_when_pipeline_succeeds? }
-          // `project` is the numeric id OR the "group/repo" path (encodeProject
-          // handles both); `iid` is the per-project MR number.
-          //
-          // Expected NON-FATAL outcomes (the MR simply can't be merged right
-          // now) are returned as { success:false, skippedReason } instead of
-          // throwing — these are normal "not mergeable yet" states, not failures:
-          //   - 405: MR not mergeable (draft/WIP, conflicts, discussions unresolved)
-          //   - 406: merge conflict / branch can't be merged
-          //   - 404: MR (or project) not found
-          // Genuine auth/transport errors (401/403/5xx/network) still throw
-          // (caught by the outer wrapper → { error }).
-          const project = args?.project ?? args?.projectId;
-          const { iid } = args || {};
-          if (!project || !iid) {
-            return JSON.stringify({ error: 'project (id or "group/repo" path) and iid are required' });
-          }
-          const proj = encodeProject(project);
-          const payload: any = {};
-          if (args.squash != null) payload.squash = !!args.squash;
-          if (args.mergeCommitMessage) payload.merge_commit_message = String(args.mergeCommitMessage);
-          if (args.mergeWhenPipelineSucceeds != null) {
-            payload.merge_when_pipeline_succeeds = !!args.mergeWhenPipelineSucceeds;
-          }
-          try {
-            const mr = await glFetch(`/projects/${proj}/merge_requests/${iid}/merge`, {
-              method: 'PUT',
-              body: payload,
-            });
-            return JSON.stringify({
-              success: true,
-              merged: true,
-              sha: mr.merge_commit_sha ?? mr.sha ?? null,
-              iid: mr.iid ?? iid,
-              project: String(project),
-              provider: 'gitlab',
-              state: mr.state,
-            });
-          } catch (err) {
-            // glFetch throws `GitLab API <status>: <body>`. 405/406/404 are the
-            // expected "can't merge right now" class for a merge call.
-            const msg = String(err.message || err);
-            if (/GitLab API (405|406|404)/.test(msg)) {
-              return JSON.stringify({
-                success: false,
-                iid,
-                project: String(project),
-                provider: 'gitlab',
-                skippedReason: msg,
-              });
-            }
-            throw err; // genuine auth/transport error → outer wrapper → { error }
-          }
-        }
-
-        case 'gitlab_get_mr': {
-          const { projectId, iid } = args || {};
-          if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
-          const mr = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests/${iid}`);
-          return JSON.stringify({
-            iid: mr.iid,
-            projectId: mr.project_id,
-            title: mr.title,
-            description: (mr.description || '').slice(0, 5000),
-            state: mr.state,
-            author: mr.author?.username,
-            sourceBranch: mr.source_branch,
-            targetBranch: mr.target_branch,
-            draft: mr.draft ?? mr.work_in_progress ?? false,
-            mergeStatus: mr.merge_status,
-            changesCount: mr.changes_count,
-            labels: Array.isArray(mr.labels) ? mr.labels : [],
-            webUrl: mr.web_url,
-            createdAt: mr.created_at,
-            updatedAt: mr.updated_at,
-            mergedAt: mr.merged_at,
-            // SHAs needed to anchor inline discussion comments on the diff.
-            diffRefs: mr.diff_refs || null,
-          });
-        }
-
-        case 'gitlab_get_mr_changes': {
-          const { projectId, iid } = args || {};
-          if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
-          // /changes returns the MR plus a `changes[]` array of per-file diffs.
-          const data = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests/${iid}/changes`);
-          const changes = Array.isArray(data.changes) ? data.changes : [];
-          return JSON.stringify({
-            iid: data.iid,
-            total: changes.length,
-            // Pass these straight to gitlab_post_mr_discussion for inline anchoring.
-            diffRefs: data.diff_refs || null,
-            files: changes.map((c) => ({
-              oldPath: c.old_path,
-              newPath: c.new_path,
-              newFile: !!c.new_file,
-              deletedFile: !!c.deleted_file,
-              renamedFile: !!c.renamed_file,
-              diff: typeof c.diff === 'string' ? c.diff.slice(0, 3000) : '',
-            })),
-          });
-        }
-
-        case 'gitlab_list_commits': {
-          // Repository commit LISTING — the window/date-range source of truth.
-          // Built for metering/insights agents: gitlab_clone is SHALLOW (depth
-          // 1), so listing history via a clone silently truncates to one
-          // commit; this hits GET /repository/commits (since/until/ref/paging,
-          // with_stats) instead. Purely additive — no existing tool covered
-          // commit listing (the tool set was MR/issue-centric).
-          const { projectId, since, until, refName, page, perPage, withStats } = args || {};
-          if (!projectId) return JSON.stringify({ error: 'projectId is required' });
-          const params = new URLSearchParams();
-          params.set('per_page', String(Math.min(Number(perPage) || 50, 100)));
-          params.set('page', String(Number(page) || 1));
-          if (since) params.set('since', since);
-          if (until) params.set('until', until);
-          if (refName) params.set('ref_name', refName);
-          if (withStats !== false) params.set('with_stats', 'true');
-          const data = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits?${params.toString()}`);
-          const commits = (Array.isArray(data) ? data : []).map((c) => ({
-            id: c.id,
-            shortId: c.short_id,
-            title: c.title,
-            authorName: c.author_name,
-            authorEmail: c.author_email,
-            authoredDate: c.authored_date,
-            committedDate: c.committed_date,
-            parentIds: Array.isArray(c.parent_ids) ? c.parent_ids : [],
-            // with_stats=true → additions/deletions/total per commit (size
-            // signals without a per-commit diff call).
-            stats: c.stats || null,
-          }));
-          // A FULL page ⇒ more pages may exist — callers MUST keep paging.
-          return JSON.stringify({
-            page: Number(page) || 1,
-            count: commits.length,
-            hasMore: commits.length >= (Math.min(Number(perPage) || 50, 100)),
-            commits,
-          });
-        }
-        case 'gitlab_get_commit': {
-          // One commit's detail + (optionally) its per-file diffs — what a
-          // scorer needs to judge a commit it found via gitlab_list_commits.
-          const { projectId, sha, includeDiff, includeMrs } = args || {};
-          if (!projectId || !sha) return JSON.stringify({ error: 'projectId and sha are required' });
-          const c = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}`);
-          // includeMrs (ADDITIVE, default false): the MRs that CONTAIN this
-          // commit — the evidence link for contribution reporting (an MR page
-          // carries description + review history; a bare commit doesn't).
-          // Best-effort: an error yields [].
-          let mergeRequests;
-          if (includeMrs) {
-            try {
-              const mrs = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}/merge_requests`);
-              mergeRequests = (Array.isArray(mrs) ? mrs : []).map((m) => ({
-                iid: m.iid,
-                title: m.title,
-                state: m.state,
-                webUrl: m.web_url,
-              }));
-            } catch { mergeRequests = []; }
-          }
-          let files;
-          if (includeDiff !== false) {
-            const diffs = await glFetch(`/projects/${encodeProject(projectId)}/repository/commits/${encodeURIComponent(sha)}/diff`);
-            files = (Array.isArray(diffs) ? diffs : []).map((d) => ({
-              oldPath: d.old_path,
-              newPath: d.new_path,
-              newFile: !!d.new_file,
-              deletedFile: !!d.deleted_file,
-              renamedFile: !!d.renamed_file,
-              // Same per-file cap as gitlab_get_mr_changes — enough to judge
-              // the nature/complexity of a change without unbounded payloads.
-              diff: typeof d.diff === 'string' ? d.diff.slice(0, 3000) : '',
-            }));
-          }
-          return JSON.stringify({
-            id: c.id,
-            shortId: c.short_id,
-            title: c.title,
-            message: typeof c.message === 'string' ? c.message.slice(0, 2000) : '',
-            authorName: c.author_name,
-            authorEmail: c.author_email,
-            authoredDate: c.authored_date,
-            committedDate: c.committed_date,
-            parentIds: Array.isArray(c.parent_ids) ? c.parent_ids : [],
-            stats: c.stats || null,
-            webUrl: c.web_url,
-            ...(files ? { filesChanged: files.length, files } : {}),
-            ...(mergeRequests ? { mergeRequests } : {}),
-          });
-        }
-        case 'gitlab_list_mrs': {
-          const { projectId, state, targetBranch, sourceBranch, authorUsername, labels, search, sort, orderBy, limit } = args || {};
-          if (!projectId) return JSON.stringify({ error: 'projectId is required' });
-          const params = new URLSearchParams();
-          params.set('state', state || 'opened'); // opened | closed | merged | locked | all
-          params.set('per_page', String(limit || 20));
-          params.set('order_by', orderBy || 'updated_at'); // created_at | updated_at | title
-          params.set('sort', sort || 'desc');
-          if (targetBranch) params.set('target_branch', targetBranch);
-          if (sourceBranch) params.set('source_branch', sourceBranch);
-          if (authorUsername) params.set('author_username', authorUsername);
-          if (labels) params.set('labels', Array.isArray(labels) ? labels.join(',') : labels);
-          if (search) params.set('search', search);
-          const data = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests?${params.toString()}`);
-          const mrs = (Array.isArray(data) ? data : []).map((m) => ({
-            iid: m.iid,
-            title: m.title,
-            state: m.state,
-            author: m.author?.username,
-            sourceBranch: m.source_branch,
-            targetBranch: m.target_branch,
-            draft: m.draft ?? m.work_in_progress ?? false,
-            labels: Array.isArray(m.labels) ? m.labels : [],
-            webUrl: m.web_url,
-            createdAt: m.created_at,
-            updatedAt: m.updated_at,
-          }));
-          return JSON.stringify({ count: mrs.length, mergeRequests: mrs });
-        }
-
-        case 'gitlab_list_mr_notes': {
-          const { projectId, iid, limit } = args || {};
-          if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
-          const notes = await glFetch(
-            `/projects/${encodeProject(projectId)}/merge_requests/${iid}/notes?per_page=${limit || 50}&sort=asc&order_by=created_at`,
-          );
-          return JSON.stringify({
-            total: Array.isArray(notes) ? notes.length : 0,
-            notes: (Array.isArray(notes) ? notes : []).map((n) => ({
-              id: n.id,
-              author: n.author?.username,
-              body: (n.body || '').slice(0, 1000),
-              system: !!n.system,
-              createdAt: n.created_at,
-            })),
-          });
-        }
-
-        case 'gitlab_post_mr_note': {
-          // General (non-inline) comment on an MR.
-          const { projectId, iid, body } = args || {};
-          if (!projectId || !iid || !body) return JSON.stringify({ error: 'projectId, iid, and body are required' });
-          const note = await glFetch(`/projects/${encodeProject(projectId)}/merge_requests/${iid}/notes`, {
-            method: 'POST',
-            body: { body: String(body) },
-          });
-          return JSON.stringify({ ok: true, id: note.id, createdAt: note.created_at });
-        }
-
-        case 'gitlab_post_mr_discussion': {
-          // Inline review comment anchored to a file/line in the MR diff.
-          //
-          // GitLab anchors inline discussions with a `position` object that
-          // carries the MR's diff_refs (base/start/head SHAs) plus the file
-          // path and line. Provide newLine for added/changed lines (RIGHT side
-          // of the diff) and/or oldLine for removed/context lines (LEFT side).
-          // diff_refs come from gitlab_get_mr / gitlab_get_mr_changes; if the
-          // caller omits them we fetch the MR to resolve them.
-          const { projectId, iid, path, oldPath, newLine, oldLine, body } = args || {};
-          if (!projectId || !iid || !path || !body) {
-            return JSON.stringify({ error: 'projectId, iid, path, and body are required' });
-          }
-          if (newLine == null && oldLine == null) {
-            return JSON.stringify({ error: 'newLine (added/changed line) or oldLine (removed/context line) is required to anchor an inline comment' });
-          }
-          const proj = encodeProject(projectId);
-          let diffRefs = args.diffRefs || null;
-          if (!diffRefs) {
-            const mr = await glFetch(`/projects/${proj}/merge_requests/${iid}`);
-            diffRefs = mr.diff_refs || null;
-          }
-          if (!diffRefs || !diffRefs.head_sha) {
-            return JSON.stringify({ error: 'could not resolve diff_refs for this MR — cannot anchor an inline comment. Use gitlab_post_mr_note instead.' });
-          }
-          const position: any = {
-            base_sha: diffRefs.base_sha,
-            start_sha: diffRefs.start_sha,
-            head_sha: diffRefs.head_sha,
-            position_type: 'text',
-            new_path: path,
-            old_path: oldPath || path,
-          };
-          if (newLine != null) position.new_line = Number(newLine);
-          if (oldLine != null) position.old_line = Number(oldLine);
-          try {
-            const disc = await glFetch(`/projects/${proj}/merge_requests/${iid}/discussions`, {
-              method: 'POST',
-              body: { body: String(body), position },
-            });
-            return JSON.stringify({ ok: true, discussionId: disc.id });
-          } catch (e) {
-            // A bad line anchor is the common GitLab failure (the line must be
-            // part of the diff). Surface a clear, actionable error.
-            return JSON.stringify({
-              ok: false,
-              error: `inline anchor rejected (${e.message}). The line must be part of the MR diff. Fall back to gitlab_post_mr_note with the file/line in the text.`,
-            });
-          }
-        }
-
-        case 'gitlab_create_mr_review': {
-          // Convenience: post a full review in one call — a summary NOTE plus
-          // optional inline DISCUSSIONS. GitLab has no single "create review"
-          // call like GitHub, so this just composes gitlab_post_mr_note +
-          // gitlab_post_mr_discussion. Inline failures are non-fatal so one
-          // mis-positioned comment doesn't drop the whole review.
-          const { projectId, iid, body, comments } = args || {};
-          if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
-          const proj = encodeProject(projectId);
-
-          const inline = Array.isArray(comments)
-            ? comments.filter((c) => c && c.path && c.body && (c.newLine != null || c.oldLine != null))
-            : [];
-
-          if (!body && inline.length === 0) {
-            return JSON.stringify({ error: 'a review needs a body and/or inline comments' });
-          }
-
-          let diffRefs = args.diffRefs || null;
-          if (inline.length > 0 && !diffRefs) {
-            const mr = await glFetch(`/projects/${proj}/merge_requests/${iid}`);
-            diffRefs = mr.diff_refs || null;
-          }
-
-          // DEDUP: read the MR's existing discussions to find (a) fingerprints of
-          // inline comments THIS bot already posted (hidden zbfp markers) and (b)
-          // the review-summary note to UPDATE. So a RE-review (new commit / re-
-          // @mention) only posts NEW findings + refreshes one summary, instead of
-          // piling up duplicate threads. Best-effort: on any read failure, treat
-          // as "nothing posted yet" and post everything (never blocks a review).
-          const existingFps = new Set();
-          let summaryNoteId = null;
-          try {
-            for (let page = 1; page <= 20; page += 1) {
-              const disc = await glFetch(`/projects/${proj}/merge_requests/${iid}/discussions?per_page=100&page=${page}`);
-              if (!Array.isArray(disc) || disc.length === 0) break;
-              for (const d of disc) {
-                for (const n of (d.notes || [])) {
-                  const fp = extractFp(n.body);
-                  if (fp) existingFps.add(fp);
-                  if (summaryNoteId == null && hasSummaryMarker(n.body)) summaryNoteId = n.id;
-                }
-              }
-              if (disc.length < 100) break;
-            }
-          } catch { /* best-effort — post everything */ }
-
-          // Summary note: UPDATE the existing one (if any) instead of re-posting.
-          let notePosted = false;
-          let summaryUpdated = false;
-          if (body) {
-            const summaryBody = `${String(body)}${SUMMARY_MARKER}`;
-            try {
-              if (summaryNoteId != null) {
-                await glFetch(`/projects/${proj}/merge_requests/${iid}/notes/${summaryNoteId}`, {
-                  method: 'PUT', body: { body: summaryBody },
-                });
-                summaryUpdated = true;
-              } else {
-                await glFetch(`/projects/${proj}/merge_requests/${iid}/notes`, {
-                  method: 'POST', body: { body: summaryBody },
-                });
-              }
-              notePosted = true;
-            } catch (e) {
-              // fall back to a plain post so the summary is never lost
-              await glFetch(`/projects/${proj}/merge_requests/${iid}/notes`, { method: 'POST', body: { body: summaryBody } });
-              notePosted = true;
-            }
-          }
-
-          // Inline: drop findings already posted (by content fingerprint); stamp
-          // the survivors with a marker so the NEXT review recognizes them.
-          const { toPost, skipped: inlineSkipped } = dedupeInline(inline, existingFps);
-
-          let inlinePosted = 0;
-          const inlineErrors = [];
-          if (toPost.length > 0 && diffRefs) {
-            for (const c of toPost) {
-              const position: any = {
-                base_sha: diffRefs.base_sha,
-                start_sha: diffRefs.start_sha,
-                head_sha: diffRefs.head_sha,
-                position_type: 'text',
-                new_path: c.path,
-                old_path: c.oldPath || c.path,
-              };
-              if (c.newLine != null) position.new_line = Number(c.newLine);
-              if (c.oldLine != null) position.old_line = Number(c.oldLine);
-              try {
-                await glFetch(`/projects/${proj}/merge_requests/${iid}/discussions`, {
-                  method: 'POST',
-                  body: { body: String(c.body), position },
-                });
-                inlinePosted += 1;
-              } catch (e) {
-                inlineErrors.push(`${c.path}:${c.newLine ?? c.oldLine} — ${e.message}`);
-              }
-            }
-          } else if (toPost.length > 0 && !diffRefs) {
-            inlineErrors.push('no diff_refs available — inline comments skipped (pass diffRefs from gitlab_get_mr)');
-          }
-
-          return JSON.stringify({
-            ok: true,
-            notePosted,
-            summaryUpdated,
-            inlinePosted,
-            inlineSkipped: inlineSkipped || undefined,
-            inlineErrors: inlineErrors.length ? inlineErrors : undefined,
-          });
-        }
-
-        case 'gitlab_get_discussion': {
-          // Read a single MR DISCUSSION (the GitLab analog of a GitHub review
-          // thread): all its notes plus the diff position the discussion is
-          // anchored to (file + line). Used by the conversational
-          // comment-response flow to answer a human's reply to the bot's review
-          // discussion IN CONTEXT.
-          //
-          // GET /projects/{id}/merge_requests/{iid}/discussions/{discussion_id}
-          // returns { id, notes: [...] }; the FIRST note carries the `position`
-          // (new_path / new_line / old_line / diff SHAs) when it's an inline
-          // diff discussion. We surface that anchor + every note in order.
-          const { projectId, iid, discussionId } = args || {};
-          if (!projectId || !iid || !discussionId) {
-            return JSON.stringify({ error: 'projectId, iid, and discussionId are required' });
-          }
-          const disc = await glFetch(
-            `/projects/${encodeProject(projectId)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}`,
-          );
-          const notes = Array.isArray(disc.notes) ? disc.notes : [];
-          const anchor = notes.find((n) => n.position) || null;
-          const pos = anchor ? anchor.position : null;
-          return JSON.stringify({
-            discussionId: disc.id,
-            individualNote: !!disc.individual_note,
-            path: pos ? (pos.new_path || pos.old_path || null) : null,
-            newLine: pos ? (pos.new_line ?? null) : null,
-            oldLine: pos ? (pos.old_line ?? null) : null,
-            diffRefs: pos
-              ? { base_sha: pos.base_sha, start_sha: pos.start_sha, head_sha: pos.head_sha }
-              : null,
-            notes: notes.map((n) => ({
-              id: n.id,
-              author: n.author?.username,
-              body: (n.body || '').slice(0, 4000),
-              system: !!n.system,
-              createdAt: n.created_at,
-            })),
-          });
-        }
-
-        case 'gitlab_reply_discussion': {
-          // Reply IN-THREAD to an existing MR discussion (the conversational
-          // reply — a new note appended to the SAME discussion, NOT a fresh
-          // review). Mirrors:
-          // POST /projects/{id}/merge_requests/{iid}/discussions/{discussion_id}/notes
-          const { projectId, iid, discussionId, body } = args || {};
-          if (!projectId || !iid || !discussionId || !body) {
-            return JSON.stringify({ error: 'projectId, iid, discussionId, and body are required' });
-          }
-          const note = await glFetch(
-            `/projects/${encodeProject(projectId)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}/notes`,
-            { method: 'POST', body: { body: String(body) } },
-          );
-          return JSON.stringify({ ok: true, id: note.id, createdAt: note.created_at });
-        }
-
-        // ---- Discovery (the provider-agnostic "list accessible repos/projects"
-        // capability — the GitLab side of github_list_repos). Lets a cross-repo
-        // review agent enumerate the projects this token can see so it can clone
-        // a RELATED project when a change's correctness depends on it. Same
-        // input ({ query?, limit? }) and same normalized output shape as
-        // github_list_repos: an array of { fullPath, name, webUrl, defaultBranch,
-        // visibility } plus a `truncated` flag. Accessible set = whatever the
-        // token/bot can see (membership=true scopes to the caller's projects). ----
-        case 'gitlab_list_projects': {
-          const { query, limit } = args || {};
-          // Cap results: default 50, hard max 200 (mirrors github_list_repos).
-          const cap = Math.min(Number(limit) > 0 ? Number(limit) : 50, 200);
-          const params = new URLSearchParams();
-          params.set('membership', 'true'); // only projects the token is a member of
-          params.set('simple', 'true'); // lighter payload (still carries the fields we map)
-          params.set('order_by', 'last_activity_at');
-          params.set('sort', 'desc');
-          // Fetch one extra so we can tell the caller the list was truncated.
-          params.set('per_page', String(Math.min(cap + 1, 100)));
-          if (query) params.set('search', String(query));
-          const data = await glFetch(`/projects?${params.toString()}`);
-          let all = Array.isArray(data) ? data : [];
-          // ENUMERATION is the other half of the gate. The pre-call check above
-          // can only judge a project the caller NAMED; this tool names none, so
-          // without this filter the allowlist would still hand back the whole
-          // instance — which is exactly how a project that had selected one repo
-          // was shown twelve.
-          if (allow) all = all.filter((p) => isAllowedPath(allow, p && p.path_with_namespace));
-          const truncated = all.length > cap;
-          const projects = all.slice(0, cap).map((p) => ({
-            fullPath: p.path_with_namespace, // "group/subgroup/repo"
-            name: p.name,
-            webUrl: p.web_url,
-            defaultBranch: p.default_branch || null,
-            visibility: p.visibility || null, // private | internal | public
-          }));
-          return JSON.stringify({ count: projects.length, truncated, projects });
-        }
-
-        // ---- Issues (ticket context for a tracker/review agent) ----
-        case 'gitlab_list_issues': {
-          const { projectId, state, labels, assigneeUsername, authorUsername, updatedAfter, search, sort, orderBy, limit } = args || {};
-          if (!projectId) return JSON.stringify({ error: 'projectId is required' });
-          const params = new URLSearchParams();
-          params.set('state', state || 'opened'); // opened | closed | all
-          params.set('per_page', String(limit || 30));
-          params.set('order_by', orderBy || 'updated_at'); // created_at | updated_at
-          params.set('sort', sort || 'desc');
-          if (labels) params.set('labels', Array.isArray(labels) ? labels.join(',') : labels);
-          if (assigneeUsername) params.set('assignee_username', assigneeUsername);
-          if (authorUsername) params.set('author_username', authorUsername);
-          if (updatedAfter) params.set('updated_after', updatedAfter); // ISO-8601 polling cursor
-          if (search) params.set('search', search);
-          const data = await glFetch(`/projects/${encodeProject(projectId)}/issues?${params.toString()}`);
-          const issues = (Array.isArray(data) ? data : []).map((i) => ({
-            iid: i.iid,
-            title: i.title,
-            state: i.state,
-            labels: Array.isArray(i.labels) ? i.labels : [],
-            author: i.author?.username,
-            assignees: (i.assignees || []).map((a) => a.username),
-            userNotesCount: i.user_notes_count,
-            webUrl: i.web_url,
-            createdAt: i.created_at,
-            updatedAt: i.updated_at,
-          }));
-          return JSON.stringify({ count: issues.length, issues });
-        }
-
-        case 'gitlab_get_issue': {
-          const { projectId, iid } = args || {};
-          if (!projectId || !iid) return JSON.stringify({ error: 'projectId and iid are required' });
-          const i = await glFetch(`/projects/${encodeProject(projectId)}/issues/${iid}`);
-          return JSON.stringify({
-            iid: i.iid,
-            projectId: i.project_id,
-            title: i.title,
-            description: (i.description || '').slice(0, 5000),
-            state: i.state,
-            labels: Array.isArray(i.labels) ? i.labels : [],
-            author: i.author?.username,
-            assignees: (i.assignees || []).map((a) => a.username),
-            milestone: i.milestone?.title || null,
-            webUrl: i.web_url,
-            createdAt: i.created_at,
-            updatedAt: i.updated_at,
-            closedAt: i.closed_at,
-          });
-        }
-
-        case 'gitlab_add_issue_comment': {
-          // addComment (also the path for recording an MR link on a ticket).
-          const { projectId, iid, body } = args || {};
-          if (!projectId || !iid || !body) return JSON.stringify({ error: 'projectId, iid, and body are required' });
-          const note = await glFetch(`/projects/${encodeProject(projectId)}/issues/${iid}/notes`, {
-            method: 'POST',
-            body: { body: String(body) },
-          });
-          return JSON.stringify({ ok: true, id: note.id, createdAt: note.created_at });
-        }
-
-        default:
-          return JSON.stringify({ error: `Unknown tool: ${name}` });
-      }
+      // Single-server mode routes nothing and runs exactly as before.
+      return route
+        ? await routedInstance.run(route, () => dispatchTool(name, args))
+        : await dispatchTool(name, args);
     } catch (e) {
       return JSON.stringify({ error: e.message });
     }
