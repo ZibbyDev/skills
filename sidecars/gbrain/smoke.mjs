@@ -24,7 +24,7 @@ const DATA_ROOT = mkdtempSync(join(tmpdir(), 'gbrain-smoke-'));
 process.env.GBRAIN_DATA_ROOT = DATA_ROOT;
 
 const {
-  ingest, query, del, drop, stat, compact, health, sweepIdleBrains, _internal,
+  ingest, query, del, drop, stat, compact, health, sweepIdleBrains, withEmbedding, _internal,
 } = await import('./brain.js');
 // The HTTP layer is exercised too — the vacuum-mode vocabulary and the drop
 // confirmation are contract, and a contract asserted only through the in-process
@@ -161,8 +161,21 @@ try {
   assert('compact ran VACUUM (the half gbrain does not provide)',
     forced.vacuumed === true && forced.vacuumError === null,
     JSON.stringify({ vacuumed: forced.vacuumed, err: forced.vacuumError }));
-  assert('the ONE-OFF pass defaults to the heavy full rewrite',
-    forced.vacuumMode === 'full', JSON.stringify(forced.vacuumMode));
+  assert('compact defaults to the LIGHT pass — there is no heavy mode any more',
+    forced.vacuumMode === 'light', JSON.stringify(forced.vacuumMode));
+
+  // TRIPWIRE. 'full' (VACUUM FULL) was removed after it was measured making a
+  // store BIGGER — a real 954 MB customer KB went to 1.1 GB on one click,
+  // because PGLite's WAL pool only ratchets up and a full-table rewrite is
+  // WAL-logged. It must stay gone, and it must fail LOUD rather than silently
+  // resolving to something else: a caller that still asks for it (an older
+  // control-plane, a saved script, a future refactor that "restores" the mode)
+  // has to hit this, not quietly cost the operator another 32 MB.
+  let fullRejected = false;
+  try { await compact(KB, { olderThanHours: 0, vacuum: 'full' }); }
+  catch (e) { fullRejected = /unknown vacuum mode/.test(String(e && e.message)); }
+  assert("vacuum:'full' is REJECTED — VACUUM FULL grows a PGLite store, never shrinks it",
+    fullRejected, 'compact accepted the removed full mode');
 
   // Nothing left to purge — the repeatable case. Must be a clean no-op, not an
   // error and not a phantom count.
@@ -174,19 +187,19 @@ try {
   // The store must survive being rewritten: still searchable, still writable,
   // and the purged pages must not resurface.
   const q8 = await query(KB, 'baking sourdough bread', 5);
-  assert('brain is still searchable after VACUUM FULL', q8.results.length > 0);
+  assert('brain is still searchable after a compact', q8.results.length > 0);
   assert('purged pages do not resurface after compact',
     !q8.results.some((r) => r.sourceId === 'doc-doomed-a' || r.sourceId === 'doc-doomed-b'),
     q8.results.map((r) => r.sourceId).join(','));
   const r9 = await ingest(KB, [{ sourceId: 'doc-post-vacuum',
     markdown: '# After\n\nWritten after the vacuum to prove writes still land.' }]);
-  assert('brain still accepts writes after VACUUM FULL', r9.upserted === 1, JSON.stringify(r9));
+  assert('brain still accepts writes after a compact', r9.upserted === 1, JSON.stringify(r9));
 
-  // ── 8b. INCREMENTAL vs ONE-OFF — the `vacuum` weight ──────────────────────
-  // 'full' is a whole-table rewrite: the right thing ONCE, the wrong thing on a
-  // timer. 'light' is the routine pass — it returns dead tuples to the free-space
-  // map (so the next ingest REUSES them instead of extending the file) without an
-  // exclusive lock or a second copy of the table. 'none' erases without either.
+  // ── 8b. the `vacuum` weight ───────────────────────────────────────────────
+  // 'light' is the only pass there is: it returns dead tuples to the free-space
+  // map (so the next ingest REUSES them instead of extending the file) without
+  // an exclusive lock or a second copy of the table. 'none' erases without
+  // either. Nothing here shrinks the file — that is `drop` + re-ingest.
   await ingest(KB, [{ sourceId: 'doc-churn', markdown: '# Churn\n\nA document about churn and reuse.' }]);
   await del(KB, ['doc-churn']);
 
@@ -234,9 +247,15 @@ try {
     httpOk.status === 200 && httpOk.body.ok === true && httpOk.body.vacuumMode === 'light',
     JSON.stringify(httpOk.body));
   const httpDefault = await handleCompact({ kbId: KB });
-  assert('POST /compact with no vacuum field defaults to full',
-    httpDefault.status === 200 && httpDefault.body.vacuumMode === 'full',
+  assert('POST /compact with no vacuum field defaults to light',
+    httpDefault.status === 200 && httpDefault.body.vacuumMode === 'light',
     JSON.stringify(httpDefault.body));
+  // The HTTP half of the tripwire above. An older control-plane still sending
+  // vacuum:'full' must get a 400 it can show, not a 200 that costs disk.
+  const httpFull = await handleCompact({ kbId: KB, vacuum: 'full' });
+  assert("POST /compact rejects the removed 'full' mode with 400",
+    httpFull.status === 400 && /vacuum must be one of/.test(httpFull.body.error || ''),
+    JSON.stringify(httpFull));
 
   // ── 8d. an EMPTY brain (exists, zero live documents) ──────────────────────
   // Distinct from an ABSENT one: there is a real store here, it just holds
@@ -269,6 +288,12 @@ try {
   assert('compact halfvec:true narrows the embedding column',
     conv.halfvec && conv.halfvec.converted === true && /^halfvec\(/.test(conv.halfvec.to || ''),
     JSON.stringify(conv.halfvec));
+  // …and it converted FROM float32. This is the "existing brains are untouched"
+  // half of the 2026-08-07 default: only a brain created WITH embeddings is born
+  // halfvec, so this one — like every brain that predates the change — is still
+  // vector(N) until its owner asks.
+  assert('a brain not born halfvec is still float32 until explicitly converted',
+    conv.halfvec && /^vector\(/.test(conv.halfvec.from || ''), JSON.stringify(conv.halfvec));
   assert('the HNSW index is rebuilt for halfvec (not left dropped)',
     conv.halfvec && conv.halfvec.indexesRebuilt >= 1, JSON.stringify(conv.halfvec));
 
@@ -298,6 +323,78 @@ try {
     lightAfterHalf.vacuumMode === 'light' && lightAfterHalf.vacuumed === true
       && lightAfterHalf.vacuumError === null,
     JSON.stringify({ mode: lightAfterHalf.vacuumMode, err: lightAfterHalf.vacuumError }));
+
+  // ── 9b. NEW brains are born halfvec (default since 2026-08-07) ─────────────
+  // A vector-capable brain gets the narrow column at CREATION, while the table
+  // is empty — so it never stores a float32 vector at all and nothing is ever
+  // rewritten. Measured cost to retrieval: zero (see brain.js
+  // `narrowNewBrainToHalfvec` for the numbers and the method).
+  //
+  // WHAT THIS CAN AND CANNOT ASSERT OFFLINE. This smoke has no embeddings API
+  // key, and a vector-capable brain needs one twice over: `gbrain init` REFUSES
+  // to create one without a provider ("No embedding provider configured",
+  // exit 1), and `put_page` embeds INLINE, so a document ingested with a
+  // placeholder key dies inside gbrain with an auth error. So these brains are
+  // created with an EMPTY ingest — which runs `ensureBrain` (the code under
+  // test) and nothing else — and the writes-into-a-halfvec-column half is
+  // covered above, by section 9's post-conversion ingest + retrieval over the
+  // identical column type. A REAL-key born-halfvec ingest+query was verified
+  // out-of-band when the default landed; it is not reproducible offline.
+  //
+  // How the column is read back WITHOUT a second SQL helper: ask compact to
+  // convert it. `already halfvec` IS the assertion — one code path, no parallel
+  // reader that could drift from the one that does the work.
+  //
+  // GBRAIN_NO_EMBEDDING must be turned OFF in the same override — it is checked
+  // FIRST in embeddingsEnabled(), so GBRAIN_EMBEDDING:'1' alone loses to the
+  // process-level '1' this file sets and the brain comes out keyword-only.
+  const VECTOR_MODE = {
+    GBRAIN_EMBEDDING: '1',
+    GBRAIN_NO_EMBEDDING: '0',
+    OPENAI_API_KEY: 'sk-smoke-offline-placeholder-never-called',
+    GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-small',
+    GBRAIN_EMBEDDING_DIMENSIONS: '1536',
+  };
+  const BORN_KB = 'acct5:proj5:store_born_halfvec';
+  await withEmbedding(VECTOR_MODE, () => ingest(BORN_KB, []));
+  assert('a vector-capable brain is created on first use',
+    (await stat(BORN_KB)).exists === true
+      && existsSync(join(_internal.brainDirFor(BORN_KB), '.gbrain', 'brain.pglite')),
+    JSON.stringify(await stat(BORN_KB)));
+
+  const bornType = await compact(BORN_KB, { olderThanHours: 0, vacuum: 'none', halfvec: true });
+  assert('a NEW vector-capable brain is born halfvec (nothing left to convert)',
+    bornType.halfvec && bornType.halfvec.converted === false
+      && bornType.halfvec.reason === 'already halfvec'
+      && /^halfvec\(1536\)$/.test(bornType.halfvec.from || ''),
+    JSON.stringify(bornType.halfvec));
+
+  // A LEXICAL brain must NOT pay for this — it has no vectors to narrow, and
+  // opening its store at creation would buy an unused DDL round-trip on every
+  // keyword-only KB. Every other brain in this file is created that way and is
+  // still float32 (asserted in section 9), which is the same guarantee.
+  const LEX_KB = 'acct5:proj5:store_lexical';
+  await ingest(LEX_KB, [{ sourceId: 'lex-1', markdown: '# Lexical\n\nNo embeddings here.' }]);
+  const lexType = await compact(LEX_KB, { olderThanHours: 0, vacuum: 'none', halfvec: true });
+  assert('a keyword-only brain is NOT narrowed at creation',
+    lexType.halfvec && lexType.halfvec.converted === true
+      && /^vector\(/.test(lexType.halfvec.from || ''),
+    JSON.stringify(lexType.halfvec));
+
+  // OPT-OUT. A box whose embedding provider emits true float32 and would rather
+  // spend the bytes sets GBRAIN_NEW_BRAIN_HALFVEC=0 and gets the old behaviour.
+  const OPTOUT_KB = 'acct5:proj5:store_optout';
+  process.env.GBRAIN_NEW_BRAIN_HALFVEC = '0';
+  try {
+    await withEmbedding(VECTOR_MODE, () => ingest(OPTOUT_KB, []));
+  } finally {
+    delete process.env.GBRAIN_NEW_BRAIN_HALFVEC;
+  }
+  const optoutType = await compact(OPTOUT_KB, { olderThanHours: 0, vacuum: 'none', halfvec: true });
+  assert('GBRAIN_NEW_BRAIN_HALFVEC=0 keeps a new brain float32',
+    optoutType.halfvec && optoutType.halfvec.converted === true
+      && /^vector\(1536\)$/.test(optoutType.halfvec.from || ''),
+    JSON.stringify(optoutType.halfvec));
 
   // ── 10. EMPTY the knowledge base — every document goes, the store stays ────
   // The control-plane's "Empty knowledge base" is this engine op: erase the

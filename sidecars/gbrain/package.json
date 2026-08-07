@@ -1,9 +1,9 @@
 {
   "name": "@zibby/sidecar-gbrain",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
-  "description": "Knowledge-base sidecar \u2014 the REAL GBrain (github.com/garrytan/gbrain, MIT) behind Zibby's engine-agnostic REST contract. A thin adapter drives the vendored `gbrain` CLI; each kbId gets its own GBrain brain for multi-tenant isolation.",
+  "description": "Knowledge-base sidecar — the REAL GBrain (github.com/garrytan/gbrain, MIT) behind Zibby's engine-agnostic REST contract. A thin adapter drives the vendored `gbrain` CLI; each kbId gets its own GBrain brain for multi-tenant isolation.",
   "main": "server.js",
   "scripts": {
     "start": "bun server.js",

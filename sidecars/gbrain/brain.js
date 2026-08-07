@@ -285,18 +285,19 @@ async function serveCall(brainDir, tool, args) {
 // So the automatic pass is deliberately the CHEAP half, and only the cheap half:
 //
 //   AUTOMATIC  hard-purge past the recovery window + VACUUM (ANALYZE)
-//   MANUAL     VACUUM FULL — see `compact`, never scheduled
+//   MANUAL     nothing — there is no heavier mode. Giving bytes back is `drop`
+//              + re-ingest (see VACUUM_MODES for why VACUUM FULL was removed).
 //
 // Why the purge is automatic and not a policy change: gbrain's own schema says
 // the 72h window is a RECOVERY window and that a purge phase hard-deletes past
 // it. Upstream always assumed something would sweep; nothing ever did. Keeping a
 // page whose recovery window expired is not a feature, it is the leak.
 //
-// Why VACUUM FULL is not: it takes an ACCESS EXCLUSIVE lock, rewrites every
-// table, needs room for a second copy, and is itself WAL-logged — measured
-// making a small store NET BIGGER (42.7 MB → 59.4 MB). At ~17 MB/s that is
-// minutes on a real store. Nothing that expensive and that lock-hungry belongs
-// on a timer.
+// Why VACUUM FULL is not here — and is no longer ANYWHERE: it takes an ACCESS
+// EXCLUSIVE lock, rewrites every table, needs room for a second copy, and is
+// itself WAL-logged. Measured NET BIGGER every time (42.7 → 59.4 MB on a smoke
+// brain; a 954 MB customer store → 1.1 GB on one click) because the PGLite WAL
+// pool only ratchets up. It was wrong on a timer AND wrong as a button.
 //
 // WHEN: when a brain goes IDLE — the moment its persistent serve is about to be
 // reaped anyway. That is the one instant where nothing is contending for the
@@ -482,9 +483,104 @@ async function ensureBrain(brainDir) {
     throw new Error(`gbrain init failed (code ${r.code}): ${(r.stderr || r.stdout || '').slice(0, 400)}`);
   }
   await writeMarker(brainDir, embeddings);
+  // Born narrow: the vector column is halfvec from the brain's FIRST byte, so
+  // it never holds a float32 row to convert later. Empty-table DDL, so this is
+  // the one moment where narrowing costs nothing and risks nothing.
+  const narrowed = embeddings ? await narrowNewBrainToHalfvec(brainDir) : null;
   // eslint-disable-next-line no-console
-  console.log(`[gbrain] brain created: embeddings=${embeddings ? 'ON (vector+BM25 hybrid)' : 'OFF (keyword/BM25 only)'}`);
+  console.log(`[gbrain] brain created: embeddings=${embeddings ? 'ON (vector+BM25 hybrid)' : 'OFF (keyword/BM25 only)'}`
+    + `${narrowed && narrowed.converted ? ` storage=${narrowed.to} (half the vector+index bytes)` : ''}`
+    + `${narrowed && !narrowed.converted && narrowed.reason ? ` storage=vector (${narrowed.reason})` : ''}`);
   _initialized.add(brainDir);
+}
+
+/**
+ * Narrow a BRAND-NEW, still-EMPTY brain's vector column to halfvec — the
+ * DEFAULT since 2026-08-07.
+ *
+ * WHY THIS IS SAFE HERE AND ONLY HERE: `compact({halfvec:true})` converts a
+ * POPULATED store, which rewrites rows that already exist — one-way, and the
+ * caller has to opt into it. This runs before the brain holds a single vector,
+ * so there is nothing to rewrite and nothing to lose: every embedding the brain
+ * will ever hold is written INTO a halfvec column, never rounded on arrival at
+ * one. Existing brains are untouched and stay opt-in.
+ *
+ * WHAT IT COSTS TO RETRIEVAL: nothing, MEASURED (2026-08-07) rather than
+ * inferred from pgvector's docs. 80 real documents / 579 indexed chunks,
+ * embedded with text-embedding-3-small at 1536d, 120 queries generated from the
+ * corpus itself (60 verbatim phrasings + 60 LLM paraphrases of them), the SAME
+ * brain measured before and after conversion so documents, chunks, embeddings
+ * and query vectors are byte-identical and element width is the only variable:
+ *
+ *   pass                             overlap@1/@5/@10  #1 unchanged  mean |Δscore|
+ *   E2E hybrid (what a caller gets)    1.000 1.000 1.000    100%          0.0 *
+ *   isolated vector lane (no BM25)     1.000 1.000 1.000    100%          0.0
+ *   … same, paraphrased queries only   1.000 1.000 1.000    100%          0.0
+ *
+ *   (*) the E2E pass shows 14/1200 ranked pairs swapping by one place. That is
+ *   gbrain's own run-to-run jitter, not this change: running the float32 pass
+ *   TWICE against the untouched brain produced the identical 14/1200. The
+ *   halfvec-attributable difference is zero on both paths.
+ *
+ * Not "negligible" — IDENTICAL, and not by luck. OpenAI's text-embedding-3-*
+ * already returns float16-VALUED components (measured over the stored vectors:
+ * every component either exactly representable in fp16 or an fp16 subnormal).
+ * A float32 `vector` column was storing 16 bits of guaranteed zero per element;
+ * halfvec drops exactly those bits, so the re-typing is BIT-EXACT for this
+ * provider — which is why the score deltas are 0.0 and not merely small.
+ *
+ * THE ZERO IS NOT A BLIND HARNESS (the negative-result rule). Three controls:
+ *   · the same metric fed MISMATCHED queries reported overlap@10 0.04 (lane) /
+ *     0.20 (E2E) — it can see a difference when there is one;
+ *   · 1200 RANDOM float32 unit vectors with full mantissa entropy, where fp16
+ *     genuinely does discard information, reported the loss: overlap@5 0.999,
+ *     6/2000 ranks moved by one place, mean |Δscore| 5.8e-6. Re-run with those
+ *     same vectors pre-rounded to fp16 it reported 0.0 again;
+ *   · both passes asserted mode='vector' (never the keyword fallback) and the
+ *     column type was read back as vector(1536) before / halfvec(1536) after.
+ * Even the full-entropy arm never moved a #1 result, so a provider that does
+ * ship true float32 loses a rounding error, not a document.
+ *
+ * WHAT IT SAVES: 17.8% of the whole store on that corpus (pg_database_size
+ * 34.4 MB → 28.3 MB, no vacuum). The vector + HNSW portion roughly halves;
+ * scale the saving off THAT share, never off the store's total.
+ *
+ * WHAT IT COSTS TO CREATE: nothing measurable. A/B over 3 brains each, the
+ * opt-out env as the only variable: 8623 ms with narrowing vs 8681 ms without
+ * — inside the noise of `gbrain init` itself, and paid once per brain lifetime.
+ *
+ * PLANNER: gbrain's registry hard-codes the built-in `embedding` column as
+ * type 'vector' (search/embedding-column.ts), so its SQL casts the query as
+ * `$1::vector` against what is now a halfvec column. VERIFIED that this still
+ * plans as `Index Scan using idx_chunks_embedding` (pgvector casts the
+ * parameter to halfvec instead of widening the column, so the
+ * halfvec_cosine_ops HNSW index stays usable) and that a brain born halfvec
+ * ingests with a real key, fills every chunk's vector, and answers a
+ * PARAPHRASED query as mode='vector' — i.e. the semantic lane really is live,
+ * not a keyword fallback wearing its name.
+ *
+ * FAIL-SOFT: any error leaves the brain exactly as gbrain built it (float32,
+ * i.e. the old behaviour) and never fails the creation — this is a storage
+ * optimisation, not a correctness requirement. Set GBRAIN_NEW_BRAIN_HALFVEC=0
+ * to keep new brains float32 (a box whose embedding provider returns true
+ * float32 and who would rather spend the bytes).
+ */
+async function narrowNewBrainToHalfvec(brainDir) {
+  if (process.env.GBRAIN_NEW_BRAIN_HALFVEC === '0') {
+    return { converted: false, reason: 'GBRAIN_NEW_BRAIN_HALFVEC=0' };
+  }
+  try {
+    // `gbrain init` is a one-shot subprocess and no serve has been started for
+    // a brain that did not exist a moment ago — but PGLite is single-writer, so
+    // ask anyway rather than depend on that ordering staying true.
+    await stopServe(brainDir);
+    return await withStore(brainDir, (db) => convertToHalfvec(db));
+  } catch (e) {
+    const reason = String((e && e.message) || e).slice(0, 200);
+    // eslint-disable-next-line no-console
+    console.warn(`[gbrain] could not narrow new brain to halfvec (keeping float32): ${reason}`);
+    return { converted: false, reason };
+  }
 }
 
 /**
@@ -526,15 +622,21 @@ export async function drop(kbId) {
 }
 
 /**
- * RECLAIM disk a deleted document still occupies. Measured, not assumed
+ * STOP a deleted document from holding disk forever. Measured, not assumed
  * (2026-08-06, 80-doc brain, 30 docs deleted = 43%):
  *
  *   soft delete (what `delete` does)  79,688 KB → 80,728 KB   (+1 MB, GROWS)
  *   + purge_deleted_pages (hard)      80,728 KB → 80,720 KB   (unchanged)
- *   + VACUUM FULL                     80,720 KB → 65,904 KB   (-14.8 MB)
  *
- * BOTH halves are required and NEITHER is enough alone — that pair is the whole
- * reason a KB only ever grows. gbrain's `delete_page` is a soft delete by
+ * The hard purge is what makes the space REUSABLE; the vacuum then hands those
+ * pages to the free-space map so the next ingest fills them instead of
+ * extending the file. Neither shrinks the file, and that is now the honest
+ * scope of this function — the third row of that table used to read
+ * `+ VACUUM FULL … -14.8 MB` and it was a TRAP: true of the table, false of the
+ * DIRECTORY, because it never counted the WAL the rewrite produced. See
+ * VACUUM_MODES.
+ *
+ * gbrain's `delete_page` is a soft delete by
  * design (72h recovery window); its own `purge_deleted_pages` then hard-deletes
  * past that window, cascading content_chunks/page_links/chunk_relations. But
  * gbrain has NO VACUUM anywhere in its source and no raw-SQL op, so a hard
@@ -548,32 +650,32 @@ export async function drop(kbId) {
  * pass 0 only when the caller has accepted that in-window deletes become
  * unrecoverable.
  *
- * ── ONE-OFF vs INCREMENTAL: that is what `vacuum` selects ────────────────────
- * VACUUM FULL is the only thing that gives BYTES BACK TO THE FILESYSTEM, and it
- * is also a full-table rewrite: it takes an ACCESS EXCLUSIVE lock, needs room
- * for a second copy of the table while it runs, and costs O(live data) —
- * measured ~17 MB/s, so ~1 minute for the ~1 GB store this was built for. That
- * is exactly right ONCE, and exactly wrong as something you run often.
- *
- * Plain `VACUUM (ANALYZE)` is the incremental half. It gives NOTHING back to
- * the filesystem — it returns dead tuples to the table's own free-space map, so
- * the NEXT ingest reuses those pages instead of extending the file. The store
- * stops GROWING rather than shrinking. It costs O(dead tuples), takes no
+ * ── THIS STOPS GROWTH. IT DOES NOT SHRINK A STORE. ───────────────────────────
+ * `VACUUM (ANALYZE)` gives NOTHING back to the filesystem — it returns dead
+ * tuples to the table's own free-space map, so the NEXT ingest reuses those
+ * pages instead of extending the file. It costs O(dead tuples), takes no
  * exclusive lock and needs no second copy, and the ANALYZE refreshes the
  * planner statistics that a large churn invalidates.
  *
- *   vacuum: 'full'  → hard purge + VACUUM FULL   — one-off reclaim, gives disk back
  *   vacuum: 'light' → hard purge + VACUUM ANALYZE — routine pass, stops the growth
  *   vacuum: 'none'  → hard purge only             — reclaim nothing, just erase
  *
+ * There is deliberately NO mode here that shrinks a bloated store — see
+ * VACUUM_MODES for the measurements that removed 'full'. To actually get bytes
+ * back, `drop` the brain and re-ingest: that removes the directory outright, so
+ * the WAL pool goes with it and the brain comes back halfvec.
+ *
  * A FIXED vocabulary, validated by the caller (server.js) — an unrecognized
  * value is REJECTED, never coerced to a default, because coercion here silently
- * runs the wrong weight of operation on a customer's 1 GB store.
+ * runs the wrong weight of operation on a customer's 1 GB store. 'full' is now
+ * one of those rejected values, on purpose: a caller still asking for it (an
+ * older control-plane, a saved script) gets a loud 400 rather than the quiet
+ * +32 MB it used to get.
  *
  * The 'light' pass ALSO runs BY ITSELF, automatically, when a brain goes idle —
- * see `sweepIdleBrains`. 'full' never does.
+ * see `sweepIdleBrains`.
  */
-export async function compact(kbId, { olderThanHours = 72, vacuum = 'full', halfvec = false } = {}) {
+export async function compact(kbId, { olderThanHours = 72, vacuum = 'light', halfvec = false } = {}) {
   // REJECT an unknown mode rather than coercing it, and reject it BEFORE the
   // hard purge — a typo must not cost the caller a destructive step it then
   // can't finish. server.js validates first, so this only fires for an
@@ -638,16 +740,19 @@ async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label 
     }
 
     const afterBytes = await dirSizeBytes(brainDir);
-    // Signed on purpose: VACUUM FULL rewrites every table, and that rewrite is
-    // itself WAL-logged. On a SMALL brain the new WAL segments outweigh what
-    // the rewrite frees and the directory ends up BIGGER (measured: a 42.7 MB
-    // smoke brain went to 59.4 MB). Clamping this at 0 would report that as
-    // "reclaimed nothing" instead of "cost you 17 MB" — the caller must be able
-    // to see it, so compaction stays worth doing only where it actually pays
-    // (large, churned stores — the 80-doc brain above reclaimed 14.8 MB).
+    // Signed on purpose, and measured over the whole DIRECTORY rather than the
+    // table: a pass can still end up net-negative (any WAL it writes lands here
+    // too), and clamping at 0 would render that as "reclaimed nothing" instead
+    // of "cost you N bytes". That distinction is not academic — it is the
+    // signal that was present in this very log line, and ignored, while a
+    // VACUUM FULL button shipped that made a 954 MB store 1.1 GB.
     const reclaimedBytes = beforeBytes - afterBytes;
     // eslint-disable-next-line no-console
-    console.log(`[gbrain] ${label} ${brainDir}: purged=${purgedCount} vacuum=${mode}${vacuumed ? '' : '(failed)'} `
+    // `(failed)` ONLY when a vacuum was actually attempted and did not run.
+    // Keyed on `vacuumed` alone it printed "vacuum=none(failed)" for the mode
+    // that runs no vacuum BY DEFINITION — a diagnostic reporting a failure that
+    // never happened, on the one line an operator reads to decide if it did.
+    console.log(`[gbrain] ${label} ${brainDir}: purged=${purgedCount} vacuum=${mode}${mode !== 'none' && !vacuumed ? '(failed)' : ''} `
       + `${halfvecResult && halfvecResult.converted ? 'halfvec=yes ' : ''}`
       + `${beforeBytes} → ${afterBytes} bytes (${reclaimedBytes >= 0 ? 'reclaimed' : 'GREW BY'} `
       + `${Math.abs(reclaimedBytes)})`);
@@ -677,9 +782,38 @@ async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label 
  * 'light' is `VACUUM (ANALYZE)`, not bare `VACUUM`: after the churn that makes a
  * store worth vacuuming, its planner statistics are stale too, and refreshing
  * them is the cheap part of a pass that is already walking the table.
+ *
+ * ── 'full' IS GONE. `VACUUM FULL` COSTS MORE THAN IT RETURNS HERE ────────────
+ * It shipped (0.3.2) as a "reclaim disk space" operator action and was WRONG on
+ * a real store. VACUUM FULL rewrites every table and the rewrite is WAL-logged;
+ * under PGLite the WAL pool then only ever ratchets UP. Measured on a brain that
+ * had nothing left to reclaim:
+ *
+ *   run #1   base 61,040 → 57,160 KB   WAL 32,768 → 49,152 KB   NET +12 MB
+ *   run #2   base 57,160 → 57,080 KB   WAL      unchanged       net  ~0
+ *   run #3   base 57,080 → 57,000 KB   WAL 49,152 → 81,920 KB   NET +32 MB
+ *
+ * A live 954 MB customer store went to 1.1 GB on one click. The WAL does not
+ * come back: CHECKPOINT is a no-op (verified twice), and `ALTER SYSTEM` on
+ * max_wal_size/min_wal_size returns ok while the values read back unchanged —
+ * PGLite never reloads the config. So the growth is one-way and unbounded up to
+ * max_wal_size (1 GB by default), which is exactly the leak this whole module
+ * exists to stop.
+ *
+ * The two things that DO work, and are what callers get instead:
+ *   - STOP THE GROWTH → 'light', automatically, on idle (`sweepIdleBrains`).
+ *     No table rewrite, so no WAL ratchet.
+ *   - GIVE THE BYTES BACK → `drop` the brain and re-ingest. It `rm -rf`s the
+ *     directory, so base bloat AND the WAL pool go with it, and the brain is
+ *     reborn halfvec (`narrowNewBrainToHalfvec`) — narrower than the one it
+ *     replaced. Deterministic, and the only thing measured to actually shrink a
+ *     bloated store.
+ *
+ * Do NOT re-add 'full' without a measurement that includes the WAL directory.
+ * The bytes freed inside the table were real every single time; the reason this
+ * was still a net loss was never visible in the table-level numbers alone.
  */
 const VACUUM_MODES = {
-  full: 'VACUUM FULL',
   light: 'VACUUM (ANALYZE)',
   none: null,
 };
@@ -734,13 +868,27 @@ async function withStore(brainDir, fn) {
  * on halfvec too, so the SQL gbrain generates keeps working (verified — queries
  * still return mode=vector, and new ingests still embed and land).
  *
- * ONE-WAY: float16 has ~3 decimal digits of mantissa, so the discarded
- * precision cannot be recovered by widening the column back. Recall impact is
- * negligible for cosine ranking (the standard result behind pgvector's halfvec
- * support), but it is a real, permanent change of stored data.
+ * ONE-WAY in principle: float16 has ~3 decimal digits of mantissa, so anything
+ * it discards cannot be recovered by widening the column back. What it actually
+ * discards, MEASURED (2026-08-07, full method + numbers in
+ * `narrowNewBrainToHalfvec`): NOTHING for an OpenAI-embedded store — 120
+ * queries over 80 real documents, top-1/5/10 overlap 1.000 and every score
+ * delta exactly 0.0, on the hybrid path AND on the isolated vector lane,
+ * because text-embedding-3-* already returns float16-valued components. The
+ * earlier "precision loss is negligible" line here was borrowed from pgvector's
+ * documentation and had never been checked against this store; it is now, and
+ * the answer is stronger than negligible. A provider that does emit true
+ * float32 was measured too (synthetic full-entropy vectors): overlap@5 0.999,
+ * top-1 never moved.
+ *
+ * Still opt-in for a POPULATED brain, because it rewrites data the caller
+ * already has and the caller — not this function — owns that decision. Brand-new
+ * brains are born halfvec by default (`narrowNewBrainToHalfvec`), where there is
+ * no stored data to rewrite at all.
  *
  * IDEMPOTENT: an already-halfvec column returns converted:false and touches
- * nothing, so this is safe to include in a repeatable maintenance action.
+ * nothing, so this is safe to include in a repeatable maintenance action — and
+ * it is now the NORMAL result for a brain created after 2026-08-07.
  */
 async function convertToHalfvec(db) {
   const col = (await db.query(`

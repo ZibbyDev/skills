@@ -12,7 +12,7 @@
  *   POST /delete  { kbId, sourceIds:[...] } → { ok, deleted }
  *   POST /stat    { kbId } → { ok, exists, sizeBytes, docs }
  *   POST /drop    { kbId, confirm:true } → { ok, dropped }
- *   POST /compact { kbId, olderThanHours?, vacuum?:'full'|'light'|'none', halfvec? }
+ *   POST /compact { kbId, olderThanHours?, vacuum?:'light'|'none', halfvec? }
  *                 → { ok, purgedCount, vacuumMode, vacuumed, beforeBytes,
  *                     afterBytes, reclaimedBytes, halfvec }
  *   GET  /health  → { ok }
@@ -219,24 +219,28 @@ async function handleStat(body) {
 }
 
 /**
- * COMPACT — return the disk a deleted document still occupies. LIVE DOCUMENTS
+ * COMPACT — stop a deleted document from holding disk forever. LIVE DOCUMENTS
  * ARE NEVER TOUCHED; this is the one data-removing op that is not destructive
  * to anything the user can still see.
  *
  * `/delete` is a SOFT delete (gbrain's 72h recovery window), and a soft-deleted
  * page's chunks, vectors and HNSW entries all stay on disk — so a KB that
- * churns only ever grows. This runs the two steps that actually reclaim:
- * gbrain's own hard purge, then a vacuum. See brain.js `compact` for the
- * measurements showing neither step alone frees a single byte.
+ * churns only ever grows. This runs the two steps that stop that: gbrain's own
+ * hard purge, then a vacuum.
+ *
+ * IT DOES NOT SHRINK THE STORE, and no mode here does. The route used to
+ * default to `vacuum:'full'` and was described as "gives disk back"; that was
+ * measured wrong (VACUUM_MODES has the numbers) and 'full' no longer exists, so
+ * a caller still sending it now gets a 400. To actually recover a bloated
+ * store, empty it and re-ingest — `/drop` removes the directory, WAL included.
  *
  * Safe by default: `olderThanHours` defaults to gbrain's own 72h window, so a
  * plain call can never destroy a delete the user could still undo. Passing 0
  * waives that window and is the caller's explicit choice.
  *
- * `vacuum` picks the WEIGHT of the pass — 'full' (default) is the one-off that
- * gives disk back, 'light' is the routine one that stops the growth, 'none'
- * purges only. A FIXED vocabulary: anything else is a 400, never a silent
- * fallback to the heaviest option.
+ * `vacuum` picks the WEIGHT of the pass — 'light' (default) stops the growth,
+ * 'none' purges only. A FIXED vocabulary: anything else is a 400, never a
+ * silent fallback.
  */
 async function handleCompact(body) {
   const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
@@ -251,7 +255,7 @@ async function handleCompact(body) {
     olderThanHours = n;
   }
 
-  const vacuum = body?.vacuum == null ? 'full' : String(body.vacuum);
+  const vacuum = body?.vacuum == null ? 'light' : String(body.vacuum);
   if (!VACUUM_MODE_NAMES.includes(vacuum)) {
     return {
       status: 400,
