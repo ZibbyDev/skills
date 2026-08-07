@@ -1,0 +1,21 @@
+{
+  "name": "figma-mcp",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Stateless remote MCP server exposing Figma REST tools over Streamable HTTP. Each request carries the user's Figma Personal Access Token in a header; the server proxies to the Figma REST API. Built for background/cloud agents that can't do interactive OAuth.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "express": "^4.21.2",
+    "undici": "^7.16.0",
+    "zod": "^3.24.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
