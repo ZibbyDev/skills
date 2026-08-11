@@ -54,6 +54,14 @@ export const INTEGRATIONS = Object.freeze({
   // workspace slug / base URL). The linearSkill talks to the Linear
   // GraphQL API directly (no MCP server). See linear.js + handlers/linear.js.
   LINEAR:            'linear',
+  // Vikunja — paste-token, and the connection is an INSTANCE + a token rather
+  // than a token alone (a Vikunja is usually one the operator hosts, so there is
+  // no fixed base URL to assume). resolveIntegrationToken('vikunja') returns
+  // both halves. OPTIONAL in the backend map: board-runner drives Jira,
+  // PingCode or Vikunja behind one adapter, so requiring it would gate a
+  // Jira-only user on a backend they never selected. See vikunja.ts +
+  // handlers/vikunja.js.
+  VIKUNJA:           'vikunja',
   // Figma — paste-token (personal access token) integration, same shape as
   // linear/plane (NOT OAuth). The figmaSkill talks to the Figma REST API
   // directly with the `X-Figma-Token` header (no MCP server), resolved via
@@ -136,6 +144,7 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   google: { id: 'google', name: 'Google Docs', connectPath: '/integrations?provider=google' },
   plane:  { id: 'plane',  name: 'Plane',  connectPath: '/integrations?provider=plane'  },
   linear: { id: 'linear', name: 'Linear', connectPath: '/integrations?provider=linear' },
+  vikunja: { id: 'vikunja', name: 'Vikunja', connectPath: '/integrations?provider=vikunja' },
   figma:  { id: 'figma',  name: 'Figma',  connectPath: '/integrations?provider=figma'  },
   hubspot: { id: 'hubspot', name: 'HubSpot', connectPath: '/integrations?provider=hubspot' },
   open_design: { id: 'open_design', name: 'OpenDesign', connectPath: '/integrations?provider=open_design' },

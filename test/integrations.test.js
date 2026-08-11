@@ -66,6 +66,11 @@ describe('INTEGRATIONS constant', () => {
         // workspace slug / base URL). See linear.js + handlers/linear.js.
         // The skill talks to the Linear GraphQL API directly (no MCP server).
         'linear',
+        // Vikunja — paste-token, and the connection is an INSTANCE + a token
+        // (a Vikunja is usually one the operator hosts, so there is no fixed
+        // base URL). resolveIntegrationToken('vikunja') returns both halves.
+        // See vikunja.ts + handlers/vikunja.js.
+        'vikunja',
         // Figma — first-class OAuth integration (NOT a paste-token). See
         // figma.js + handlers/figma.js. The skill reads files/nodes/
         // comments and renders frames via the Figma REST API with a Bearer
