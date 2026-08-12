@@ -51,7 +51,7 @@ test('with NO config anywhere, /oauth/start fails CLOSED with an actionable mess
   const res = await fetch(`${h.base}/oauth/start`, { redirect: 'manual' });
   assert.equal(res.status, 503);
   const body = await res.text();
-  assert.match(body, /还没有配置 PingCode 应用/);
+  assert.match(body, /No PingCode app configured/);
   assert.match(body, /PINGCODE_CLIENT_ID/, 'names the missing key');
   assert.match(body, /Env/, 'points at the agent Env tab, where the value belongs');
   assert.equal(h.pc.authorizeCalls.length, 0, 'nothing was sent to PingCode');
@@ -192,7 +192,7 @@ test('renew under the WRONG app is refused with its own message', async (t) => {
     redirect: 'manual',
   });
   assert.equal(res.status, 400);
-  assert.match(await res.text(), /属于另一个 PingCode 应用/);
+  assert.match(await res.text(), /belongs to a different PingCode app/);
 });
 
 // ── the emitted MCP URL stays resolvable on a multi-agent box ─────

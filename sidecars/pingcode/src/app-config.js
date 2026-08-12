@@ -50,6 +50,23 @@ export const SIDECAR_CONFIG_HEADER = 'x-sidecar-config';
  */
 export const SIDECAR_AGENT_HEADER = 'x-sidecar-agent';
 
+/**
+ * The CANONICAL MCP address for the injected agent, as the PLATFORM derives it.
+ *
+ * A sidecar cannot compute this: whether the advertised endpoint is the
+ * platform's per-agent route or the sidecar's own public mount is a decision
+ * the control-plane makes (and has changed), and only it knows the box's
+ * advertised origin. Handing the answer over on a header keeps ONE derivation
+ * with N consumers — the alternative, letting this app assemble a platform URL
+ * from a route shape it hard-codes, is the same two-places drift that had the
+ * success page and the agent detail page printing different install URLs.
+ *
+ * Proxy-owned like the two above (a client copy is stripped), and an
+ * IDENTIFIER, never a credential. Absent on an older control-plane, in which
+ * case the caller keeps its own public mount.
+ */
+export const SIDECAR_MCP_URL_HEADER = 'x-sidecar-mcp-url';
+
 /** Env keys this app accepts as PER-TENANT config (mirrors the spec's declaration). */
 export const REQUEST_CONFIG_KEYS = [
   'PINGCODE_CLIENT_ID',

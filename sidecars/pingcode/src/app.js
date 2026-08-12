@@ -5,14 +5,21 @@
 // without a live PingCode or a bound port.
 
 import express from 'express';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from './tools.js';
 import {
-  SIDECAR_AGENT_HEADER, appConfigMiddleware, withAppConfig,
+  SIDECAR_AGENT_HEADER, SIDECAR_MCP_URL_HEADER, appConfigMiddleware, withAppConfig,
 } from './app-config.js';
+
+// The product this app fronts. Held in ONE place so the page copy stays
+// service-neutral — every user-visible noun below reads these, so the shell and
+// the success page are reusable by the next sidecar that ends a browser flow
+// rather than carrying a product name in twenty string literals.
+const SERVICE_NAME = 'PingCode';
+const SERVICE_SLUG = 'pingcode';
 
 // Base-path awareness: when this app sits behind a reverse proxy under a
 // prefix (e.g. https://host/sidecars/pingcode/... with the prefix STRIPPED
@@ -63,41 +70,144 @@ export function parseCookies(header) {
   return out;
 }
 
-const html = (body) =>
+/**
+ * The page shell.
+ *
+ * STYLE PROVENANCE — this is a deliberate HAND-MIRROR of the cloud's
+ * `frontend/src/pages/CliAuthorizePage` (the page a `zibby login` lands on):
+ * the morphing grid backdrop, the Georgia display title, the green success
+ * line, and the design tokens it reads from `frontend/src/styles/globals.css`
+ * (--bg-primary #000, --text-primary #e1dddd, --text-secondary #b0b0b0,
+ * --text-muted #888888, --border-primary #27241c, --spacing-md/lg/xl).
+ *
+ * It is a COPY on purpose and cannot be anything else: the cloud page is a
+ * React route served from CloudFront, this is a static string rendered by a
+ * container that ships as its own image — zero shared code, exactly like the
+ * self-host dashboard already mirroring the same tokens. The consequence is
+ * the usual one: a restyle over there does NOT reach here. Keep the copied
+ * surface as small as it is, and re-mirror deliberately.
+ *
+ * Copy is ENGLISH and SERVICE-NEUTRAL — every product noun arrives from the
+ * caller, so this shell is reusable by any sidecar that ends a browser flow.
+ */
+const html = (body, opts = {}) =>
   `<!doctype html>
 <meta charset="utf-8">
-<title>pingcode-mcp</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(opts.title || 'MCP setup')}</title>
 <style>
-  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
-         padding: 48px 24px; max-width: 720px; margin: 0 auto; color: #1a1a1a; }
-  h2 { font-size: 22px; margin: 0 0 16px; }
-  p  { margin: 8px 0; }
-  pre { background: #f5f5f7; border: 1px solid #e5e5ea; border-radius: 8px;
-        padding: 16px; font: 13px/1.5 'SF Mono', Menlo, monospace;
-        overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
-  .muted { color: #666; font-size: 14px; }
-  .ok { color: #1d8a3a; }
-  .err { color: #b91c1c; }
-  .warn { background: #fff7e6; border: 1px solid #ffd591; border-radius: 8px;
-          padding: 12px 16px; margin: 16px 0; font-size: 14px; }
-  a.btn { display: inline-block; background: #0a84ff; color: #fff; padding: 10px 18px;
-          border-radius: 8px; text-decoration: none; font-weight: 500; }
-  h3 { font-size: 15px; margin: 28px 0 8px; color: #333; }
-  .codeblock { position: relative; }
-  .codeblock pre { padding-top: 42px; }
-  .copy { position: absolute; top: 8px; right: 8px; background: #0a84ff; color: #fff;
-          border: none; border-radius: 6px; padding: 6px 14px; font-size: 13px;
-          font-weight: 500; cursor: pointer; }
-  .copy:hover { background: #0070e0; }
+  :root {
+    --bg-primary: #000000;
+    --text-primary: #e1dddd;
+    --text-secondary: #b0b0b0;
+    --text-muted: #888888;
+    --border-primary: #27241c;
+    --spacing-md: 0.8rem;
+    --spacing-lg: 1.5rem;
+    --spacing-xl: 2rem;
+    --success: #4ade80;
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; position: relative; overflow-x: hidden;
+    background: var(--bg-primary); color: var(--text-primary);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  /* Animated grid backdrop — mirrored from CliAuthorizePage.css */
+  body::before, body::after {
+    content: ''; position: fixed; inset: -50%; pointer-events: none; z-index: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+    background-size: 112px 112px;
+  }
+  body::before { animation: gridMorphA 36s ease-in-out infinite; }
+  body::after  { animation: gridMorphB 36s ease-in-out infinite; }
+  @keyframes gridMorphA {
+    0%,100% { transform: perspective(800px) rotateX(0) rotateY(0) scale(1); opacity: .6; }
+    25%     { transform: perspective(800px) rotateX(25deg) rotateY(-15deg) scale(1.1); opacity: .4; }
+    50%     { transform: perspective(800px) rotateX(-20deg) rotateY(20deg) rotate(45deg) scale(1.2); opacity: .3; }
+    75%     { transform: perspective(800px) rotateX(15deg) rotateY(-25deg) rotate(20deg) scaleX(1.3) scaleY(.9); opacity: .5; }
+  }
+  @keyframes gridMorphB {
+    0%,100% { transform: perspective(800px) rotateX(-15deg) rotateY(20deg) rotate(45deg) scale(1.1); opacity: .3; }
+    25%     { transform: perspective(800px) rotateX(20deg) rotateY(10deg) rotate(0) scale(1); opacity: .6; }
+    50%     { transform: perspective(800px) rotateX(-25deg) rotateY(-20deg) rotate(60deg) scaleX(.8) scaleY(1.3); opacity: .4; }
+    75%     { transform: perspective(800px) rotateX(10deg) rotateY(25deg) rotate(30deg) scale(1.15); opacity: .35; }
+  }
+  .page {
+    position: relative; z-index: 1; min-height: 100vh; display: flex;
+    align-items: center; justify-content: center; padding: 48px 24px;
+  }
+  .card { width: 100%; max-width: 760px; }
+  h1, h2 {
+    font-family: Georgia, 'Times New Roman', Times, serif;
+    font-weight: 400; line-height: 1.2; color: #fff;
+    margin: 0 0 var(--spacing-md); text-align: center;
+  }
+  h1 { font-size: 42px; }
+  h2 { font-size: 28px; }
+  /* Colour only, so it reads the same on a heading or a paragraph. */
+  .ok  { color: var(--success); }
+  .err { color: var(--danger); }
+  p.ok, p.err { font-size: 17px; text-align: center; margin: 0 0 var(--spacing-xl); }
+  p { margin: var(--spacing-md) 0; color: var(--text-secondary); }
+  pre {
+    background: rgba(255,255,255,0.04); border: 1px solid var(--border-primary);
+    border-radius: 10px; padding: 16px; margin: 0; color: var(--text-primary);
+    font: 13px/1.6 'SF Mono', SFMono-Regular, Menlo, monospace;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  /* The Copy button sits INSIDE the block, bottom-right. The reserved space is
+     at the BOTTOM (padding-bottom), never the top: a top reservation reads as a
+     blank first line on every single-line value, while trailing space just
+     reads as the block's own padding. */
+  .codeblock { position: relative; margin: var(--spacing-lg) 0 0; }
+  .cbhead {
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-muted); margin-bottom: 6px;
+  }
+  .codeblock pre { padding-bottom: 46px; }
+  .copy {
+    position: absolute; right: 10px; bottom: 10px;
+    cursor: pointer; background: transparent; color: var(--text-secondary);
+    border: 1px solid rgba(255,255,255,0.35); border-radius: 8px;
+    padding: 3px 12px; font-size: 12px; font-weight: 500;
+    transition: all .15s ease;
+  }
+  .copy:hover { background: rgba(255,255,255,0.05); color: #fff; }
+  .center { text-align: center; }
+  .muted { color: var(--text-muted); font-size: 14px; }
+  .warn {
+    background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.25);
+    border-radius: 10px; padding: 12px 16px; margin: var(--spacing-lg) 0;
+    font-size: 14px; color: var(--text-secondary);
+  }
+  code { font-family: 'SF Mono', Menlo, monospace; font-size: .92em; }
+  a { color: var(--text-primary); }
+  a.btn {
+    display: inline-block; text-decoration: none; font-weight: 500;
+    border: 1px solid rgba(255,255,255,0.35); border-radius: 15px;
+    padding: 10px 24px; color: var(--text-secondary);
+  }
+  a.btn:hover { background: rgba(255,255,255,0.05); color: #fff; }
+  hr { border: 0; border-top: 1px solid var(--border-primary); margin: var(--spacing-xl) 0; }
+  @media (max-width: 480px) { h1 { font-size: 32px; } }
 </style>
+<div class="page"><div class="card">
 ${body}
+</div></div>
 <script>
 function copyBlock(b){
-  var p=b.parentElement.querySelector('pre');var text=p.innerText;
-  var ok=function(){var t=b.getAttribute('data-label')||b.textContent;b.setAttribute('data-label',t);b.textContent='已复制 ✓';setTimeout(function(){b.textContent=t;},1500);};
-  function legacy(){var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.top='-1000px';ta.setAttribute('readonly','');document.body.appendChild(ta);ta.select();var done=false;try{done=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);if(done)ok();else window.prompt('手动复制 (Ctrl/Cmd+C):',text);}
+  // The button lives in the block's header row, so reach the <pre> through the
+  // block wrapper rather than the button's immediate parent.
+  var box=b.closest('.codeblock')||b.parentElement;
+  var p=box.querySelector('pre');var text=p.innerText;
+  var ok=function(){var t=b.getAttribute('data-label')||b.textContent;b.setAttribute('data-label',t);b.textContent='Copied ✓';setTimeout(function(){b.textContent=t;},1500);};
+  function legacy(){var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.top='-1000px';ta.setAttribute('readonly','');document.body.appendChild(ta);ta.select();var done=false;try{done=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);if(done)ok();else window.prompt('Copy manually (Ctrl/Cmd+C):',text);}
   // navigator.clipboard only exists in a secure context (HTTPS/localhost); this
-  // page is served over plain HTTP, so fall back to execCommand there.
+  // page may be served over plain HTTP, so fall back to execCommand there.
   if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(ok,legacy);}else{legacy();}
 }
 </script>`;
@@ -168,13 +278,10 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
   app.get('/', (_req, res) => {
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.send(html(`
-      <h2>pingcode-mcp</h2>
-      <p>Click below to authorize PingCode and get your Claude Code setup command.</p>
-      <p style="margin-top:24px"><a class="btn" href="${BASE_PATH}/oauth/start">授权 PingCode</a></p>
-      <p class="muted" style="margin-top:32px">
-        Endpoint: <code>POST ${PUBLIC_BASE_URL}/mcp</code>
-      </p>
-    `));
+      <h1>${esc(SERVICE_NAME)} MCP</h1>
+      <p class="center">Authorize your ${esc(SERVICE_NAME)} account to get your editor setup.</p>
+      <p class="center" style="margin-top:24px"><a class="btn" href="${BASE_PATH}/oauth/start">Connect ${esc(SERVICE_NAME)}</a></p>
+    `, { title: `${SERVICE_NAME} MCP` }));
   });
 
   // ─── OAuth: kick off ─────────────────────────────────────────────
@@ -196,11 +303,11 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
       if (e && e.code === 'APP_NOT_CONFIGURED') {
         console.warn(`[oauth] start refused: ${e.message}`);
         return res.status(503).send(html(`
-          <h2 class="err">⚠️ 这个部署还没有配置 PingCode 应用</h2>
-          <p>缺少: <code>${esc((e.missing || []).join(', '))}</code></p>
-          <p>请在<strong>声明了本 sidecar 的 agent 的 Env 标签页</strong>里填好这些值
-          (它们会在每次请求时从该 agent 的加密环境中读取), 然后重新点授权链接。</p>
-        `));
+          <h2 class="err">No ${esc(SERVICE_NAME)} app configured</h2>
+          <p>Missing: <code>${esc((e.missing || []).join(', '))}</code></p>
+          <p class="muted">Set these on the Env tab of the agent that declares this service,
+          then open this link again. No restart needed.</p>
+        `, { title: 'Not configured' }));
       }
       throw e;
     }
@@ -212,13 +319,15 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
         // token is real, it just belongs to another PingCode app.
         const otherApp = slot.reason === 'other_app';
         return res.status(400).send(html(otherApp ? `
-        <h2 class="err">⚠️ 这个 MCP_TOKEN 属于另一个 PingCode 应用</h2>
-        <p>它是用别的 OAuth 应用 (client_id) 授权出来的, 不能在当前应用下续签。
-        请用当初那个应用对应的入口续签, 或走<a href="${BASE_PATH}/oauth/start">新用户授权</a>重新生成。</p>
+        <h2 class="err">This token belongs to a different ${esc(SERVICE_NAME)} app</h2>
+        <p>It was issued under another OAuth app (a different <code>client_id</code>) and cannot be
+        renewed here. Renew it from the entry point of the app that issued it, or
+        <a href="${BASE_PATH}/oauth/start">authorize as a new user</a> to get a fresh one.</p>
       ` : `
-        <h2 class="err">⚠️ 找不到这个 MCP_TOKEN</h2>
-        <p>你提供的 renew 值不存在或已被吊销。请走<a href="${BASE_PATH}/oauth/start">新用户授权</a>重新生成一个。</p>
-      `));
+        <h2 class="err">Unknown token</h2>
+        <p>The value you passed to renew does not exist or has been revoked.
+        <a href="${BASE_PATH}/oauth/start">Authorize as a new user</a> to get a fresh one.</p>
+      `, { title: 'Cannot renew' }));
       }
     }
     const nonce = newNonce();
@@ -229,6 +338,11 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
       createdAt: Date.now(),
       app: appConfig,
       agent: req.header(SIDECAR_AGENT_HEADER) || '',
+      // Captured HERE, with the agent handle, for the same reason: the callback
+      // is a redirect from the third party, and pinning both to the attempt
+      // that started it keeps the success page describing the agent the user
+      // actually authorized against — not whatever the callback resolves to.
+      mcpUrl: req.header(SIDECAR_MCP_URL_HEADER) || '',
     });
     // Belt: the nonce rides back in a cookie (works with the plain, already
     // registered redirect URI). Braces: optionally also in the redirect_uri
@@ -266,21 +380,21 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
     if (cookieNonce) seen.add(cookieNonce);
     if (req.query.state) seen.add(String(req.query.state));
 
-    const restart = `<p>请回到 <a href="${BASE_PATH}/oauth/start">授权入口</a> 重新开始(同一个浏览器里完成整个流程)。</p>`;
+    const restart = `<p class="center" style="margin-top:24px">
+      <a class="btn" href="${BASE_PATH}/oauth/start">Start over</a></p>`;
     if (seen.size === 0) {
       console.warn('[oauth] callback refused: no nonce presented (cookie/path/state all absent)');
       return res.status(400).send(html(`
-        <h2 class="err">⚠️ 授权请求无法校验</h2>
-        <p>这次回调没有带上发起授权时生成的一次性凭据(nonce),无法确认它属于哪次授权,已拒绝。</p>
-        <p class="muted">常见原因:浏览器禁用了 Cookie、换了浏览器/设备完成授权,或链接放置超过 10 分钟已过期。</p>
-        ${restart}`));
+        <h2 class="err">Could not verify this request</h2>
+        <p class="muted center">Blocked cookies, a different browser, or a link older than 10 minutes.</p>
+        ${restart}`, { title: 'Refused' }));
     }
     if (seen.size > 1) {
       console.warn('[oauth] callback refused: conflicting nonces presented');
       return res.status(400).send(html(`
-        <h2 class="err">⚠️ 授权请求无法校验</h2>
-        <p>这次回调带了多个互相矛盾的一次性凭据(例如同时开了两个授权页面),无法确定属于哪一次,已拒绝。</p>
-        ${restart}`));
+        <h2 class="err">Could not verify this request</h2>
+        <p class="muted center">Two authorization pages were open at once.</p>
+        ${restart}`, { title: 'Refused' }));
     }
     const nonce = [...seen][0];
     const entry = pendingAuth.get(nonce);
@@ -289,9 +403,9 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
       // guessed at — this is the branch that used to fall back to "newest".
       console.warn('[oauth] callback refused: nonce did not match any pending authorization');
       return res.status(400).send(html(`
-        <h2 class="err">⚠️ 授权请求已失效</h2>
-        <p>这次回调对应的授权请求不存在、已被使用过,或已超过 10 分钟有效期,已拒绝。</p>
-        ${restart}`));
+        <h2 class="err">This authorization has expired</h2>
+        <p class="muted center">Already used, or older than 10 minutes.</p>
+        ${restart}`, { title: 'Expired' }));
     }
     // Matched exactly one pending entry → consume it (single use).
     pendingAuth.delete(nonce);
@@ -329,15 +443,16 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
               'nothing was written',
             );
             return res.status(403).send(html(`
-              <h2 class="err">⚠️ 续签被拒绝:无法确认授权者身份</h2>
-              <p>服务器无法通过 <code>GET /v1/myself</code> 确认刚才授权的是哪个 PingCode 账号,
-              因此拒绝把令牌写入这个 MCP_TOKEN(宁可拒绝,也不能把别人的令牌写进你的槽位)。
-              <strong>你的原有授权没有被改动。</strong></p>
-              <p class="muted">管理员请检查:该 PingCode 应用需要有权限调用
-              <code>GET /v1/myself</code>(返回:${esc(identity?.error || 'unknown error')})。
-              多数应用用默认权限即可,无需配置 scope;若你的应用要求显式授权范围,再设置
-              <code>PINGCODE_SCOPE</code>。修好后请用户重新点续签链接。</p>
-              ${restart}`));
+              <h2 class="err">Renewal refused — could not confirm who authorized</h2>
+              <p>The server could not establish which ${esc(SERVICE_NAME)} account just consented
+              (<code>GET /v1/myself</code> failed), so it refused to write those tokens into this
+              slot — better to refuse than to put someone else's credentials in your slot.
+              <strong>Your existing authorization was not touched.</strong></p>
+              <p class="muted">For the administrator: the OAuth app needs permission to call
+              <code>GET /v1/myself</code> (it returned: ${esc(identity?.error || 'unknown error')}).
+              Most apps work on default permissions; if yours requires explicit scopes, set
+              <code>PINGCODE_SCOPE</code>. Then have the user click renew again.</p>
+              ${restart}`, { title: 'Renewal refused' }));
           }
 
           const existing = (await pc.store.get(entry.mcpToken)) || {};
@@ -348,10 +463,11 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
               'consenting PingCode user differs from the bound one — nothing was written',
             );
             return res.status(403).send(html(`
-              <h2 class="err">⚠️ 续签被拒绝:账号不一致</h2>
-              <p>这个 renew 链接属于另一个 PingCode 账号。请用当初授权这个 MCP_TOKEN 的
-              PingCode 账号登录后重试;或者走<a href="${BASE_PATH}/oauth/start">新用户授权</a>生成自己的 MCP_TOKEN。</p>
-            `));
+              <h2 class="err">Renewal refused — different account</h2>
+              <p>This renew link belongs to another ${esc(SERVICE_NAME)} account. Sign in as the
+              account that originally authorized this token and try again, or
+              <a href="${BASE_PATH}/oauth/start">authorize as a new user</a> to get your own.</p>
+            `, { title: 'Renewal refused' }));
           }
           // Legacy slot with no recorded identity (pre-migration): bind it now —
           // safe because reaching here required the nonce from THIS slot's own
@@ -362,11 +478,10 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
             pingcode_user_id: boundId || userId,
           });
           return res.send(html(`
-            <h2 class="ok">✅ PingCode 重新授权完成</h2>
-            <p>你的 MCP_TOKEN <strong>没变</strong>，Claude Code 配置不用动。</p>
-            <p>直接回到对话, 让 agent 重试刚才那个工具调用就行。</p>
-            <p class="muted">下次过期大约在 90 天后。</p>
-          `));
+            <h1>Renewed</h1>
+            <p class="ok">${esc(SERVICE_NAME)} is authorized again.</p>
+            <p class="muted center">Your token is unchanged — no config to update.</p>
+          `, { title: `${SERVICE_NAME} renewed` }));
         }
 
         // ── first-time flow: mint a fresh MCP_TOKEN ──
@@ -390,79 +505,85 @@ export function createApp({ pc, publicBaseUrl, basePath = '', callbackPathNonce 
           );
         }
 
-        // Two SEPARATE copy-paste prompts, one per agent. Each is a self-contained
-        // natural-language prompt: paste it to the agent and it installs itself, no
-        // hand-typed commands. Codex has no `add` for HTTP servers, so its prompt
-        // carries a config.toml block; Codex sends http_headers verbatim, so a
-        // static Authorization header authenticates like Claude's --header. Each
-        // block gets a top-right copy button (copyBlock in the page script).
-        // The endpoint the user's editor will call. On a box where SEVERAL agents
-      // declare this sidecar, a bare /mcp cannot tell the control-plane whose
-      // config to inject — so carry the agent handle the proxy told us about.
-      // With 0 or 1 declaring agents the header is absent and the URL is
-      // byte-identical to before.
-      const agentQs = entry.agent ? `?agent=${encodeURIComponent(entry.agent)}` : '';
-      const mcpUrl = `${PUBLIC_BASE_URL}/mcp${agentQs}`;
-        // The MCP server NAME must be UNIQUE per human AND re-derivable inside any
-        // session. `claude mcp add` keys config by (home)×(workspace)×name and refuses
-        // to overwrite an existing name — and (verified live) teammates here can share
-        // BOTH the home dir and the workspace, so a fixed `pingcode` makes the 2nd
-        // user collide, and when several load together each agent must pick its own.
-        // Nothing on disk is per-user (shared files get clobbered), so we can't store
-        // a name — the agent must COMPUTE it, at install and at use, from the only
-        // per-person signal that exists here: the GIT_AUTHOR_EMAIL env var (verified
-        // distinct per teammate, e.g. alice@example.com vs alice-1@example.com). The server can't
-        // see that value, so it emits a self-instructing prompt telling the agent to
-        // read GIT_AUTHOR_EMAIL, slugify it (@ and . → -), and name the server
-        // pingcode-<slug>. (The connect-pingcode skill reinforces this + the matching
-        // selection rule.) We deliberately do NOT ship a runnable one-liner carrying a
-        // `<...>` literal — `<`/`>` are shell redirection, so the command must be built
-        // AFTER substitution, never pasted into a shell verbatim.
-        const claudePrompt = `请帮我安装 PingCode 的 MCP 服务器。
-  1) 先在当前会话运行 \`echo $GIT_AUTHOR_EMAIL\` 拿到我的邮箱, 把里面的 @ 和 . 都替换成 - 得到 slug (例如 alice@example.com → alice-example-com)。
-  2) 然后运行这条命令 (把 <slug> 换成上一步算出来的值, 别原样带着尖括号跑):
-  claude mcp add --transport http pingcode-<slug> ${mcpUrl} --header "Authorization: Bearer ${mcpToken}"
-  命令成功后告诉我装好了即可。注意: 刚装的 MCP 工具这一轮还不会加载, 你不用在本轮去搜索、调用或验证 pingcode 工具 —— 我下一条消息发出来时就能用了。`;
-        const codexPrompt = `请帮我安装 PingCode 的 MCP 服务器。
-  1) 先运行 \`echo $GIT_AUTHOR_EMAIL\` 拿到我的邮箱, 把 @ 和 . 都替换成 - 得到 slug (例如 alice@example.com → alice-example-com)。
-  2) 把下面这一节写入 ~/.codex/config.toml (把 <slug> 换成上一步的值; 没有文件就新建, 已有就追加这一节), 写好后告诉我即可:
-  [mcp_servers.pingcode-<slug>]
-  url = "${mcpUrl}"
-  http_headers = { "Authorization" = "Bearer ${mcpToken}" }
-  注意: 你不用在本轮验证或调用 pingcode 工具, 我重启 Codex 后下次对话就能用了。`;
+        // ── THE ADDRESS ──────────────────────────────────────────────────
+        // ONE address per agent, and the platform decides which one it is: the
+        // control-plane derives it (agent-entry-points) and hands it over on a
+        // proxy-owned header, so THIS page and the agent's detail page can
+        // never print two different install URLs for the same agent — the
+        // drift that had a connected user holding an address the product no
+        // longer advertised. Nothing here knows the platform's route grammar.
+        //
+        // FALLBACK — an older control-plane sends no such header. Then the
+        // sidecar's own public mount is still the correct (and only) address,
+        // carrying the agent handle so a box with SEVERAL declaring agents can
+        // still tell whose config to inject. Byte-identical to what shipped.
+        const agentQs = entry.agent ? `?agent=${encodeURIComponent(entry.agent)}` : '';
+        const mcpUrl = entry.mcpUrl || `${PUBLIC_BASE_URL}/mcp${agentQs}`;
+        // ── THE SERVER NAME ──────────────────────────────────────────────
+        // Must be UNIQUE PER HUMAN: an MCP client keys its config by name and
+        // refuses to overwrite one, and (verified live) teammates here share
+        // BOTH the home dir and the workspace — so a fixed `pingcode` makes the
+        // second person's install collide with the first's.
+        //
+        // The old page solved this by instructing the AGENT to slugify
+        // $GIT_AUTHOR_EMAIL, because the server could not see any per-person
+        // value. It can: the callback just resolved this user's PingCode
+        // identity. Deriving the name here keeps the uniqueness and costs the
+        // reader nothing — no placeholder to substitute, no prompt to run.
+        // With no identity (the warning below), a short digest of the bearer
+        // stands in — one-way, stable across renews, and never the token.
+        const userSuffix = userId
+          ? String(userId).replace(/[^a-zA-Z0-9]/g, '').slice(-8).toLowerCase()
+          : createHash('sha256').update(String(mcpToken)).digest('hex').slice(0, 8);
+        const serverKey = `${SERVICE_SLUG}-${userSuffix}`;
+        // The universal form: Claude Code, Cursor and Gemini all read this
+        // shape. Codex (TOML) and Claude Desktop (stdio only — a `url` entry is
+        // silently skipped, so it needs the mcp-remote bridge) each get their
+        // own block rather than a footnote telling the reader to translate.
+        const jsonCfg = JSON.stringify(
+          { mcpServers: { [serverKey]: { url: mcpUrl, headers: { Authorization: `Bearer ${mcpToken}` } } } },
+          null, 2,
+        );
+        const tomlCfg = `[mcp_servers.${serverKey}]
+url = "${mcpUrl}"
+http_headers = { "Authorization" = "Bearer ${mcpToken}" }`;
+        const bridgeCmd = `npx mcp-remote ${mcpUrl} --header "Authorization:Bearer ${mcpToken}"`;
         const identityWarning = userId ? '' : `
           <div class="warn">
-            ⚠️ <strong>这个授权没有绑定 PingCode 身份。</strong>
-            服务器无法通过 <code>GET /v1/myself</code> 确认你的账号
-            (${esc(identity?.error || 'unknown error')}),因此 90 天后的<strong>续签会被拒绝</strong>,
-            届时需要重新走一次授权并更新配置。请让管理员为 OAuth 应用开通 <code>/v1/myself</code>
-            权限并设置 <code>PINGCODE_SCOPE</code>,然后重新授权一次即可一劳永逸。
+            <strong>This authorization is not bound to a ${esc(SERVICE_NAME)} identity.</strong>
+            The server could not confirm your account through <code>GET /v1/myself</code>
+            (${esc(identity?.error || 'unknown error')}), so <strong>renewal will be refused</strong>
+            when it expires. Ask an administrator to grant the OAuth app access to
+            <code>/v1/myself</code> and set <code>PINGCODE_SCOPE</code>, then authorize once more.
+          </div>`;
+        // ONE block per thing to copy, each labelled in its own header row.
+        // No standing prose: the labels carry the whole instruction, which is
+        // what "add this to that file" actually needs.
+        //
+        // The URL and the token are NOT given their own blocks: every config
+        // below already contains both verbatim, so separate rows for them were
+        // the same two values printed a fourth and fifth time. A reader who
+        // needs the raw pair reads it off the JSON.
+        const block = (label, text) => `
+          <div class="codeblock">
+            <div class="cbhead">${esc(label)}</div>
+            <pre>${esc(text)}</pre>
+            <button class="copy" onclick="copyBlock(this)">Copy</button>
           </div>`;
         return res.send(html(`
-          <h2 class="ok">✅ PingCode 授权成功</h2>
+          <h1>Connected</h1>
+          <p class="ok">${esc(SERVICE_NAME)} is authorized.</p>
           ${identityWarning}
-          <p>按你用的工具<strong>二选一</strong>: 复制对应的整段, 粘贴给你的 agent —— 它会自动帮你装好 PingCode MCP, 你不用自己敲命令。</p>
-
-          <h3>① 我用 Claude Code</h3>
-          <div class="codeblock">
-            <button class="copy" onclick="copyBlock(this)">复制</button>
-            <pre>${esc(claudePrompt)}</pre>
-          </div>
-
-          <h3>② 我用 Codex</h3>
-          <div class="codeblock">
-            <button class="copy" onclick="copyBlock(this)">复制</button>
-            <pre>${esc(codexPrompt)}</pre>
-          </div>
-
-          <p class="muted">
-            这里面包含你的专属 MCP_TOKEN, 相当于你的 PingCode 钥匙, 请勿外发或贴到公开场合。
-            <br>装一次即可, 之后聊天直接让 agent 用 PingCode 工具。有效期 90 天, 过期前会提示你点链接续签 (MCP_TOKEN 不变)。
-          </p>
-        `));
+          ${block('Claude Code · Cursor · Gemini', jsonCfg)}
+          ${block('Codex — ~/.codex/config.toml', tomlCfg)}
+          ${block('Claude Desktop — bridge (stdio only)', bridgeCmd)}
+        `, { title: `${SERVICE_NAME} connected` }));
       } catch (e) {
         console.error('OAuth callback failed:', e);
-        return res.status(500).send(html(`<h2 class="err">授权失败</h2><pre>${esc(e.message)}</pre>`));
+        return res.status(500).send(html(
+          `<h2 class="err">Authorization failed</h2><pre>${esc(e.message)}</pre>`,
+          { title: 'Authorization failed' },
+        ));
       }
     });
   }

@@ -61,7 +61,7 @@ test('HAPPY: fresh authorization mints a slot bound to the PingCode identity', a
   const { res, body } = await callback(h, { cookie: nonce });
 
   assert.equal(res.status, 200);
-  assert.match(body, /PingCode 授权成功/);
+  assert.match(body, /PingCode is authorized/);
   assert.equal(h.pc.saveCalls.length, 1);
   const { mcpToken, tokens } = h.pc.saveCalls[0];
   assert.match(mcpToken, /^mcp_[0-9a-f]{64}$/);
@@ -69,7 +69,7 @@ test('HAPPY: fresh authorization mints a slot bound to the PingCode identity', a
   assert.equal(tokens.access_token, 'at-code-1');
   assert.equal(h.pending().size, 0, 'pending entry consumed');
   // No unbindable-slot warning on the page when identity resolved.
-  assert.doesNotMatch(body, /没有绑定 PingCode 身份/);
+  assert.doesNotMatch(body, /not bound to a PingCode identity/);
 });
 
 test('HAPPY: a legitimate renew keeps the MCP token and refreshes the slot', async (t) => {
@@ -82,7 +82,7 @@ test('HAPPY: a legitimate renew keeps the MCP token and refreshes the slot', asy
   const { res, body } = await callback(h, { cookie: nonce, code: 'code-renew' });
 
   assert.equal(res.status, 200);
-  assert.match(body, /重新授权完成/);
+  assert.match(body, /is authorized again/);
   assert.equal(pc.saveCalls.length, 1);
   assert.equal(pc.saveCalls[0].mcpToken, 'mcp_alice', 'same slot, MCP token unchanged');
   assert.equal(pc.slots.get('mcp_alice').access_token, 'at-code-renew');
@@ -120,7 +120,7 @@ test('RENEW REFUSED: no resolvable identity, LEGACY/UNBOUND slot (the fail-open 
   const { res, body } = await callback(h, { cookie: nonce, code: 'attacker-code' });
 
   assert.equal(res.status, 403);
-  assert.match(body, /无法确认授权者身份/);
+  assert.match(body, /could not confirm who authorized/);
   assert.match(body, /PINGCODE_SCOPE/, 'the error names the config that fixes it');
   assert.equal(pc.saveCalls.length, 0, 'NOTHING was written');
   // The TOKENS are untouched. The only thing that changed is the additive
@@ -144,7 +144,7 @@ test('RENEW REFUSED: no resolvable identity, BOUND slot', async (t) => {
   const { res, body } = await callback(h, { cookie: nonce, code: 'attacker-code' });
 
   assert.equal(res.status, 403);
-  assert.match(body, /无法确认授权者身份/);
+  assert.match(body, /could not confirm who authorized/);
   assert.equal(pc.saveCalls.length, 0);
   assert.deepEqual(pc.slots.get('mcp_alice'), before, 'slot untouched');
 });
@@ -160,7 +160,7 @@ test('RENEW REFUSED: identity differs from the slot binding', async (t) => {
   const { res, body } = await callback(h, { cookie: nonce, code: 'mallory-code' });
 
   assert.equal(res.status, 403);
-  assert.match(body, /账号不一致/);
+  assert.match(body, /different account/);
   assert.equal(pc.saveCalls.length, 0);
   assert.deepEqual(pc.slots.get('mcp_alice'), before, 'slot untouched');
 });
@@ -176,7 +176,7 @@ test('a FRESH authorization with no resolvable identity still works but warns lo
   const { res, body } = await callback(h, { cookie: nonce });
 
   assert.equal(res.status, 200);
-  assert.match(body, /没有绑定 PingCode 身份/);
+  assert.match(body, /not bound to a PingCode identity/);
   assert.equal(pc.saveCalls[0].tokens.pingcode_user_id, null);
 });
 
@@ -189,7 +189,7 @@ test('CALLBACK REFUSED: no nonce at all — and the pending entry survives', asy
 
   const { res, body } = await callback(h, {}); // no cookie, no path, no state
   assert.equal(res.status, 400);
-  assert.match(body, /无法校验/);
+  assert.match(body, /Could not verify this request/);
   assert.equal(h.pc.exchangeCalls.length, 0, 'the code was never exchanged');
   assert.equal(h.pc.saveCalls.length, 0);
   assert.equal(h.pending().size, 1, 'pending entry NOT consumed');
@@ -205,7 +205,7 @@ test('CALLBACK REFUSED: wrong nonce — and the pending entry survives', async (
   const { res, body } = await callback(h, { cookie: 'not-the-nonce', code: 'attacker-code' });
 
   assert.equal(res.status, 400);
-  assert.match(body, /已失效/);
+  assert.match(body, /This authorization has expired/);
   assert.equal(pc.exchangeCalls.length, 0);
   assert.equal(pc.saveCalls.length, 0);
   assert.equal(h.pending().size, 1, 'the victim can still complete their own renew');
@@ -221,7 +221,7 @@ test('CALLBACK REFUSED: two sources present a conflicting nonce', async (t) => {
 
   const { res, body } = await callback(h, { path: nonce, cookie: 'someone-elses-nonce' });
   assert.equal(res.status, 400);
-  assert.match(body, /互相矛盾/);
+  assert.match(body, /Two authorization pages were open at once/);
   assert.equal(h.pending().size, 1, 'pending entry NOT consumed');
 });
 
@@ -233,7 +233,7 @@ test('a nonce is SINGLE USE — a replay is refused', async (t) => {
   assert.equal((await callback(h, { cookie: nonce })).res.status, 200);
   const replay = await callback(h, { cookie: nonce, code: 'replayed' });
   assert.equal(replay.res.status, 400);
-  assert.match(replay.body, /已失效/);
+  assert.match(replay.body, /This authorization has expired/);
   assert.equal(h.pc.saveCalls.length, 1, 'no second slot written');
 });
 
