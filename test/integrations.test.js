@@ -44,7 +44,7 @@ describe('INTEGRATIONS constant', () => {
     // into the Lambda layer.
     expect(new Set(Object.values(INTEGRATIONS))).toEqual(
       new Set([
-        'sentry', 'jira', 'github', 'gitlab', 'slack', 'lark',
+        'sentry', 'jira', 'github', 'gitlab', 'slack', 'lark', 'lark_docs',
         // LLM-provider admin/billing keys (paste-token, no OAuth — see
         // INTEGRATIONS comment above)
         'openai_billing', 'anthropic_billing', 'cursor_admin',

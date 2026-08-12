@@ -47,7 +47,10 @@ describe('larkDocsSkill structure', () => {
   it('has correct id + serverName + requiresIntegration', () => {
     expect(larkDocsSkill.id).toBe('lark-docs');
     expect(larkDocsSkill.serverName).toBe('larkdocs');
-    expect(larkDocsSkill.requiresIntegration).toBe('lark');
+    // The DEDICATED docs app is the declared requirement; the chat app is
+    // accepted as the single-app fallback (an array = "any ONE"). See
+    // src/__tests__/larkDocs-app-resolution.test.ts for the whole story.
+    expect(larkDocsSkill.requiresIntegration).toEqual(['lark_docs', 'lark']);
   });
 
   it('exposes the docx + comment + image + wiki tools', () => {

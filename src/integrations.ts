@@ -27,6 +27,14 @@ export const INTEGRATIONS = Object.freeze({
   GITLAB: 'gitlab',
   SLACK:  'slack',
   LARK:   'lark',
+  // Lark DOCS — a SEPARATE Lark app credential from the chat/bot one. Real orgs
+  // run distinct Lark apps per concern (a chat bot app with no wiki scopes; a
+  // knowledge-base app with wiki/docx read scopes and no bot). Mirrors
+  // backend/src/services/skill-integrations.js INTEGRATIONS.LARK_DOCS, which
+  // already declares `'lark-docs' → lark_docs` as the REQUIRED provider. Docs
+  // consumers PREFER this app and fall back to the chat app, so single-app
+  // setups keep working unchanged.
+  LARK_DOCS: 'lark_docs',
   // LLM-provider admin/billing keys. Distinct from a hypothetical
   // `OPENAI` (request-time chat API key) — these are org-admin scoped,
   // read-only for cost+usage reporting, and gated separately at the UI
@@ -125,6 +133,7 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   gitlab: { id: 'gitlab', name: 'GitLab', connectPath: '/integrations?provider=gitlab' },
   slack:  { id: 'slack',  name: 'Slack',  connectPath: '/integrations?provider=slack'  },
   lark:   { id: 'lark',   name: 'Lark',   connectPath: '/integrations?provider=lark'   },
+  lark_docs: { id: 'lark_docs', name: 'Lark Docs', connectPath: '/integrations?provider=lark_docs' },
   openai_billing: {
     id: 'openai_billing',
     name: 'OpenAI Admin',
