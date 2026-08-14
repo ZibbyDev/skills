@@ -486,9 +486,21 @@ describe('__compareStoredSource (the comparator, directly)', () => {
 });
 
 describe('skill shape', () => {
-  it('exposes exactly the three artifact tools (list is delegated to kv-memory)', () => {
+  it('exposes exactly the five artifact tools (list is delegated to kv-memory)', () => {
     expect(artifactSkill.id).toBe('artifact');
-    expect(artifactSkill.tools.map((t) => t.name).sort()).toEqual(['artifact_get', 'artifact_publish', 'artifact_update']);
+    expect(artifactSkill.tools.map((t) => t.name).sort()).toEqual([
+      'artifact_get', 'artifact_publish', 'artifact_share', 'artifact_unshare', 'artifact_update',
+    ]);
     expect(artifactSkill.allowedTools).toContain('mcp__artifact__*');
+  });
+
+  it('artifact_share takes NO password parameter', () => {
+    // Deliberate: the backend accepts a caller-chosen password, but a model asked
+    // to invent one invents a guessable one. The tool the MODEL can reach only
+    // ever gets the server-generated default; a human picks their own via
+    // `zibby artifact share --password`. If this ever fails, that decision was
+    // undone by accident.
+    const share = artifactSkill.tools.find((t) => t.name === 'artifact_share');
+    expect(Object.keys(share.input_schema.properties)).toEqual(['id']);
   });
 });
