@@ -122,6 +122,38 @@ describe('artifact_publish share:true — publish and open the door in one call'
     expect(out.instruction).toMatch(/BOTH/);
   });
 
+  it('the password is NEVER written into the kv-memory index', async () => {
+    // Security invariant #4: a secret may not be persisted into memory. The
+    // index record is built from an explicit field list, which is the only
+    // reason the password does not ride along — nothing enforced it, and a
+    // later `{...out}` spread would leak it into every kv_recall_prefix
+    // result forever. It is a page-viewing password, not a credential, but
+    // "shown exactly once" is the contract the tool description makes and an
+    // index entry silently breaks it.
+    const indexed: any[] = [];
+    global.fetch = mockFetch([
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '<h1>hi</h1>', format: 'html' } })],
+      ['/artifacts', () => ({ json: {
+        id: ID, url: `http://box/a/${ID}`, createdAt: '2026-07-17T00:00:00Z',
+        shared: true, shareUrl: `http://box/artifacts/${ID}/view`, password: 'zx8Q-generated-9fk2',
+      } })],
+      ['/credits/review-memory', (body) => { indexed.push(body); return { json: { stored: true } }; }],
+    ]);
+
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'T', html: '<h1>hi</h1>', share: true,
+    }));
+    expect(out.password).toBe('zx8Q-generated-9fk2'); // it DID issue one…
+
+    const written = JSON.stringify(indexed);
+    expect(written).not.toContain('zx8Q-generated-9fk2'); // …and none of it was stored
+    expect(written).not.toContain('password');
+    expect(JSON.parse(indexed[0].content)).toEqual({
+      id: ID, title: 'T', url: `http://box/a/${ID}`, kind: null,
+      createdAt: '2026-07-17T00:00:00Z', summary: 'T',
+    });
+  });
+
   it('never sends a caller-chosen password, even when one is passed', async () => {
     // A deliberate limit, not an oversight: a model asked to invent a password
     // invents a guessable one. `artifact_share` refuses the parameter for the
