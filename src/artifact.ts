@@ -456,6 +456,33 @@ async function artifactReadFetch(id) {
 }
 
 /**
+ * POST {base}/credits/artifacts/{id}/{protect|unprotect} — the share door.
+ *
+ * Authenticated exactly like every other call in this module: opening an artifact
+ * to anonymous viewers is a MEMBER action, so it rides the same PROJECT_API_TOKEN
+ * and the backend re-proves ownership. The anonymous half (…/view) is a browser
+ * URL — this skill never calls it and holds no viewer credential.
+ */
+async function artifactShareFetch(id, action, payload = {}) {
+  const session = getSessionToken();
+  if (!session) {
+    throw new Error('No backend credential (PROJECT_API_TOKEN). Artifacts are only available inside a Zibby run.');
+  }
+  const res = await fetch(`${getAccountApiUrl()}/credits/artifacts/${encodeURIComponent(id)}/${action}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    let parsed: any = null;
+    try { parsed = JSON.parse(body); } catch { /* not JSON */ }
+    throw new Error(parsed?.error || `artifact ${action} failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+/**
  * POST-PUBLISH READ-BACK — "the blob stored is the blob I sent", and NOTHING MORE
  * ══════════════════════════════════════════════════════════════════════════════
  * WHAT THIS PROVES, EXACTLY. `GET /credits/artifacts/{id}` returns `content` =
@@ -777,6 +804,30 @@ Tools:
   the fields to change (\`title\`, \`markdown\`|\`html\`).
 - artifact_get: Fetch one artifact by \`id\` → { metadata, content } so you can
   reuse / edit / re-publish it.
+- artifact_share: Make a page readable WITHOUT a Zibby login → { url, password }.
+- artifact_unshare: Revoke that, immediately and for everyone.
+
+### If the people you are answering have no Zibby account, SHARE the page.
+A published url only opens for logged-in members of this project. When you are
+talking to a Lark or Slack channel, most of the people there are not Zibby users —
+so the link you just posted is, for them, a login screen they cannot get past.
+
+So: when you publish a page for a chat channel, call \`artifact_share\` and post
+the url AND the password together, in the same reply, formatted so both are easy
+to copy. Copy the password character for character — it is case-sensitive, it is
+shown exactly once, and nothing can look it up afterwards (you can only issue a
+new one, which kills the old). Do not paraphrase it, do not "tidy" it, and do not
+split it across lines.
+
+This password is a page-viewing password and nothing else — it is not an account
+password, it grants no access to Zibby, this project, or any other artifact, and
+it is revocable with \`artifact_unshare\`. Treat it as the ordinary contents of the
+message you are writing. That is the ONLY kind of secret you may ever put in a
+message: never paste a token, key, or credential into chat, a prompt, or a page.
+
+Sharing is per page and opt-in — publishing alone never exposes anything. If the
+page is sensitive and the channel is wide, say so and let them decide rather than
+sharing it silently.
 
 To recall WHAT YOU HAVE ALREADY PUBLISHED, use your kv-memory tool
 kv_recall_prefix with keyPrefix "artifact:" — each entry is the index record
@@ -919,6 +970,31 @@ records this automatically; you don't store it yourself.)`,
           return JSON.stringify(data);
         }
 
+        case 'artifact_share': {
+          const id = typeof args?.id === 'string' ? args.id.trim() : '';
+          if (!id) return JSON.stringify({ error: 'id is required' });
+          // Deliberately NO password parameter. The backend accepts one, but a
+          // model asked to invent a password invents a weak, guessable one — so
+          // the tool the model can reach only ever takes the generated default.
+          // A human who wants to choose their own uses the CLI.
+          const out = await artifactShareFetch(id, 'protect');
+          return JSON.stringify({
+            id: out.id,
+            url: out.url,
+            password: out.password,
+            shared: true,
+            // The model must relay BOTH, and must not paraphrase the password.
+            instruction: 'Send BOTH the url and the password to the person who asked. Copy the password EXACTLY — it is case-sensitive and cannot be recovered later (call artifact_share again to issue a new one).',
+          });
+        }
+
+        case 'artifact_unshare': {
+          const id = typeof args?.id === 'string' ? args.id.trim() : '';
+          if (!id) return JSON.stringify({ error: 'id is required' });
+          const out = await artifactShareFetch(id, 'unprotect');
+          return JSON.stringify({ id: out.id, shared: false, wasShared: out.wasShared });
+        }
+
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -981,6 +1057,35 @@ records this automatically; you don't store it yourself.)`,
         type: 'object',
         properties: {
           id: { type: 'string', description: 'The artifact id.' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'artifact_share',
+      description:
+        'Make an artifact viewable WITHOUT a Zibby login, by password. Returns { url, password } — a link anyone can open plus the password that opens it. '
+        + 'USE THIS when the people who need to read the page do not have Zibby accounts — the usual case is a Lark or Slack channel where you were asked for something and the channel members are not Zibby users. '
+        + 'The normal artifact url only opens for logged-in members of this project, so for those recipients it is a dead link; this is what makes it readable. '
+        + 'You MUST then send BOTH the url and the password in your reply, and copy the password EXACTLY (it is case-sensitive). It is shown ONCE and cannot be looked up afterwards — if it is lost, call this again to issue a new one, which also stops the old one working. '
+        + 'Works on any artifact you published, old or new. Calling it again on an already-shared artifact replaces the password. Use artifact_unshare to revoke.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The id of the artifact to share (from artifact_publish, or your kv-memory "artifact:" index).' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'artifact_unshare',
+      description:
+        'Revoke an artifact\'s password link — it goes back to being viewable only by logged-in members of this project. '
+        + 'Immediate and total: anyone who already entered the password loses access too, not just new visitors. Safe to call on an artifact that was never shared.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The artifact id to stop sharing.' },
         },
         required: ['id'],
       },
