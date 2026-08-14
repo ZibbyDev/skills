@@ -13,7 +13,7 @@ process.env.PROJECT_API_TOKEN = 'zby_pat_test';
 process.env.ZIBBY_ACCOUNT_API_URL = 'http://cp.local';
 process.env.WORKFLOW_TYPE = 'zibby-copilot';
 
-const { artifactSkill, __resetPublishBudget } = await import('../artifact.js');
+const { artifactSkill, __resetPublishBudget, __compareStoredSource } = await import('../artifact.js');
 
 // Route the mocked fetch by URL + parse the JSON body for assertions.
 function mockFetch(routes) {
@@ -36,6 +36,10 @@ afterEach(() => { vi.restoreAllMocks(); });
 describe('artifact_publish', () => {
   it('writes the blob then indexes it in kv-memory under the auto-namespaced scope', async () => {
     global.fetch = mockFetch([
+      // The post-publish read-back (GET .../artifacts/<id>) serves the content
+      // back UNCHANGED, so this stays a clean-path test: the result must be
+      // exactly { id, url } with no readBack noise.
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }, content: '<h1>hi</h1>', format: 'html' } })],
       ['/artifacts', (body, url) => { calls.push(['write', url, body]); return { json: { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', url: 'http://box/a/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', createdAt: '2026-07-17T00:00:00Z' } }; }],
       ['/credits/review-memory', (body, url) => { calls.push(['index', url, body]); return { json: { stored: true } }; }],
     ]);
@@ -214,6 +218,8 @@ describe('artifact_update', () => {
   it('recalls the prior index record to preserve createdAt, then re-stores', async () => {
     const ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
     global.fetch = mockFetch([
+      // clean read-back (see the read-back describe block below)
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '# new', format: 'markdown' } })],
       ['/artifacts', (body, url) => { calls.push(['write', url, body]); return { json: { id: ID, url: `http://box/a/${ID}`, updatedAt: '2026-07-18T00:00:00Z' } }; }],
       ['/credits/review-memory', (body, url) => {
         calls.push([body.op, url, body]);
@@ -246,6 +252,236 @@ describe('artifact_get', () => {
     const out = JSON.parse(await artifactSkill.handleToolCall('artifact_get', { id: ID }));
     expect(out.metadata.title).toBe('G');
     expect(out.content).toBe('# hi');
+  });
+});
+
+// ── post-publish read-back ───────────────────────────────────────────────────
+// Closes the loop the skill previously left open: after a 2xx publish, GET the
+// artifact back and prove the STORED SOURCE is the source we sent.
+//
+// SCOPE, and the tests hold it to it: this is TRANSPORT/STORAGE integrity only.
+// It says nothing about whether the page renders — the stored blob is the source,
+// the document is built later. Every verdict carries that sentence.
+//
+// WHY EXACT EQUALITY DOESN'T CRY WOLF — verified in backend/src/handlers/
+// artifacts.js, not assumed: the POST writes `Body: source` (the raw string off
+// JSON.parse) with no trim / trailing-newline / BOM / unicode normalisation, the
+// validator returns only {ok, defects} and never a rewritten source, and the GET
+// is transformToString() (utf-8). The corpus test below is the guard on that.
+describe('post-publish read-back', () => {
+  const ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const URL = `http://box/artifact/${ID}`;
+
+  /**
+   * A backend that ACCEPTS the publish and then serves `stored` on the read-back
+   * GET — the point being that `stored` may differ from what was sent.
+   *   stored instanceof Error → the GET throws (network failure)
+   *   stored === undefined    → the GET response has no `content` field
+   *   opts.getStatus          → the GET returns that non-2xx status
+   * Returns the array of requests made, so a test can assert the GET happened
+   * (or didn't) and against which URL.
+   */
+  function backend(stored, opts: any = {}) {
+    const seen: any[] = [];
+    global.fetch = vi.fn(async (url: any, init: any) => {
+      const method = init?.method || 'GET';
+      seen.push({ url: String(url), method, body: init?.body ? JSON.parse(init.body) : null });
+      if (String(url).includes('/credits/review-memory')) {
+        if (opts.indexFails) return { ok: false, status: 500, text: async () => 'kv down' } as any;
+        const op = JSON.parse(init.body).op;
+        return { ok: true, status: 200, json: async () => (op === 'recall' ? { found: false } : { stored: true }) } as any;
+      }
+      if (String(url).includes('/credits/artifacts')) {
+        if (method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({ id: ID, url: URL, createdAt: '2026-08-14T00:00:00Z', updatedAt: '2026-08-14T00:00:00Z' }) } as any;
+        }
+        if (stored instanceof Error) throw stored;
+        if (opts.getStatus) return { ok: false, status: opts.getStatus, text: async () => 'not found' } as any;
+        const payload: any = { metadata: { id: ID, title: 'T' }, format: 'markdown' };
+        if (stored !== undefined) payload.content = stored;
+        return { ok: true, status: 200, json: async () => payload } as any;
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    }) as any;
+    return seen;
+  }
+
+  const publish = (markdown) => artifactSkill.handleToolCall('artifact_publish', { title: 'T', markdown });
+
+  it('identical content → clean, and the tool result is EXACTLY { id, url }', async () => {
+    const seen = backend('# Report\n\n| A | B |\n|---|---|\n| 1 | 2 |\n');
+    const out = JSON.parse(await publish('# Report\n\n| A | B |\n|---|---|\n| 1 | 2 |\n'));
+    expect(out).toEqual({ id: ID, url: URL }); // no readBack noise on the happy path
+    // and it really did go and look — at the right, member-gated backend route.
+    const get = seen.find((r) => r.method === 'GET');
+    expect(get.url).toBe(`http://cp.local/credits/artifacts/${ID}`);
+  });
+
+  // The anti-cry-wolf test. Each of these is something a naive checker would
+  // "helpfully" normalise away (or a careless backend might); the round trip
+  // preserves all of them verbatim, so NONE may be reported.
+  it('content the backend stores verbatim is NEVER flagged (trailing newline, CRLF, BOM, NFD, astral emoji)', async () => {
+    const corpus = [
+      '# ends with a newline\n',
+      '# no trailing newline',
+      '# crlf\r\n\r\nline two\r\n',
+      '﻿# leading BOM',
+      '# NFD: é vs NFC: é',
+      '# astral 🧪🚀 and CJK 中文测试',
+      '# tabs\t and  double  spaces   ',
+      '<h1>html &amp; entities &lt;kept&gt;</h1>',
+      '# control chars \u0000 \u001b[31m \u000b survive JSON + utf-8 both ways',
+      // A well-formed surrogate PAIR must round-trip; a LONE surrogate is the one
+      // input utf-8 cannot carry, so the comparator deliberately does not
+      // special-case it — if a backend ever replaces one with U+FFFD, fire.
+      '# paired astral \u{1F9EA} stays paired',
+    ];
+    for (const c of corpus) {
+      __resetPublishBudget();
+      backend(c);
+      const out = JSON.parse(await publish(c));
+      expect(out, `flagged verbatim content: ${JSON.stringify(c)}`).toEqual({ id: ID, url: URL });
+    }
+  });
+
+  it('truncated content → mismatch that NAMES the delta, the offset and both excerpts', async () => {
+    const sent = '# Quarterly Report\n\nAll thirty findings follow.\n' + 'x'.repeat(200);
+    backend(sent.slice(0, 60));
+    const out = JSON.parse(await publish(sent));
+
+    expect(out.id).toBe(ID);
+    expect(out.url).toBe(URL); // the page exists — a mismatch is NOT a failed publish
+    expect(out.error).toBeUndefined();
+    expect(out.readBack.status).toBe('mismatch');
+    expect(out.readBack.kind).toBe('truncated');
+    expect(out.readBack.sentChars).toBe(sent.length);
+    expect(out.readBack.storedChars).toBe(60);
+    expect(out.readBack.delta).toBe(60 - sent.length);
+    expect(out.readBack.firstDiffAt).toBe(60);
+    expect(out.readBack.sentExcerpt).toEqual(expect.any(String));
+    expect(out.readBack.storedExcerpt).toEqual(expect.any(String));
+    // the honest-scope sentence travels with every verdict
+    expect(out.readBack.scope).toMatch(/does NOT check that the page renders/);
+    // and the advice is bounded — rewrite once, then tell the user; never loop
+    expect(out.readBack.note).toMatch(/artifact_update ONCE/);
+    expect(out.readBack.note).toMatch(/do NOT re-publish/i);
+  });
+
+  it('content that differs mid-stream → diverged, with the first differing offset', async () => {
+    backend('# Report\n\nTOTAL: 45 findings');
+    const out = JSON.parse(await publish('# Report\n\nTOTAL: 42 findings'));
+    expect(out.readBack.status).toBe('mismatch');
+    expect(out.readBack.kind).toBe('diverged');
+    expect(out.readBack.firstDiffAt).toBe('# Report\n\nTOTAL: 4'.length);
+    expect(out.readBack.delta).toBe(0);
+    expect(out.readBack.storedExcerpt).toContain('45');
+    expect(out.readBack.sentExcerpt).toContain('42');
+  });
+
+  it('extra content appended → longer', async () => {
+    backend('# a\ninjected');
+    const out = JSON.parse(await publish('# a\n'));
+    expect(out.readBack.kind).toBe('longer');
+    expect(out.readBack.delta).toBe(8);
+  });
+
+  // FAIL-SOFT. The blob write already returned 2xx, so the URL exists and is
+  // valid; a broken probe must never be reported as a broken publish.
+  it('read-back THROWS (network) → publish still reported successful, verdict is unverified', async () => {
+    backend(new Error('ECONNRESET'));
+    const out = JSON.parse(await publish('# a'));
+    expect(out.id).toBe(ID);
+    expect(out.url).toBe(URL);
+    expect(out.error).toBeUndefined();
+    expect(out.readBack.status).toBe('unverified');
+    expect(out.readBack.status).not.toBe('mismatch');
+    expect(out.readBack.reason).toMatch(/ECONNRESET/);
+    expect(out.readBack.note).toMatch(/No action needed/);
+  });
+
+  it('read-back 404 (propagation delay) → unverified, never mismatch', async () => {
+    backend('# a', { getStatus: 404 });
+    const out = JSON.parse(await publish('# a'));
+    expect(out.url).toBe(URL);
+    expect(out.readBack.status).toBe('unverified');
+    expect(out.readBack.reason).toMatch(/404/);
+  });
+
+  it('read-back with no content field → unverified', async () => {
+    backend(undefined);
+    const out = JSON.parse(await publish('# a'));
+    expect(out.url).toBe(URL);
+    expect(out.readBack.status).toBe('unverified');
+    expect(out.readBack.reason).toMatch(/no content field/);
+  });
+
+  // The backend's GET swallows an object-store read error into `content: ''`, so
+  // an empty read-back cannot be told apart from a transient read failure — and
+  // it cannot mean the write was lost (the PutObject is awaited; a failure there
+  // would have produced a non-2xx with no id/url). Calling it a mismatch would be
+  // crying wolf at our own probe.
+  it('empty content read-back is INCONCLUSIVE, not a mismatch', async () => {
+    backend('');
+    const out = JSON.parse(await publish('# a real page'));
+    expect(out.readBack.status).toBe('unverified');
+    expect(out.readBack.reason).toMatch(/empty content/);
+    expect(out.readBack.reason).toMatch(/indistinguishable/);
+  });
+
+  it('a mismatch and an index failure coexist — neither hides the other', async () => {
+    backend('truncated', { indexFails: true });
+    const out = JSON.parse(await publish('the full page content'));
+    expect(out.url).toBe(URL);
+    expect(out.readBack.status).toBe('mismatch');
+    expect(out.indexWarning).toMatch(/artifact index write failed/);
+  });
+
+  it('artifact_update read-backs when it sent content', async () => {
+    const seen = backend('# stale previous version');
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_update', { id: ID, markdown: '# the new version' }));
+    expect(out.url).toBe(URL);
+    expect(out.readBack.status).toBe('mismatch');
+    expect(seen.some((r) => r.method === 'GET' && r.url.endsWith(`/artifacts/${ID}`))).toBe(true);
+  });
+
+  // A title-only update rewrites no blob, so the stored source is the PREVIOUS
+  // one — comparing would be a guaranteed false positive.
+  it('artifact_update with only a title does NOT read back at all', async () => {
+    const seen = backend('# whatever is already stored');
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_update', { id: ID, title: 'Renamed' }));
+    expect(out).toEqual({ id: ID, url: URL });
+    expect(seen.some((r) => r.method === 'GET' && r.url.includes('/credits/artifacts/'))).toBe(false);
+  });
+
+  it('a REJECTED publish never read-backs (there is no artifact to read)', async () => {
+    let gets = 0;
+    global.fetch = vi.fn(async (url: any, init: any) => {
+      const method = init?.method || 'GET';
+      if (String(url).includes('/credits/artifacts')) {
+        if (method === 'GET') { gets += 1; return { ok: true, status: 200, json: async () => ({ content: '' }) } as any; }
+        return { ok: false, status: 422, text: async () => JSON.stringify({ error: 'broken', defects: [] }) } as any;
+      }
+      return { ok: true, status: 200, json: async () => ({ stored: true }) } as any;
+    }) as any;
+    await publish('# broken');
+    expect(gets).toBe(0);
+  });
+});
+
+describe('__compareStoredSource (the comparator, directly)', () => {
+  it('identical → null', () => {
+    expect(__compareStoredSource('abc', 'abc')).toBeNull();
+    expect(__compareStoredSource('', '')).toBeNull();
+  });
+  it('prefix relationships are classified, not just "different"', () => {
+    expect(__compareStoredSource('abcdef', 'abc')).toMatchObject({ kind: 'truncated', firstDiffAt: 3, delta: -3 });
+    expect(__compareStoredSource('abc', 'abcdef')).toMatchObject({ kind: 'longer', firstDiffAt: 3, delta: 3 });
+    expect(__compareStoredSource('abcdef', 'abcXef')).toMatchObject({ kind: 'diverged', firstDiffAt: 3, delta: 0 });
+  });
+  it('excerpts are bounded and escape newlines so the message stays one readable line', () => {
+    const d: any = __compareStoredSource('a\n'.repeat(500), 'a\n'.repeat(500) + 'tail');
+    expect(d.sentExcerpt).not.toContain('\n');
+    expect(d.sentExcerpt.length).toBeLessThan(200);
   });
 });
 

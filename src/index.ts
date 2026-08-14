@@ -38,6 +38,7 @@ import { kvMemorySkill } from './kvMemory.js';
 import { datasetStoreSkill } from './datasetStore.js';
 import { artifactSkill } from './artifact.js';
 import { chartRenderSkill } from './chartRender.js';
+import { reportCheckSkill } from './reportCheck.js';
 import { codeStatsSkill } from './codeStats.js';
 import { chatProgressSkill } from './chatProgress.js';
 import { socialCardSkill } from './socialCard.js';
@@ -89,6 +90,7 @@ reg(kvMemorySkill);
 reg(datasetStoreSkill);
 reg(artifactSkill);
 reg(chartRenderSkill);
+reg(reportCheckSkill);
 reg(codeStatsSkill);
 reg(chatProgressSkill);
 reg(socialCardSkill);
@@ -111,7 +113,7 @@ reg({ ...slackSkill, id: 'slack_notify' });
 // identical shape, now the complete superset (drift gone).
 export { SKILL_IDS as SKILLS } from '@zibby/skill-ids';
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, vikunjaSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, artifactSkill, chartRenderSkill, codeStatsSkill, chatProgressSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, vikunjaSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, artifactSkill, chartRenderSkill, reportCheckSkill, codeStatsSkill, chatProgressSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
@@ -133,6 +135,11 @@ export {
   reportToMarkdown,
   SEVERITIES as REPORT_SEVERITIES,
 } from './report.js';
+// The pre-flight checker as a PURE FUNCTION, not only as a tool. artifact.ts is
+// the place this most wants to be called from (same turn-local concern as its
+// retry budget, and impossible for the model to skip); exporting it here is what
+// lets that call site exist without a second copy of the rules.
+export { checkRenderedReport, REPORT_CODES } from './reportCheck.js';
 export { skill, functionSkill } from './function-skill.js';
 export { registerSkill, getSkill, hasSkill, getAllSkills, listSkillIds } from '@zibby/agent-workflow';
 export { INTEGRATIONS, INTEGRATION_REGISTRY } from './integrations.js';

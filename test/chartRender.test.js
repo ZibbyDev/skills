@@ -11,6 +11,9 @@ import { chartRenderSkill } from '../src/chartRender.js';
 // resolve() env forwarding, a real radar + bar render (SVG labels + PNG magic),
 // dirty-spec tolerance, output modes, filename handling, dim capping, and the
 // clear-error contract on invalid specs.
+//
+// The inline-SVG return path (output:'svg-inline' — no file, markup in the
+// result) is covered separately in src/__tests__/chartRender-inline.test.ts.
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -65,10 +68,15 @@ describe('chartRenderSkill structure', () => {
     const tool = chartRenderSkill.tools[0];
     expect(tool.input_schema.required).toEqual(['spec']);
     expect(tool.input_schema.properties.spec.type).toBe('object');
-    expect(tool.input_schema.properties.output.enum).toEqual(['svg', 'png', 'both']);
+    // 'svg-inline' returns the markup instead of writing a file (the HTML-page
+    // path). The three file-writing values keep their exact meaning + order.
+    expect(tool.input_schema.properties.output.enum).toEqual(['svg', 'png', 'both', 'svg-inline']);
     // The description carries the micro-examples that anchor LLM spec accuracy.
     expect(tool.description).toContain('"type":"bar"');
     expect(tool.description).toContain('"type":"radar"');
+    // …and must tell the model WHEN the inline path applies, or it never uses it.
+    expect(tool.description).toContain("output:'svg-inline'");
+    expect(chartRenderSkill.promptFragment).toContain("output:'svg-inline'");
   });
 });
 

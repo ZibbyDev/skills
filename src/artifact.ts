@@ -44,23 +44,37 @@ import { SKILL_META } from '@zibby/skill-ids';
  *
  * VALIDATION + THE RETRY BUDGET — where each half lives
  * ─────────────────────────────────────────────────────
- * The RULES live in ONE place and it is not here: `backend/src/utils/
+ * The MARKUP rules live in ONE place and it is not here: `backend/src/utils/
  * artifact-validate.js`, run by the handler this skill POSTs to. That is the
  * authoritative choke point (skill, CLI and every other agent pass through it),
  * and duplicating any rule here would be exactly the two-places drift the
- * codebase keeps getting burned by. This module implements ZERO validation. What
+ * codebase keeps getting burned by. This module reimplements NONE of them. What
  * it DOES own is the piece a stateless handler cannot: a turn-local RETRY BUDGET.
  * Research on LLM HTML repair is unambiguous — later iterations rarely fix what
  * the first attempt got wrong — so after MAX_PUBLISH_ATTEMPTS rejected publishes
  * the tool stops the model and tells it to report the failure honestly instead of
  * burning turns or shipping a broken link.
  *
+ * There is a SECOND question the server gate structurally cannot answer — "does
+ * the page agree with the DATA it was built from?" — and it cannot answer it
+ * because it never receives the data. Only the caller has it. So when (and only
+ * when) the caller passes `data`, this module runs `checkRenderedReport` from
+ * ./reportCheck.js BEFORE the POST. That is a LOCAL SOURCE of the same rejection
+ * event, arbitrated by the SAME budget counter and rendered through the SAME two
+ * payload builders — see the pre-flight section below for why that is one decider
+ * and not two.
+ *
  * TOOLS
  * ─────
- *   artifact_publish({ title, html | markdown, kind?, favicon?, summary? })
+ *   artifact_publish({ title, html | markdown, kind?, favicon?, summary?, data? })
+ *        → PRE-FLIGHT (only when `data` is passed AND the content is `html`):
+ *          checkRenderedReport({html,data}); on defects nothing is sent at all
  *        → control-plane writes the blob (ARTIFACTS_BUCKET, account+project scoped)
+ *        → READ-BACK: GET the blob and compare it to what was sent (see
+ *          verifyStoredSource — transport integrity ONLY, never a rendering
+ *          claim; silent when clean, fail-soft when it can't run)
  *        → index record written to kv-memory (scope `${ns}:artifact:<id>`)
- *        → returns { id, url }
+ *        → returns { id, url } (+ `readBack` only when it was NOT clean)
  *   artifact_update({ id, title?, html?|markdown? })  → same url, new version
  *   artifact_get({ id })                              → { metadata, content }
  *   (artifact_list = kv_recall_prefix('artifact:') on the kv-memory skill)
@@ -78,6 +92,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { checkRenderedReport } from './reportCheck.js';
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -221,6 +237,133 @@ function retryOnce(format, error, defects) {
 }
 
 /**
+ * ── PRE-FLIGHT: a second SOURCE of rejection, NOT a second decider ───────────
+ *
+ * WHY IT IS HERE AND NOT SERVER-SIDE. The server gate is authoritative on MARKUP
+ * and stays that way. It cannot check the page against its DATA for a structural
+ * reason, not a scheduling one: it never receives the data. Only the caller holds
+ * the tool results the page was rendered from, so a data↔render check can only
+ * run where the data is. `checkRenderedReport` was measured to have ZERO rule
+ * overlap with `artifact-validate.js` — nothing here re-decides anything the
+ * server decides.
+ *
+ * WHY THIS IS ONE DECIDER. "If your fix adds a decider, it is the wrong fix." The
+ * test for a second decider is *can the two disagree about the same question?*
+ *   - Local vs server: different questions, disjoint rules, disjoint defect codes
+ *     (the one shared code, `zero-width-bar`, fires on provably disjoint inputs —
+ *     see REPORT_CODES). Neither can contradict the other.
+ *   - Local vs the `report_check` tool the model may call itself: the SAME
+ *     function, imported once. Derivation, not duplication — they cannot drift.
+ *   - The stop rule: there is exactly ONE counter (`consecutiveRejections`), ONE
+ *     place that increments it (`rejectPublish`), and ONE pair of payload
+ *     builders (`retryOnce` / `budgetExhausted`). A local refusal and a 422 are
+ *     the same event arriving from two directions, not two budgets.
+ *
+ * DOES A LOCAL REFUSAL CONSUME AN ATTEMPT? YES — deliberately, and it is the only
+ * answer compatible with the docstring on MAX_PUBLISH_ATTEMPTS. That budget is
+ * not rationing server calls (a local refusal makes none); it is rationing the
+ * MODEL'S REPAIR ROUNDS, because the finding it rests on is that a second repair
+ * pass rarely fixes what the first got wrong. A local refusal costs the model the
+ * identical work — re-author the whole page — so it is the identical round. If it
+ * were free, passing `data` would silently buy 2 local + 2 server = 4 repair
+ * rounds, which is precisely the "burning the user's turn budget pretending a
+ * repair loop converges" the budget exists to prevent, AND it would be a second
+ * budget in all but name. So: same counter, same stop, same honesty payload.
+ *
+ * ARGUMENT ERRORS DO NOT CONSUME ANYTHING. A missing title, both content fields
+ * at once, or `data` on the markdown path are malformed CALLS, not broken pages —
+ * they are rejected before the budget is touched, exactly as they always were.
+ *
+ * FAIL-OPEN, ALWAYS. A probe that crashes must never block a publish, and a probe
+ * that measured nothing must never pass for a clean bill of health ("a NEGATIVE
+ * result means suspect your PROBE first"). Both land as `preflight:
+ * {status:'unverified'}` on an otherwise successful result — the same fail-soft
+ * shape `readBack` uses. A clean check that actually measured something says
+ * NOTHING, for the same reason the read-back is silent when clean: it costs no
+ * tokens on the ~always path and gives the model nothing to misquote as "verified".
+ */
+
+/** The note that travels with every non-blocking pre-flight verdict. */
+const PREFLIGHT_UNVERIFIED_NOTE =
+  'The page WAS published and the url is valid. This only means the data↔render pre-flight could not reach a verdict — '
+  + 'nothing is known to be wrong. Open the page yourself if the figures matter.';
+
+/**
+ * Render pre-flight defects as the message the MODEL reads.
+ *
+ * The per-line grammar (`N. [code] line X: message — hint`, hint once per rule)
+ * intentionally matches the server's `formatDefects`, so a model that has learned
+ * to read one reads the other. The two CANNOT share a function — different repos,
+ * no shared module — but they are also not a "pair that must agree": nothing
+ * parses these strings. The contract that must hold is the JSON ENVELOPE, and
+ * that one is shared by construction (both paths return `retryOnce` /
+ * `budgetExhausted`, never a hand-built object). A test pins that.
+ *
+ * The HEADER is deliberately DIFFERENT from the server's: this refusal happened
+ * before any request left the process, and telling the model "nothing was sent"
+ * is load-bearing — it is what stops it from hunting for a half-created page.
+ */
+function formatPreflightDefects(defects) {
+  const hinted = new Set();
+  const lines = (defects || []).map((d, i) => {
+    const at = d.line ? ` line ${d.line}:` : '';
+    let hint = '';
+    if (d.hint && !hinted.has(d.code)) { hinted.add(d.code); hint = ` — ${d.hint}`; }
+    return `${i + 1}. [${d.code}]${at} ${d.message}${hint}`;
+  });
+  const n = lines.length;
+  return `Artifact NOT published and NOTHING was sent — the page was checked against the \`data\` you passed and disagrees with it in ${n} place${n === 1 ? '' : 's'}:\n${lines.join('\n')}`;
+}
+
+/**
+ * Run the data↔render check. Returns:
+ *   null                      — clean, and the probe actually measured something
+ *   { rejected: {...} }       — defects; the caller must refuse this publish
+ *   { unverified: {...} }     — the probe crashed, or found nothing to measure;
+ *                               publish proceeds and the note rides along
+ */
+function runReportPreflight(html, data) {
+  let result: any;
+  try {
+    result = checkRenderedReport({ html, data });
+  } catch (e: any) {
+    return { unverified: { status: 'unverified', reason: `the data↔render pre-flight threw and was skipped: ${String(e?.message || e).slice(0, 200)}`, note: PREFLIGHT_UNVERIFIED_NOTE } };
+  }
+  if (!result?.ok) {
+    return { rejected: { message: formatPreflightDefects(result?.defects), defects: result?.defects || [] } };
+  }
+  // The probe receipt is the whole reason reportCheck returns `checked`: a clean
+  // verdict from a probe that found no tables and no bars is a broken probe
+  // wearing a clean result's clothes. Say so instead of banking it.
+  const checked = result.checked || {};
+  const measured = (Number(checked.tables) || 0) + (Number(checked.bars) || 0);
+  if (measured === 0) {
+    return {
+      unverified: {
+        status: 'unverified',
+        reason: 'the pre-flight found no tables and no bars in this page, so it had nothing to compare against your data — a clean result here proves nothing',
+        checked,
+        note: PREFLIGHT_UNVERIFIED_NOTE,
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * The ONE place a rejected publish is counted and turned into a model-facing
+ * payload. Both rejection sources — the local pre-flight and the server's 422 —
+ * come through here; that is what makes them one decider.
+ */
+function rejectPublish(format, message, defects) {
+  consecutiveRejections += 1;
+  const out = consecutiveRejections >= MAX_PUBLISH_ATTEMPTS
+    ? budgetExhausted(message, defects)
+    : retryOnce(format, message, defects);
+  return { __rejected: true, payload: out };
+}
+
+/**
  * POST {base}/artifacts — the privileged, SERVER-SIDE blob write. Body carries
  * the content ({ title, html|markdown, kind?, favicon?, id? }); the backend does
  * the S3 PutObject (ARTIFACTS_BUCKET) so object-store creds never enter this run.
@@ -263,27 +406,35 @@ async function artifactWriteFetch(payload) {
 }
 
 /**
- * artifactWriteFetch + the retry budget. Returns the backend's success object, or
- * `{ __rejected: true, payload }` where `payload` is the exact string the tool
- * hands back to the model (fix-it-once, or stop-and-be-honest).
+ * The pre-flight + artifactWriteFetch + the retry budget. Returns the backend's
+ * success object, or `{ __rejected: true, payload }` where `payload` is the exact
+ * string the tool hands back to the model (fix-it-once, or stop-and-be-honest).
  *
- * ONLY a 422 — the validation gate saying "this page is broken" — consumes the
- * budget. Auth failures, quota, and outages are not the model's to repair and are
- * rethrown untouched. A success RESETS the budget, so publishing several good
- * pages in one run is never penalised by an earlier bad one.
+ * `preflight` is `{ html, data }` when the caller supplied data for an html
+ * publish, else null. When present the check runs FIRST and a defect means NO
+ * REQUEST IS MADE AT ALL — the whole point of a pre-flight is that the broken
+ * page never reaches the wire.
+ *
+ * TWO rejection sources, ONE arbiter (`rejectPublish`), ONE counter. Everything
+ * else is unchanged: only a 422 — the server gate saying "this page is broken" —
+ * consumes the budget on the network path; auth failures, quota and outages are
+ * not the model's to repair and are rethrown untouched; and a success RESETS the
+ * budget, so publishing several good pages in one run is never penalised by an
+ * earlier bad one.
  */
-async function publishWithBudget(payload, format) {
+async function publishWithBudget(payload, format, preflight?: { html: string; data: any } | null) {
+  const local = preflight ? runReportPreflight(preflight.html, preflight.data) : null;
+  if (local?.rejected) return rejectPublish(format, local.rejected.message, local.rejected.defects);
   try {
     const written = await artifactWriteFetch(payload);
     consecutiveRejections = 0;
+    // Fail-open verdicts ride along on the SUCCESS result (the page is live);
+    // the caller lifts this onto `preflight`. Never a reason to withhold a url.
+    if (local?.unverified) written.__preflightNote = local.unverified;
     return written;
   } catch (e: any) {
     if (e?.status !== 422) throw e;
-    consecutiveRejections += 1;
-    const out = consecutiveRejections >= MAX_PUBLISH_ATTEMPTS
-      ? budgetExhausted(e.message, e.defects)
-      : retryOnce(format, e.message, e.defects);
-    return { __rejected: true, payload: out };
+    return rejectPublish(format, e.message, e.defects);
   }
 }
 
@@ -302,6 +453,150 @@ async function artifactReadFetch(id) {
     throw new Error(`artifact get failed (${res.status}): ${body.slice(0, 300)}`);
   }
   return res.json();
+}
+
+/**
+ * POST-PUBLISH READ-BACK — "the blob stored is the blob I sent", and NOTHING MORE
+ * ══════════════════════════════════════════════════════════════════════════════
+ * WHAT THIS PROVES, EXACTLY. `GET /credits/artifacts/{id}` returns `content` =
+ * the SOURCE we POSTed, read straight back out of the object store. Comparing it
+ * to what we sent proves the TRANSPORT + STORAGE round trip was lossless: nothing
+ * was truncated, re-encoded, or overwritten between this process and S3.
+ *
+ * WHAT IT DOES NOT PROVE — do not let it read as more:
+ *   - NOT that the page RENDERS correctly. The stored blob is the source; the
+ *     document a viewer sees is built later by the backend renderer (markdown) or
+ *     by the browser (html). Identical bytes say nothing about layout.
+ *   - NOT that the URL is reachable by a human (that is the dashboard's member
+ *     gate, a different surface).
+ *   - NOT that the content is CORRECT. The publish GATE (a 422 with defects)
+ *     already ran server-side; this is downstream of it and re-checks none of it.
+ * The reported wording says exactly this, because overclaiming here is worse than
+ * not checking at all.
+ *
+ * WHY EXACT EQUALITY IS THE RIGHT ASSERTION (verified against the backend, not
+ * assumed — a checker that cries wolf is worse than none):
+ * `backend/src/handlers/artifacts.js` writes `Body: source` — the raw string off
+ * `JSON.parse(event.body)` — with NO trim, NO trailing-newline, NO BOM, NO
+ * unicode normalisation; `validateArtifact()` returns only `{ok, defects}` and
+ * never a rewritten source. The read path is `GetObject(...).transformToString()`
+ * (utf-8) handed back through `JSON.stringify`. So the only transform in the whole
+ * loop is JSON-escape → utf-8 encode → utf-8 decode → JSON-escape, which is
+ * lossless for every well-formed JS string. Hence: byte-exact, no tolerances
+ * invented "just in case". If the backend ever DOES start normalising, this check
+ * is meant to fire — that is a two-places drift worth hearing about.
+ *
+ * WHY IT IS AUTOMATIC AND NON-FATAL rather than a tool the model calls:
+ *   - `artifact_get` has existed all along and nothing ever calls it. A check the
+ *     model must remember to run is a check that does not run — that IS the gap.
+ *   - Cost is one extra GET on a call that already makes two round trips, and
+ *     only when content was actually sent.
+ *   - A mismatch IS actionable even though the model cannot un-publish: the same
+ *     `artifact_update` that would fix a typo re-writes the blob, and telling the
+ *     user "the page may be incomplete" is strictly better than a confident link.
+ *   - Fail-soft is non-negotiable: the URL already exists and is valid, so a
+ *     read-back that 404s / times out / errors must NEVER be reported as a failed
+ *     publish. It downgrades to `unverified`, never to `mismatch`.
+ * KNOWN DEGRADATION, accepted deliberately: the GET returns `content` AND
+ * `rendered`, so a multi-megabyte page's read-back response is ~2× the content and
+ * can exceed Lambda's synchronous response cap on cloud — that lands in
+ * `unverified`, which is correct but useless. There is NO size threshold short-
+ * circuiting the check, on purpose: big pages are exactly where truncation is most
+ * likely, so skipping them would gut the check at its moment of maximum value. A
+ * wasted round trip on a rare huge publish is the cheaper mistake.
+ * On a CLEAN result the tool result is unchanged (`{ id, url }`) — deliberate: it
+ * costs the model no tokens on the ~always path and gives it nothing to
+ * misquote to the user as "verified". The check exists for the negative case.
+ */
+
+/** Characters of context echoed either side of the first difference. */
+const READBACK_EXCERPT = 60;
+
+/** A short, printable window of `s` around `at` (control chars escaped). */
+function excerptAround(s, at) {
+  const from = Math.max(0, at - Math.floor(READBACK_EXCERPT / 2));
+  const slice = s.slice(from, from + READBACK_EXCERPT);
+  const shown = slice.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+  return (from > 0 ? '…' : '') + shown + (from + READBACK_EXCERPT < s.length ? '…' : '');
+}
+
+/**
+ * Compare the source we sent with the source read back. Returns null when they
+ * are identical, otherwise a descriptor naming WHAT differs — length delta, the
+ * first differing character offset, and a short excerpt of each side, in the same
+ * "name the defect and where" spirit as the validation gate's defects.
+ *
+ * `kind` discriminates the three shapes a real failure takes, because the fix
+ * differs: `truncated` (stored is a strict prefix — a cut-off write/transfer),
+ * `longer` (stored has extra content appended), `diverged` (they differ mid-way —
+ * a mangled encoding, or a stale/overwritten object).
+ * Exported for direct unit testing; not part of the tool surface.
+ */
+export function __compareStoredSource(sent, stored) {
+  if (sent === stored) return null;
+  const n = Math.min(sent.length, stored.length);
+  let at = 0;
+  while (at < n && sent[at] === stored[at]) at += 1;
+  const kind = at === n
+    ? (stored.length < sent.length ? 'truncated' : 'longer')
+    : 'diverged';
+  return {
+    kind,
+    sentChars: sent.length,
+    storedChars: stored.length,
+    delta: stored.length - sent.length,
+    firstDiffAt: at,
+    sentExcerpt: excerptAround(sent, at),
+    storedExcerpt: excerptAround(stored, at),
+  };
+}
+
+/** The one sentence that must travel with every read-back verdict. */
+const READBACK_SCOPE =
+  'Read-back compares the STORED SOURCE with what was sent (transport/storage integrity only). '
+  + 'It does NOT check that the page renders correctly.';
+
+/**
+ * Read the artifact back and compare. Returns null when the stored source is
+ * byte-identical to what we sent (the tool result then stays `{ id, url }`), or a
+ * verdict object to attach under `readBack`.
+ *
+ * NEVER throws and never reports a failed publish — the blob write already
+ * returned 2xx, so the page exists either way.
+ *
+ * The empty-content case is deliberately `unverified`, not `mismatch`: the GET
+ * handler swallows an object-store read error into `content: ''`
+ * (`artifacts.js` getArtifact), so an empty read-back cannot be told apart from a
+ * transient read failure — and it CANNOT mean the write was lost, because the
+ * PutObject is awaited and a failure there would have produced a non-2xx with no
+ * id/url. Calling that a mismatch would be crying wolf at our own probe.
+ */
+async function verifyStoredSource(id, sent) {
+  let data: any;
+  try {
+    data = await artifactReadFetch(id);
+  } catch (e: any) {
+    return { status: 'unverified', scope: READBACK_SCOPE, reason: `read-back request failed: ${String(e?.message || e).slice(0, 200)}`, note: 'The page WAS published and the url is valid — this only means the extra integrity check could not run. No action needed.' };
+  }
+  const stored = data?.content;
+  if (typeof stored !== 'string') {
+    return { status: 'unverified', scope: READBACK_SCOPE, reason: 'read-back returned no content field', note: 'The page WAS published and the url is valid — this only means the extra integrity check could not run. No action needed.' };
+  }
+  if (stored === '' && sent !== '') {
+    return { status: 'unverified', scope: READBACK_SCOPE, reason: 'read-back returned empty content, which the backend also returns when its object-store read errors — indistinguishable, so this is inconclusive rather than a mismatch', note: 'The page WAS published and the url is valid. If the page looks blank when opened, re-send the same content with artifact_update.' };
+  }
+  const diff = __compareStoredSource(sent, stored);
+  if (!diff) return null;
+  return {
+    status: 'mismatch',
+    scope: READBACK_SCOPE,
+    ...diff,
+    note:
+      `The stored page source is NOT what was sent (${diff.kind}: sent ${diff.sentChars} chars, stored ${diff.storedChars}, `
+      + `first difference at character ${diff.firstDiffAt}). The url exists and the page is live, so do NOT re-publish a new one. `
+      + `You may call artifact_update ONCE with the identical content to rewrite the blob; if it differs again, stop and tell the `
+      + `user the published page may be incomplete rather than retrying.`,
+  };
 }
 
 /**
@@ -359,6 +654,46 @@ function pickContent(args) {
   return null;
 }
 
+/**
+ * Normalise the optional `data` argument into a pre-flight input.
+ *
+ * Returns null when no data was passed (→ behaviour is byte-identical to before
+ * `data` existed: no check, no extra field, no changed result shape — pinned by
+ * test), `{ error }` for a malformed call, or `{ preflight: { html, data } }`.
+ *
+ * `data` WITHOUT html is an ERROR, not a silent no-op. `checkRenderedReport`
+ * reads a rendered HTML document — elements, CSS, bar geometry. Handed Markdown
+ * it would find zero tables and zero bars and return a vacuously clean verdict,
+ * i.e. it would tell the model the page was checked when nothing was. This module
+ * already refuses the same shape of mistake in `pickContent` (passing BOTH
+ * markdown and html errors rather than letting html silently win); an argument
+ * that cannot do what the caller believes it does gets the same treatment.
+ *
+ * The error text deliberately does NOT suggest switching to html to obtain the
+ * check. That would use a diagnostic to sabotage the template freeze, which is
+ * the single biggest lever on artifact success rate. It says the opposite.
+ */
+function pickPreflight(args, picked) {
+  const raw = args?.data;
+  if (raw === undefined || raw === null) return null;
+  if (!picked || picked.format !== 'html') {
+    return {
+      error:
+        '`data` is only meaningful together with `html`. The pre-flight reads a rendered HTML document (tables, bars, CSS), '
+        + 'so on the markdown path it would check nothing while reporting a clean page — that is worse than not checking. '
+        + 'Re-send WITHOUT `data`. Do NOT switch to `html` just to get the check: on the markdown path Zibby generates the '
+        + 'document, so the collapsed-bar and broken-geometry defects it looks for cannot happen there in the first place.',
+    };
+  }
+  // The model may hand structured data over as a JSON string; accept both, the
+  // same leniency the standalone report_check tool offers.
+  let data = raw;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return { error: '`data` was a string but not valid JSON — pass the tool results as a JSON object (wrap a bare array as {"rows": [...]}).' }; }
+  }
+  return { preflight: { html: picked.content, data } };
+}
+
 export const artifactSkill: any = {
   id: 'artifact',
   // Backend-calling: the MCP child talks to Zibby's own backend — the
@@ -398,11 +733,22 @@ up saying 42 in one place and 45 in another. If you need a total, compute it wit
 a tool (or restate the figures exactly as your tools returned them) and cite the
 same figure everywhere it appears.
 
+### If an html page RENDERS DATA, pass \`data\` too.
+A table of records, a bar chart, a row of meters — pass the raw tool results the
+page was built from as \`data\`, unchanged and unsummarised. The page is then
+compared against them before anything is sent, which catches the failures nobody
+sees until a human opens the link: a table short of rows, a bar drawn at a length
+that is not its value, a leftover \`\${…}\` or \`[object Object]\`. Do not write
+your own expectations — the check derives them from the data. Prose pages don't
+need it, and it is an error on the \`markdown\` path.
+
 ### The page is validated BEFORE a URL exists.
 If the content is broken you get back the exact defects and their line numbers,
-and no page is created. You get ONE retry. After that the tool STOPS you — at
-which point say plainly that you could not produce a clean page and put the
-content in the chat instead. Do not keep trying.
+and no page is created. You get ONE retry — and the \`data\` check and the server
+check SHARE those two attempts, so a locally refused page costs an attempt just
+like a rejected one. After that the tool STOPS you — at which point say plainly
+that you could not produce a clean page and put the content in the chat instead.
+Do not keep trying.
 
 THE CONTENT COMES FROM THIS CONVERSATION — NEVER FROM YOUR IMAGINATION.
 When someone says "make me a page / an artifact / a report", they mean THE THING
@@ -422,10 +768,11 @@ situation in which "示例 / sample / demo" belongs in a title you publish.
 
 Tools:
 - artifact_publish: Publish a NEW page. Pass a \`title\` and EITHER \`markdown\`
-  (the default — prefer this) OR \`html\` (never both). Optional \`kind\` (e.g.
-  "report", "plan", "dashboard"), \`favicon\` (an emoji), and \`summary\` (one line
-  for your own index). Returns { id, url }. Share the url; keep the id if you'll
-  update it later.
+  (the default — prefer this) OR \`html\` (never both). Pass \`data\` when the html
+  page renders a dataset (see above). Optional \`kind\` (e.g. "report", "plan",
+  "dashboard"), \`favicon\` (an emoji), and \`summary\` (one line for your own
+  index). Returns { id, url }. Share the url; keep the id if you'll update it
+  later.
 - artifact_update: Revise an EXISTING page by \`id\` (same url, new version). Pass
   the fields to change (\`title\`, \`markdown\`|\`html\`).
 - artifact_get: Fetch one artifact by \`id\` → { metadata, content } so you can
@@ -473,16 +820,26 @@ records this automatically; you don't store it yourself.)`,
           const picked = pickContent(args);
           if (!picked) return JSON.stringify({ error: 'provide exactly one of markdown (preferred) or html (non-empty string)' });
           if (picked.error) return JSON.stringify({ error: picked.error });
+          // Malformed CALL, not a broken page — rejected before the budget is touched.
+          const pre = pickPreflight(args, picked);
+          if (pre?.error) return JSON.stringify({ error: pre.error });
 
           const payload: any = { title, [picked.format]: picked.content };
           if (typeof args?.kind === 'string' && args.kind.trim()) payload.kind = args.kind.trim();
           if (typeof args?.favicon === 'string' && args.favicon.trim()) payload.favicon = args.favicon.trim();
 
-          const written = await publishWithBudget(payload, picked.format); // { id, url, createdAt, ... } | { __rejected }
+          const written = await publishWithBudget(payload, picked.format, pre?.preflight); // { id, url, createdAt, ... } | { __rejected }
           if (written?.__rejected) return written.payload;
           const id = written?.id;
           const url = written?.url;
           if (!id || !url) return JSON.stringify({ error: 'artifact write returned no id/url', response: written });
+
+          // Close the loop: read the blob back and prove it is what we sent.
+          // Null when clean, so the happy-path result stays exactly { id, url }.
+          const out: any = { id, url };
+          if (written.__preflightNote) out.preflight = written.__preflightNote;
+          const readBack = await verifyStoredSource(id, picked.content);
+          if (readBack) out.readBack = readBack;
 
           const record: any = {
             id,
@@ -494,9 +851,9 @@ records this automatically; you don't store it yourself.)`,
           };
           try { await indexStore(id, record); } catch (e) {
             // Blob is published; surface the index warning but don't fail the publish.
-            return JSON.stringify({ id, url, indexWarning: e.message });
+            out.indexWarning = e.message;
           }
-          return JSON.stringify({ id, url });
+          return JSON.stringify(out);
         }
 
         case 'artifact_update': {
@@ -509,16 +866,31 @@ records this automatically; you don't store it yourself.)`,
           if (!picked && !title) {
             return JSON.stringify({ error: 'nothing to update — pass a new title and/or markdown|html' });
           }
+          // Same rule as publish, and it also covers a title-only update: there is
+          // no html in this call, so there is nothing for `data` to be checked against.
+          const pre = pickPreflight(args, picked);
+          if (pre?.error) return JSON.stringify({ error: pre.error });
           const payload: any = { id };
           if (title) payload.title = title;
           if (picked) payload[picked.format] = picked.content;
           if (typeof args?.kind === 'string' && args.kind.trim()) payload.kind = args.kind.trim();
           if (typeof args?.favicon === 'string' && args.favicon.trim()) payload.favicon = args.favicon.trim();
 
-          const written = await publishWithBudget(payload, picked?.format); // { id, url, updatedAt, createdAt? }
+          const written = await publishWithBudget(payload, picked?.format, pre?.preflight); // { id, url, updatedAt, createdAt? }
           if (written?.__rejected) return written.payload;
           const url = written?.url;
           if (!url) return JSON.stringify({ error: 'artifact update returned no url', response: written });
+
+          // Read back ONLY when this call actually sent content. A title-only
+          // update rewrites no blob, so the stored source is the previous one and
+          // there is nothing to compare it against — checking would be a
+          // guaranteed false positive.
+          const out: any = { id, url };
+          if (written.__preflightNote) out.preflight = written.__preflightNote;
+          if (picked) {
+            const readBack = await verifyStoredSource(id, picked.content);
+            if (readBack) out.readBack = readBack;
+          }
 
           // Merge the index record: keep the original createdAt (recall it), bump
           // updatedAt + any changed fields.
@@ -535,9 +907,9 @@ records this automatically; you don't store it yourself.)`,
           if (typeof args?.summary === 'string' && args.summary.trim()) record.summary = args.summary.trim();
           else if (!record.summary) record.summary = record.title;
           try { await indexStore(id, record); } catch (e) {
-            return JSON.stringify({ id, url, indexWarning: e.message });
+            out.indexWarning = e.message;
           }
-          return JSON.stringify({ id, url });
+          return JSON.stringify(out);
         }
 
         case 'artifact_get': {
@@ -566,13 +938,15 @@ records this automatically; you don't store it yourself.)`,
         + 'Every figure on the page must come from a tool result or this conversation — do not do arithmetic in prose and print the result, and use the same number everywhere it appears. '
         + 'The content MUST come from the current conversation or data you fetched this turn; if you are not sure what the page should be about, ASK instead of calling this tool, and never publish a demo/sample/placeholder or an account-overview page as a stand-in. '
         + 'On the html path keep all CSS/JS/images INLINE (inline <style>/<script>, data: URIs) and send real tags (never &lt;escaped&gt; markup) — the page is sandboxed on view with no network at all, so every external URL is dead. '
-        + 'The content is VALIDATED before any URL exists: if it is broken you get the exact defects and line numbers back, you get ONE retry, and then the tool stops you. Returns { id, url }.',
+        + 'PASS `data` WHENEVER THE HTML PAGE RENDERS A DATASET — a table of records, a bar chart, a row of meters. Give it the raw tool results the page was built from, unchanged; the page is then checked AGAINST that data before anything is sent, catching a table short of rows, a bar drawn at the wrong length, and leftover ${…} or [object Object]. It costs you nothing when the page is right. Skip it for prose pages, and never pass it with `markdown` (that is an error, not a no-op). '
+        + 'The content is VALIDATED before any URL exists: if it is broken — by that data check or by the server — you get the exact defects and line numbers back, you get ONE retry, and then the tool stops you. Both kinds of rejection share the SAME two attempts. Returns { id, url }.',
       input_schema: {
         type: 'object',
         properties: {
           title: { type: 'string', description: 'The page title (also the browser tab title).' },
           markdown: { type: 'string', description: `PREFERRED. The page content as Markdown — Zibby renders it into a styled, self-contained document, so you never author a skeleton. Supports ${MARKDOWN_SUPPORTS}. Does NOT support ${MARKDOWN_LACKS}. Provide this OR html, never both.` },
           html: { type: 'string', description: 'The EXCEPTION path — only for a layout Markdown cannot express (bar chart, gauge, custom grid, SVG diagram). A self-contained HTML document or fragment, served VERBATIM: you own the doctype, head, CSS and every tag. All assets must be inline (<style>/<script>, data: URIs). Provide this OR markdown, never both.' },
+          data: { type: 'object', description: 'Optional, and worth passing WHENEVER the html page renders a dataset (a table of records, a bar chart, meters): the raw tool results the page was built from, as JSON, UNCHANGED — do not summarise it and do not write your own expectations, the check derives what must be true by itself (wrap a bare array as {"rows": [...]}). The page is then verified against it BEFORE publishing: row counts, bar lengths vs their values, bars whose width the CSS throws away, and placeholder residue. If they disagree nothing is sent and you get the defects back, using one of your two attempts. Only valid with `html` — passing it with `markdown` is an error.' },
           kind: { type: 'string', description: 'Optional label for what this is, e.g. "report", "plan", "dashboard", "diagram". Stored in your index.' },
           favicon: { type: 'string', description: 'Optional emoji used as the browser-tab icon, e.g. "📊".' },
           summary: { type: 'string', description: 'Optional one-line summary for your own index (defaults to the title). Helps you recall later what this page was.' },
@@ -584,7 +958,7 @@ records this automatically; you don't store it yourself.)`,
       name: 'artifact_update',
       description:
         'Revise an EXISTING artifact by id — the shareable URL stays the same, the content is replaced (new version). Pass the fields to change (title and/or markdown|html). '
-        + 'Prefer `markdown` for the same reason artifact_publish does: Zibby generates the document, so it cannot come out malformed. An update is validated exactly like a publish — if the new content is broken it is REFUSED and the page keeps its last good version. Returns { id, url }.',
+        + 'Prefer `markdown` for the same reason artifact_publish does: Zibby generates the document, so it cannot come out malformed. An update is validated exactly like a publish — including the optional `data` check when you send new `html` that renders a dataset — and if the new content is broken it is REFUSED, the page keeps its last good version, and the rejection shares the same two attempts as publish. Returns { id, url }.',
       input_schema: {
         type: 'object',
         properties: {
@@ -592,6 +966,7 @@ records this automatically; you don't store it yourself.)`,
           title: { type: 'string', description: 'New title (optional).' },
           markdown: { type: 'string', description: `PREFERRED. New Markdown content (optional) — Zibby renders the document skeleton. Supports ${MARKDOWN_SUPPORTS}. Provide this OR html.` },
           html: { type: 'string', description: 'New HTML content (optional), served verbatim — only for layouts Markdown cannot express. Provide this OR markdown.' },
+          data: { type: 'object', description: 'Optional — same as on artifact_publish: when the new `html` renders a dataset, pass the raw tool results it was built from and the page is checked against them before anything is sent. Only valid alongside new `html`.' },
           kind: { type: 'string', description: 'Optional updated kind label.' },
           favicon: { type: 'string', description: 'Optional updated emoji favicon.' },
           summary: { type: 'string', description: 'Optional updated one-line index summary.' },

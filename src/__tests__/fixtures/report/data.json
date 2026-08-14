@@ -1,0 +1,166 @@
+{
+  "areas": [
+    {
+      "area": "Auth",
+      "incidents": 45
+    },
+    {
+      "area": "Billing",
+      "incidents": 4
+    },
+    {
+      "area": "API",
+      "incidents": 10
+    },
+    {
+      "area": "UI",
+      "incidents": 7
+    },
+    {
+      "area": "Data",
+      "incidents": 15
+    }
+  ],
+  "incidents": [
+    {
+      "ticket": "ZB-1001",
+      "area": "Auth",
+      "severity": "critical",
+      "owner": "r.patel",
+      "ageDays": 1
+    },
+    {
+      "ticket": "ZB-1002",
+      "area": "Billing",
+      "severity": "high",
+      "owner": "k.nakamura",
+      "ageDays": 4
+    },
+    {
+      "ticket": "ZB-1003",
+      "area": "API",
+      "severity": "medium",
+      "owner": "l.ferreira",
+      "ageDays": 7
+    },
+    {
+      "ticket": "ZB-1004",
+      "area": "UI",
+      "severity": "low",
+      "owner": "m.osei",
+      "ageDays": 10
+    },
+    {
+      "ticket": "ZB-1005",
+      "area": "Data",
+      "severity": "critical",
+      "owner": "r.patel",
+      "ageDays": 13
+    },
+    {
+      "ticket": "ZB-1006",
+      "area": "Auth",
+      "severity": "high",
+      "owner": "k.nakamura",
+      "ageDays": 16
+    },
+    {
+      "ticket": "ZB-1007",
+      "area": "Billing",
+      "severity": "medium",
+      "owner": "l.ferreira",
+      "ageDays": 2
+    },
+    {
+      "ticket": "ZB-1008",
+      "area": "API",
+      "severity": "low",
+      "owner": "m.osei",
+      "ageDays": 5
+    },
+    {
+      "ticket": "ZB-1009",
+      "area": "UI",
+      "severity": "critical",
+      "owner": "r.patel",
+      "ageDays": 8
+    },
+    {
+      "ticket": "ZB-1010",
+      "area": "Data",
+      "severity": "high",
+      "owner": "k.nakamura",
+      "ageDays": 11
+    },
+    {
+      "ticket": "ZB-1011",
+      "area": "Auth",
+      "severity": "medium",
+      "owner": "l.ferreira",
+      "ageDays": 14
+    },
+    {
+      "ticket": "ZB-1012",
+      "area": "Billing",
+      "severity": "low",
+      "owner": "m.osei",
+      "ageDays": 17
+    },
+    {
+      "ticket": "ZB-1013",
+      "area": "API",
+      "severity": "critical",
+      "owner": "r.patel",
+      "ageDays": 3
+    },
+    {
+      "ticket": "ZB-1014",
+      "area": "UI",
+      "severity": "high",
+      "owner": "k.nakamura",
+      "ageDays": 6
+    },
+    {
+      "ticket": "ZB-1015",
+      "area": "Data",
+      "severity": "medium",
+      "owner": "l.ferreira",
+      "ageDays": 9
+    },
+    {
+      "ticket": "ZB-1016",
+      "area": "Auth",
+      "severity": "low",
+      "owner": "m.osei",
+      "ageDays": 12
+    },
+    {
+      "ticket": "ZB-1017",
+      "area": "Billing",
+      "severity": "critical",
+      "owner": "r.patel",
+      "ageDays": 15
+    },
+    {
+      "ticket": "ZB-1018",
+      "area": "API",
+      "severity": "high",
+      "owner": "k.nakamura",
+      "ageDays": 1
+    },
+    {
+      "ticket": "ZB-1019",
+      "area": "UI",
+      "severity": "medium",
+      "owner": "l.ferreira",
+      "ageDays": 4
+    },
+    {
+      "ticket": "ZB-1020",
+      "area": "Data",
+      "severity": "low",
+      "owner": "m.osei",
+      "ageDays": 7
+    }
+  ]
+}

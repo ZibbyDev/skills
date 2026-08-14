@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Incident review — last 30 days</title>
+<style>
+  :root { --ink: #16181d; --line: #dbdee4; --accent: #5070dd; }
+  body { margin: 0; padding: 32px; font: 15px/1.55 -apple-system, "Helvetica Neue", sans-serif; color: var(--ink); background: #fff; }
+  h1 { font-size: 24px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: #6b7280; margin: 0 0 28px; }
+  .chart { max-width: 720px; margin: 0 0 36px; }
+  .row { display: grid; grid-template-columns: 90px 1fr 48px; align-items: center; gap: 12px; margin: 0 0 8px; }
+  .label { font-weight: 500; }
+  .track { background: #eef0f4; border-radius: 3px; }
+  .bar {  height: 16px; border-radius: 3px; background: var(--accent); }
+  .value { text-align: right; font-variant-numeric: tabular-nums; }
+  table { border-collapse: collapse; width: 100%; max-width: 720px; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; color: #6b7280; }
+</style>
+</head>
+<body>
+  <h1>Incident review — last 30 days</h1>
+  <p class="sub">81 incidents across 5 areas.</p>
+
+  <section class="chart">
+      <div class="row">
+        <span class="label">Auth</span>
+        <span class="track"><span class="bar" style="width:100%"></span></span>
+        <span class="value">45</span>
+      </div>
+      <div class="row">
+        <span class="label">Billing</span>
+        <span class="track"><span class="bar" style="width:8.889%"></span></span>
+        <span class="value">4</span>
+      </div>
+      <div class="row">
+        <span class="label">API</span>
+        <span class="track"><span class="bar" style="width:22.222%"></span></span>
+        <span class="value">10</span>
+      </div>
+      <div class="row">
+        <span class="label">UI</span>
+        <span class="track"><span class="bar" style="width:15.556%"></span></span>
+        <span class="value">7</span>
+      </div>
+      <div class="row">
+        <span class="label">Data</span>
+        <span class="track"><span class="bar" style="width:33.333%"></span></span>
+        <span class="value">15</span>
+      </div>
+  </section>
+
+  <table>
+    <thead>
+      <tr><th>Ticket</th><th>Area</th><th>Severity</th><th>Owner</th><th>Age</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>ZB-1001</td><td>Auth</td><td>critical</td><td>r.patel</td><td>1d</td></tr>
+        <tr><td>ZB-1002</td><td>Billing</td><td>high</td><td>k.nakamura</td><td>4d</td></tr>
+        <tr><td>ZB-1003</td><td>API</td><td>medium</td><td>l.ferreira</td><td>7d</td></tr>
+        <tr><td>ZB-1004</td><td>UI</td><td>low</td><td>m.osei</td><td>10d</td></tr>
+        <tr><td>ZB-1005</td><td>Data</td><td>critical</td><td>r.patel</td><td>13d</td></tr>
+        <tr><td>ZB-1006</td><td>Auth</td><td>high</td><td>k.nakamura</td><td>16d</td></tr>
+        <tr><td>ZB-1007</td><td>Billing</td><td>medium</td><td>l.ferreira</td><td>2d</td></tr>
+        <tr><td>ZB-1008</td><td>API</td><td>low</td><td>m.osei</td><td>5d</td></tr>
+        <tr><td>ZB-1009</td><td>UI</td><td>critical</td><td>r.patel</td><td>8d</td></tr>
+        <tr><td>ZB-1010</td><td>Data</td><td>high</td><td>k.nakamura</td><td>11d</td></tr>
+        <tr><td>ZB-1011</td><td>Auth</td><td>medium</td><td>l.ferreira</td><td>14d</td></tr>
+        <tr><td>ZB-1012</td><td>Billing</td><td>low</td><td>m.osei</td><td>17d</td></tr>
+        <tr><td>ZB-1013</td><td>API</td><td>critical</td><td>r.patel</td><td>3d</td></tr>
+        <tr><td>ZB-1014</td><td>UI</td><td>high</td><td>k.nakamura</td><td>6d</td></tr>
+        <tr><td>ZB-1015</td><td>Data</td><td>medium</td><td>l.ferreira</td><td>9d</td></tr>
+        <tr><td>ZB-1016</td><td>Auth</td><td>low</td><td>m.osei</td><td>12d</td></tr>
+        <tr><td>ZB-1017</td><td>Billing</td><td>critical</td><td>r.patel</td><td>15d</td></tr>
+        <tr><td>ZB-1018</td><td>API</td><td>high</td><td>k.nakamura</td><td>1d</td></tr>
+        <tr><td>ZB-1019</td><td>UI</td><td>medium</td><td>l.ferreira</td><td>4d</td></tr>
+        <tr><td>ZB-1020</td><td>Data</td><td>low</td><td>m.osei</td><td>7d</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>
