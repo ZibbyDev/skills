@@ -879,6 +879,12 @@ records this automatically; you don't store it yourself.)`,
           if (typeof args?.kind === 'string' && args.kind.trim()) payload.kind = args.kind.trim();
           if (typeof args?.favicon === 'string' && args.favicon.trim()) payload.favicon = args.favicon.trim();
 
+          // Publish AND open the door in one call, when the readers have no
+          // account. `share` ONLY — never a caller-supplied password: a model
+          // asked to invent one invents a guessable one, which is the same
+          // reasoning that keeps `password` off artifact_share (see below).
+          if (args?.share === true) payload.share = true;
+
           const written = await publishWithBudget(payload, picked.format, pre?.preflight); // { id, url, createdAt, ... } | { __rejected }
           if (written?.__rejected) return written.payload;
           const id = written?.id;
@@ -888,6 +894,14 @@ records this automatically; you don't store it yourself.)`,
           // Close the loop: read the blob back and prove it is what we sent.
           // Null when clean, so the happy-path result stays exactly { id, url }.
           const out: any = { id, url };
+          // The password comes back from the write ONCE and is never readable
+          // again; surface it here or `share: true` accomplishes nothing.
+          if (written.shared) {
+            out.shared = true;
+            out.shareUrl = written.shareUrl;
+            out.password = written.password;
+            out.instruction = 'Send BOTH the shareUrl and the password in your reply. Copy the password EXACTLY — it is case-sensitive, shown once, and cannot be looked up again (artifact_share issues a new one, which kills this one).';
+          }
           if (written.__preflightNote) out.preflight = written.__preflightNote;
           const readBack = await verifyStoredSource(id, picked.content);
           if (readBack) out.readBack = readBack;
@@ -1015,7 +1029,8 @@ records this automatically; you don't store it yourself.)`,
         + 'The content MUST come from the current conversation or data you fetched this turn; if you are not sure what the page should be about, ASK instead of calling this tool, and never publish a demo/sample/placeholder or an account-overview page as a stand-in. '
         + 'On the html path keep all CSS/JS/images INLINE (inline <style>/<script>, data: URIs) and send real tags (never &lt;escaped&gt; markup) — the page is sandboxed on view with no network at all, so every external URL is dead. '
         + 'PASS `data` WHENEVER THE HTML PAGE RENDERS A DATASET — a table of records, a bar chart, a row of meters. Give it the raw tool results the page was built from, unchanged; the page is then checked AGAINST that data before anything is sent, catching a table short of rows, a bar drawn at the wrong length, and leftover ${…} or [object Object]. It costs you nothing when the page is right. Skip it for prose pages, and never pass it with `markdown` (that is an error, not a no-op). '
-        + 'The content is VALIDATED before any URL exists: if it is broken — by that data check or by the server — you get the exact defects and line numbers back, you get ONE retry, and then the tool stops you. Both kinds of rejection share the SAME two attempts. Returns { id, url }.',
+        + 'The content is VALIDATED before any URL exists: if it is broken — by that data check or by the server — you get the exact defects and line numbers back, you get ONE retry, and then the tool stops you. Both kinds of rejection share the SAME two attempts. Returns { id, url }. '
+        + 'PASS `share: true` WHEN THE READERS HAVE NO ZIBBY ACCOUNT — you get back { shareUrl, password } in this same call, instead of publishing a link they cannot open and then having to call artifact_share. The password is GENERATED; you never invent one. Without `share` the page is member-only, which is the default and is correct for anything internal.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1026,6 +1041,7 @@ records this automatically; you don't store it yourself.)`,
           kind: { type: 'string', description: 'Optional label for what this is, e.g. "report", "plan", "dashboard", "diagram". Stored in your index.' },
           favicon: { type: 'string', description: 'Optional emoji used as the browser-tab icon, e.g. "📊".' },
           summary: { type: 'string', description: 'Optional one-line summary for your own index (defaults to the title). Helps you recall later what this page was.' },
+          share: { type: 'boolean', description: 'Set true to publish the page WITH a password link in one step — the response then also carries { shareUrl, password }, which you send together. Use it whenever the people who asked are in a chat channel and have no Zibby account. Omit it (the default) for anything internal: the page is then readable only by logged-in members of this project, and no password exists.' },
         },
         required: ['title'],
       },
@@ -1080,8 +1096,10 @@ records this automatically; you don't store it yourself.)`,
     {
       name: 'artifact_unshare',
       description:
-        'Revoke an artifact\'s password link — it goes back to being viewable only by logged-in members of this project. '
-        + 'Immediate and total: anyone who already entered the password loses access too, not just new visitors. Safe to call on an artifact that was never shared.',
+        'REMOVE an artifact\'s password — this is the tool for "take the password off", "remove the password", "stop sharing" and "revoke the link", which are all the same act. '
+        + 'The page goes back to the DEFAULT it was published with: viewable only by logged-in members of this project, with no password anywhere. '
+        + 'Immediate and total: anyone who already entered the password loses access too, not just new visitors. Safe to call on an artifact that was never shared. '
+        + 'Note what this does NOT do: there is no way to leave a page open to anyone with the link and no password. Removing the password closes the anonymous door; it does not prop it open. Say that plainly if you are asked for a passwordless public link.',
       input_schema: {
         type: 'object',
         properties: {

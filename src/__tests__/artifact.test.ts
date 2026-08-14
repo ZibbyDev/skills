@@ -93,6 +93,62 @@ describe('artifact_publish', () => {
 // The RULES live in backend/src/utils/artifact-validate.js — this skill
 // implements none of them. What it owns is turn-local state the stateless
 // handler cannot hold: after MAX_PUBLISH_ATTEMPTS rejections, stop and be honest.
+describe('artifact_publish share:true — publish and open the door in one call', () => {
+  const ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const routes = (writeJson) => [
+    ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '<h1>hi</h1>', format: 'html' } })],
+    ['/artifacts', (body, url) => { calls.push(['write', url, body]); return { json: writeJson }; }],
+    ['/credits/review-memory', () => ({ json: { stored: true } })],
+  ];
+
+  it('forwards share and relays the url + password the write issued', async () => {
+    // Before this, a page meant for a chat channel was published WITHOUT a door
+    // and needed a second call to get a link its readers could open.
+    global.fetch = mockFetch(routes({
+      id: ID, url: `http://box/a/${ID}`, createdAt: '2026-07-17T00:00:00Z',
+      shared: true, shareUrl: `http://box/artifacts/${ID}/view`, password: 'zx8Q-generated-9fk2',
+    }));
+
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'T', html: '<h1>hi</h1>', share: true,
+    }));
+
+    expect(calls.find((c) => c[0] === 'write')[2].share).toBe(true);
+    expect(out.shared).toBe(true);
+    expect(out.shareUrl).toBe(`http://box/artifacts/${ID}/view`);
+    // The password is in that response ONCE and is never readable again, so a
+    // handler that drops it makes share:true accomplish nothing.
+    expect(out.password).toBe('zx8Q-generated-9fk2');
+    expect(out.instruction).toMatch(/BOTH/);
+  });
+
+  it('never sends a caller-chosen password, even when one is passed', async () => {
+    // A deliberate limit, not an oversight: a model asked to invent a password
+    // invents a guessable one. `artifact_share` refuses the parameter for the
+    // same reason, and publish must not become the way around it.
+    global.fetch = mockFetch(routes({ id: ID, url: `http://box/a/${ID}`, createdAt: '2026-07-17T00:00:00Z' }));
+    await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'T', html: '<h1>hi</h1>', share: true, password: 'hunter2hunter2',
+    });
+    expect(calls.find((c) => c[0] === 'write')[2].password).toBeUndefined();
+  });
+
+  it('WITHOUT share the request is byte-identical to before — no password anywhere', async () => {
+    global.fetch = mockFetch(routes({ id: ID, url: `http://box/a/${ID}`, createdAt: '2026-07-17T00:00:00Z' }));
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', { title: 'T', html: '<h1>hi</h1>' }));
+    const write = calls.find((c) => c[0] === 'write')[2];
+    expect(write.share).toBeUndefined();
+    expect(write.password).toBeUndefined();
+    expect(out).toEqual({ id: ID, url: `http://box/a/${ID}` });
+  });
+
+  it('share:false is not forwarded either — only an explicit true opens a door', async () => {
+    global.fetch = mockFetch(routes({ id: ID, url: `http://box/a/${ID}`, createdAt: '2026-07-17T00:00:00Z' }));
+    await artifactSkill.handleToolCall('artifact_publish', { title: 'T', html: '<h1>hi</h1>', share: false });
+    expect(calls.find((c) => c[0] === 'write')[2].share).toBeUndefined();
+  });
+});
+
 describe('publish retry budget', () => {
   const DEFECTS = [{ code: 'zero-width-bar', line: 12, message: '<span class="bar"> has no width.' }];
   function rejectingFetch(times) {
