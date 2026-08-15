@@ -48,7 +48,21 @@ function resolveTokenStore(fallbackPath) {
   const storeId = String(cfg.ZIBBY_STORE__oauth_tokens || process.env.ZIBBY_STORE__oauth_tokens || '').trim();
   if (apiBase && apiToken && storeId) {
     const cached = _storeCache.get(storeId);
-    if (cached) return cached;
+    if (cached) {
+      // The instance is cached per STORE (the durable resource — keeping its
+      // once-ensured table); the CREDENTIAL is per REQUEST. The control-plane
+      // injects a short-lived run-scoped token that rotates every few minutes,
+      // so the token THIS request arrived with is always the one to use —
+      // re-arm it on every hit (north-star #9: a per-request secret is never
+      // container-global state). Before this, the FIRST request's token was
+      // pinned for the life of the `warm` container and every call 401'd
+      // forever once it expired. Concurrent requests for the same store may
+      // interleave sets, but every candidate token authorizes the SAME
+      // project + store and the later-arriving one is never staler, so
+      // whichever lands last is valid for both.
+      cached.setApiToken(apiToken);
+      return cached;
+    }
     const built = new PlatformTokenStore({ apiBase, apiToken, storeId, key: loadTokenStoreKey() });
     _storeCache.set(storeId, built);
     return built;

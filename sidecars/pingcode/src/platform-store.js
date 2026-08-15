@@ -63,6 +63,20 @@ export class PlatformTokenStore {
     this.#ready = null;
   }
 
+  /**
+   * Swap the platform credential in place. The API token is PER-REQUEST state —
+   * the control-plane injects a short-lived run-scoped token that rotates every
+   * few minutes — while this instance is cached per STORE for the life of a
+   * `warm` container. Pinning the construction-time token for that whole life
+   * is exactly the north-star #9 violation (a per-request secret held as
+   * container-global state) that made every call 401 forever once the first
+   * token expired; the resolver re-arms this before every use instead.
+   */
+  setApiToken(apiToken) {
+    if (!apiToken) throw new Error('PlatformTokenStore: apiToken is required');
+    this.#apiToken = String(apiToken);
+  }
+
   async #sql(sql, params = []) {
     const res = await fetch(`${this.#apiBase}/datasets/stores/${encodeURIComponent(this.#storeId)}/sql`, {
       method: 'POST',
@@ -86,9 +100,18 @@ export class PlatformTokenStore {
   }
 
   // Create-if-absent, once per process. Awaited by every public call so a cold
-  // start can't race a write against a missing table.
+  // start can't race a write against a missing table. A FAILED create must NOT
+  // be memoized: under rotating credentials the first attempt can land with an
+  // already-expired token, and a cached rejection would pin that failure for
+  // the life of the (warm, never-reaped) container — the same forever-401 the
+  // token pin caused. Clear on rejection so the next call retries with the
+  // token it arrived with.
   #ensure() {
-    if (!this.#ready) this.#ready = this.#sql(CREATE_SQL);
+    if (!this.#ready) {
+      const attempt = this.#sql(CREATE_SQL);
+      this.#ready = attempt;
+      attempt.catch(() => { if (this.#ready === attempt) this.#ready = null; });
+    }
     return this.#ready;
   }
 
