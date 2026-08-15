@@ -592,3 +592,38 @@ describe('skill shape', () => {
     expect(Object.keys(share.input_schema.properties)).toEqual(['id']);
   });
 });
+
+describe('artifact_publish rn passthrough', () => {
+  // The OUTPUT half of the reference story: the backend mints `rn` on the write
+  // response (backend 30f3e620); the skill must hand it to the model, or the
+  // model's only way to learn a just-published artifact's rn is artifact_get —
+  // which drags the whole document back into context, the exact waste
+  // references exist to kill.
+  const ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const RN = `rn:box:acct-1:proj-1:artifact:${ID}`;
+
+  it('a backend response carrying rn reaches the model verbatim', async () => {
+    global.fetch = mockFetch([
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '<h1>hi</h1>', format: 'html' } })],
+      ['/artifacts', () => ({ json: { id: ID, url: `http://box/a/${ID}`, rn: RN, createdAt: '2026-07-17T00:00:00Z' } })],
+      ['/credits/review-memory', () => ({ json: { stored: true } })],
+    ]);
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'Report', html: '<h1>hi</h1>',
+    }));
+    expect(out.rn).toBe(RN);
+  });
+
+  it('a pre-30f3e620 backend (no rn in the response) still yields exactly { id, url } — no undefined key, no error', async () => {
+    global.fetch = mockFetch([
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '<h1>hi</h1>', format: 'html' } })],
+      ['/artifacts', () => ({ json: { id: ID, url: `http://box/a/${ID}`, createdAt: '2026-07-17T00:00:00Z' } })],
+      ['/credits/review-memory', () => ({ json: { stored: true } })],
+    ]);
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'Report', html: '<h1>hi</h1>',
+    }));
+    expect(out).toEqual({ id: ID, url: `http://box/a/${ID}` });
+    expect('rn' in out).toBe(false);
+  });
+});

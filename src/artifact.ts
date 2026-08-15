@@ -892,8 +892,17 @@ records this automatically; you don't store it yourself.)`,
           if (!id || !url) return JSON.stringify({ error: 'artifact write returned no id/url', response: written });
 
           // Close the loop: read the blob back and prove it is what we sent.
-          // Null when clean, so the happy-path result stays exactly { id, url }.
+          // Null when clean, so the happy-path result stays exactly { id, url, rn }.
           const out: any = { id, url };
+          // The canonical resource name the backend minted for this artifact.
+          // This is the OUTPUT half of the reference story: the model now holds
+          // a ~90-char handle it can pass to any reference-taking parameter
+          // (e.g. browser_set_content's htmlRef, to render-check the page it
+          // just published) WITHOUT re-emitting the document or re-reading it
+          // via artifact_get just to learn its rn — which would pull the whole
+          // content back into context, the exact waste references exist to kill.
+          // Passthrough only: minted server-side, never composed here.
+          if (typeof written.rn === 'string' && written.rn) out.rn = written.rn;
           // The password comes back from the write ONCE and is never readable
           // again; surface it here or `share: true` accomplishes nothing.
           if (written.shared) {
@@ -951,6 +960,9 @@ records this automatically; you don't store it yourself.)`,
           // there is nothing to compare it against — checking would be a
           // guaranteed false positive.
           const out: any = { id, url };
+          // Same passthrough as artifact_publish: the handle the model needs to
+          // reference the (now-updated) document without re-emitting it.
+          if (typeof written.rn === 'string' && written.rn) out.rn = written.rn;
           if (written.__preflightNote) out.preflight = written.__preflightNote;
           if (picked) {
             const readBack = await verifyStoredSource(id, picked.content);
