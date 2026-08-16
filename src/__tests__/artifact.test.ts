@@ -89,6 +89,122 @@ describe('artifact_publish', () => {
   });
 });
 
+// ── inline TEXT (raw source) — the third content form (spec 2026-08-16) ──────
+// Text goes INLINE through the SAME POST the documents use (no presigned flow:
+// run-container egress cannot be assumed to reach the object store), and it
+// must never touch the html machinery — not the validator (server-side), not
+// the data↔render pre-flight (here).
+describe('artifact_publish text — raw source inline', () => {
+  const ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const CODE = '#!/bin/sh\nset -e\necho deploy\n';
+
+  function textBackend() {
+    return mockFetch([
+      // Read-back GET serves the source unchanged — clean path.
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: CODE } })],
+      ['/artifacts', (body, url) => {
+        calls.push(['write', url, body]);
+        // The server echoes the normalized type + measured size, like a finalize.
+        return { json: { id: ID, url: `http://box/a/${ID}`, createdAt: '2026-08-16T00:00:00Z', contentType: 'text/plain', bytes: 30, binary: true } };
+      }],
+      ['/credits/review-memory', (body, url) => { calls.push(['index', url, body]); return { json: { stored: true } }; }],
+    ]);
+  }
+
+  it('sends { title, text, contentType } inline and indexes contentType + bytes, NOT format', async () => {
+    global.fetch = textBackend();
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'deploy.sh', text: CODE, contentType: 'text/plain', kind: 'code',
+    }));
+    expect(out.id).toBe(ID);
+    expect(out.url).toBe(`http://box/a/${ID}`);
+
+    const write = calls.find((c) => c[0] === 'write');
+    expect(write[2]).toMatchObject({ title: 'deploy.sh', text: CODE, contentType: 'text/plain', kind: 'code' });
+    expect(write[2].html).toBeUndefined();
+    expect(write[2].markdown).toBeUndefined();
+
+    const rec = JSON.parse(calls.find((c) => c[0] === 'index')[2].content);
+    expect(rec).toMatchObject({ id: ID, title: 'deploy.sh', kind: 'code', contentType: 'text/plain', bytes: 30 });
+    expect(rec.format).toBeUndefined(); // format is for documents only
+  });
+
+  it('a DOCUMENT publish indexes its format instead (and no contentType/bytes)', async () => {
+    global.fetch = mockFetch([
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '# hi' } })],
+      ['/artifacts', () => ({ json: { id: ID, url: `http://box/a/${ID}`, createdAt: '2026-08-16T00:00:00Z' } })],
+      ['/credits/review-memory', (body, url) => { calls.push(['index', url, body]); return { json: { stored: true } }; }],
+    ]);
+    await artifactSkill.handleToolCall('artifact_publish', { title: 'T', markdown: '# hi' });
+    const rec = JSON.parse(calls.find((c) => c[0] === 'index' && c[2].op === 'store')[2].content);
+    expect(rec.format).toBe('markdown');
+    expect(rec.contentType).toBeUndefined();
+    expect(rec.bytes).toBeUndefined();
+  });
+
+  it('requires contentType with text — a malformed call, no request made, no budget spent', async () => {
+    let hits = 0;
+    global.fetch = vi.fn(async () => { hits += 1; throw new Error('must not be called'); }) as any;
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', { title: 'x.txt', text: 'hello' }));
+    expect(out.error).toMatch(/contentType is required with text/);
+    expect(hits).toBe(0);
+  });
+
+  it('refuses text alongside markdown or html', async () => {
+    global.fetch = mockFetch([]);
+    const withMd = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'x', text: 'a', contentType: 'text/plain', markdown: '# a',
+    }));
+    expect(withMd.error).toMatch(/exactly ONE of markdown, html or text/);
+    const withHtml = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'x', text: 'a', contentType: 'text/plain', html: '<p>a</p>',
+    }));
+    expect(withHtml.error).toMatch(/exactly ONE of markdown, html or text/);
+  });
+
+  it('`data` with text is a malformed call — the html pre-flight NEVER runs on text', async () => {
+    // pickPreflight only admits format === 'html', so this must error out
+    // before any request; a vacuously-clean report check would be worse.
+    global.fetch = mockFetch([]);
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_publish', {
+      title: 'x.json', text: '{"a":1}', contentType: 'application/json', data: { rows: [] },
+    }));
+    expect(out.error).toMatch(/only meaningful together with `html`/);
+  });
+
+  it('artifact_update sends text WITHOUT a contentType — the stored type is server-authoritative', async () => {
+    global.fetch = mockFetch([
+      ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: 'v2\n' } })],
+      ['/artifacts', (body, url) => { calls.push(['write', url, body]); return { json: { id: ID, url: `http://box/a/${ID}`, updatedAt: '2026-08-16T01:00:00Z', contentType: 'text/plain', bytes: 3, binary: true } }; }],
+      ['/credits/review-memory', (body, url) => {
+        calls.push([body.op, url, body]);
+        if (body.op === 'recall') return { json: { found: true, memory: { content: JSON.stringify({ id: ID, title: 'deploy.sh', createdAt: '2026-08-16T00:00:00Z', url: `http://box/a/${ID}`, contentType: 'text/plain', bytes: 30 }) } } };
+        return { json: { stored: true } };
+      }],
+    ]);
+    const out = JSON.parse(await artifactSkill.handleToolCall('artifact_update', { id: ID, text: 'v2\n' }));
+    expect(out.id).toBe(ID);
+    const write = calls.find((c) => c[0] === 'write');
+    expect(write[2].text).toBe('v2\n');
+    expect(write[2].contentType).toBeUndefined();
+    // The index record refreshed the size and kept the type.
+    const rec = JSON.parse(calls.find((c) => c[0] === 'store')[2].content);
+    expect(rec.contentType).toBe('text/plain');
+    expect(rec.bytes).toBe(3);
+    expect(rec.createdAt).toBe('2026-08-16T00:00:00Z'); // preserved
+  });
+
+  it('the tool contract carries the code guidance (filename in title, kind "code")', () => {
+    const publish = artifactSkill.tools.find((t) => t.name === 'artifact_publish');
+    expect(publish.description).toMatch(/FILENAME in `title`/);
+    expect(publish.description).toMatch(/kind: "code"/);
+    expect(publish.input_schema.properties.text).toBeDefined();
+    expect(publish.input_schema.properties.contentType.description).toMatch(/text\/plain/);
+    const update = artifactSkill.tools.find((t) => t.name === 'artifact_update');
+    expect(update.input_schema.properties.text).toBeDefined();
+  });
+});
+
 // ── the retry budget (the ONLY thing this skill owns besides the contract) ────
 // The RULES live in backend/src/utils/artifact-validate.js — this skill
 // implements none of them. What it owns is turn-local state the stateless
@@ -150,7 +266,7 @@ describe('artifact_publish share:true — publish and open the door in one call'
     expect(written).not.toContain('password');
     expect(JSON.parse(indexed[0].content)).toEqual({
       id: ID, title: 'T', url: `http://box/a/${ID}`, kind: null,
-      createdAt: '2026-07-17T00:00:00Z', summary: 'T',
+      createdAt: '2026-07-17T00:00:00Z', summary: 'T', format: 'html',
     });
   });
 

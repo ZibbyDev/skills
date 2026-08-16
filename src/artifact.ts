@@ -66,7 +66,7 @@ import { SKILL_META } from '@zibby/skill-ids';
  *
  * TOOLS
  * ─────
- *   artifact_publish({ title, html | markdown, kind?, favicon?, summary?, data? })
+ *   artifact_publish({ title, html | markdown | text(+contentType), kind?, favicon?, summary?, data? })
  *        → PRE-FLIGHT (only when `data` is passed AND the content is `html`):
  *          checkRenderedReport({html,data}); on defects nothing is sent at all
  *        → control-plane writes the blob (ARTIFACTS_BUCKET, account+project scoped)
@@ -75,7 +75,8 @@ import { SKILL_META } from '@zibby/skill-ids';
  *          claim; silent when clean, fail-soft when it can't run)
  *        → index record written to kv-memory (scope `${ns}:artifact:<id>`)
  *        → returns { id, url } (+ `readBack` only when it was NOT clean)
- *   artifact_update({ id, title?, html?|markdown? })  → same url, new version
+ *   artifact_update({ id, title?, html?|markdown?|text? })  → same url, new version
+ *        (text only replaces a text artifact of the same type — server-enforced)
  *   artifact_get({ id })                              → { metadata, content }
  *   (artifact_list = kv_recall_prefix('artifact:') on the kv-memory skill)
  *
@@ -673,11 +674,16 @@ async function indexRecall(id) {
 function pickContent(args) {
   const hasHtml = typeof args?.html === 'string' && args.html.length > 0;
   const hasMd = typeof args?.markdown === 'string' && args.markdown.length > 0;
+  const hasText = typeof args?.text === 'string' && args.text.length > 0;
+  if (hasText && (hasHtml || hasMd)) {
+    return { error: 'Pass exactly ONE of markdown, html or text — text is raw source stored as-is (code/logs/JSON/CSV); markdown and html are rendered documents.' };
+  }
   if (hasHtml && hasMd) {
     return { error: 'Pass EITHER markdown OR html, not both — they are different rendering paths. Use markdown unless the page needs a custom visual layout.' };
   }
   if (hasMd) return { format: 'markdown', content: args.markdown };
   if (hasHtml) return { format: 'html', content: args.html };
+  if (hasText) return { format: 'text', content: args.text };
   return null;
 }
 
@@ -799,9 +805,13 @@ Tools:
   page renders a dataset (see above). Optional \`kind\` (e.g. "report", "plan",
   "dashboard"), \`favicon\` (an emoji), and \`summary\` (one line for your own
   index). Returns { id, url }. Share the url; keep the id if you'll update it
-  later.
+  later. To publish RAW SOURCE instead of a page — code, a script, logs, JSON
+  data, CSV — pass \`text\` + \`contentType\` (text/plain | application/json |
+  text/csv): it is stored verbatim and shown in a read-only code viewer. For
+  code, make the \`title\` the filename (e.g. "deploy.sh") and set kind "code".
 - artifact_update: Revise an EXISTING page by \`id\` (same url, new version). Pass
-  the fields to change (\`title\`, \`markdown\`|\`html\`).
+  the fields to change (\`title\`, \`markdown\`|\`html\`|\`text\` — text only onto a
+  text artifact, same type).
 - artifact_get: Fetch one artifact by \`id\` → { metadata, content } so you can
   reuse / edit / re-publish it.
 - artifact_share: Make a page readable WITHOUT a Zibby login → { url, password }.
@@ -869,13 +879,22 @@ records this automatically; you don't store it yourself.)`,
           const title = typeof args?.title === 'string' ? args.title.trim() : '';
           if (!title) return JSON.stringify({ error: 'title is required' });
           const picked = pickContent(args);
-          if (!picked) return JSON.stringify({ error: 'provide exactly one of markdown (preferred) or html (non-empty string)' });
+          if (!picked) return JSON.stringify({ error: 'provide exactly one of markdown (preferred) or html or text (non-empty string)' });
           if (picked.error) return JSON.stringify({ error: picked.error });
           // Malformed CALL, not a broken page — rejected before the budget is touched.
           const pre = pickPreflight(args, picked);
           if (pre?.error) return JSON.stringify({ error: pre.error });
+          // `contentType` is REQUIRED with text (the server gates it on its
+          // TEXT-INLINE subset and is authoritative on the set; this only
+          // catches the absent-argument shape locally). Missing = a malformed
+          // call, so it never touches the budget.
+          if (picked.format === 'text') {
+            const ct = typeof args?.contentType === 'string' ? args.contentType.trim() : '';
+            if (!ct) return JSON.stringify({ error: 'contentType is required with text — text/plain for code/logs, application/json for JSON data, text/csv for CSV' });
+          }
 
           const payload: any = { title, [picked.format]: picked.content };
+          if (picked.format === 'text') payload.contentType = args.contentType.trim();
           if (typeof args?.kind === 'string' && args.kind.trim()) payload.kind = args.kind.trim();
           if (typeof args?.favicon === 'string' && args.favicon.trim()) payload.favicon = args.favicon.trim();
 
@@ -923,6 +942,16 @@ records this automatically; you don't store it yourself.)`,
             createdAt: written.createdAt || new Date().toISOString(),
             summary: typeof args?.summary === 'string' && args.summary.trim() ? args.summary.trim() : title,
           };
+          // Type facts for the list surfaces: a text record carries the
+          // NORMALIZED contentType + measured bytes (the server echoes both on
+          // the write), a document record carries its format. New publishes
+          // only — old rows have neither, and every consumer tolerates absence.
+          if (picked.format === 'text') {
+            record.contentType = typeof written.contentType === 'string' ? written.contentType : payload.contentType;
+            record.bytes = typeof written.bytes === 'number' ? written.bytes : Buffer.byteLength(picked.content, 'utf8');
+          } else {
+            record.format = picked.format;
+          }
           try { await indexStore(id, record); } catch (e) {
             // Blob is published; surface the index warning but don't fail the publish.
             out.indexWarning = e.message;
@@ -981,6 +1010,16 @@ records this automatically; you don't store it yourself.)`,
             createdAt: prior.createdAt || written.createdAt || new Date().toISOString(),
             updatedAt: written.updatedAt || new Date().toISOString(),
           };
+          // Same type facts as publish, refreshed only when content was sent —
+          // a title-only update changes neither the type nor the size.
+          if (picked) {
+            if (picked.format === 'text') {
+              record.contentType = typeof written.contentType === 'string' ? written.contentType : (prior.contentType || null);
+              record.bytes = typeof written.bytes === 'number' ? written.bytes : Buffer.byteLength(picked.content, 'utf8');
+            } else {
+              record.format = picked.format;
+            }
+          }
           if (typeof args?.summary === 'string' && args.summary.trim()) record.summary = args.summary.trim();
           else if (!record.summary) record.summary = record.title;
           try { await indexStore(id, record); } catch (e) {
@@ -1037,6 +1076,7 @@ records this automatically; you don't store it yourself.)`,
         + 'USE `markdown` — it is the default path and Zibby generates the entire document for you (doctype, head, CSS, dark mode, table styling); you supply only the content, so the page cannot come out malformed. '
         + `Markdown supports ${MARKDOWN_SUPPORTS}; it does NOT support ${MARKDOWN_LACKS}. `
         + 'Use `html` ONLY when the page needs a visual layout Markdown cannot express (a bar chart, a gauge, a custom grid, an SVG diagram) — on that path you author the whole document and every mistake ships verbatim. Never pass both. '
+        + 'Use `text` (+ required `contentType`) to publish RAW SOURCE as-is — code, a script, logs, JSON data, CSV. It is stored verbatim, never rendered as a page, and shown in a read-only code viewer with a download link. contentType: text/plain for code/logs/scripts, application/json for JSON data, text/csv for CSV. For code, put the FILENAME in `title` (e.g. "deploy.sh") — viewers derive the language label from the extension — and set kind: "code". Exactly one of markdown|html|text per call. '
         + 'Every figure on the page must come from a tool result or this conversation — do not do arithmetic in prose and print the result, and use the same number everywhere it appears. '
         + 'The content MUST come from the current conversation or data you fetched this turn; if you are not sure what the page should be about, ASK instead of calling this tool, and never publish a demo/sample/placeholder or an account-overview page as a stand-in. '
         + 'On the html path keep all CSS/JS/images INLINE (inline <style>/<script>, data: URIs) and send real tags (never &lt;escaped&gt; markup) — the page is sandboxed on view with no network at all, so every external URL is dead. '
@@ -1049,6 +1089,8 @@ records this automatically; you don't store it yourself.)`,
           title: { type: 'string', description: 'The page title (also the browser tab title).' },
           markdown: { type: 'string', description: `PREFERRED. The page content as Markdown — Zibby renders it into a styled, self-contained document, so you never author a skeleton. Supports ${MARKDOWN_SUPPORTS}. Does NOT support ${MARKDOWN_LACKS}. Provide this OR html, never both.` },
           html: { type: 'string', description: 'The EXCEPTION path — only for a layout Markdown cannot express (bar chart, gauge, custom grid, SVG diagram). A self-contained HTML document or fragment, served VERBATIM: you own the doctype, head, CSS and every tag. All assets must be inline (<style>/<script>, data: URIs). Provide this OR markdown, never both.' },
+          text: { type: 'string', description: 'RAW SOURCE published as-is — code, a script, logs, JSON data, CSV. Stored verbatim (never rendered as an HTML page) and shown in a read-only code viewer with a download link. Requires `contentType`. For code, make `title` the filename (e.g. "deploy.sh" — the viewer derives the language from the extension) and set kind: "code". Provide this OR markdown OR html.' },
+          contentType: { type: 'string', description: 'REQUIRED with `text`, meaningless otherwise. One of: text/plain (code, scripts, logs), application/json (JSON data), text/csv (CSV). Nothing else is accepted — HTML and Markdown are published through their own fields, never as text.' },
           data: { type: 'object', description: 'Optional, and worth passing WHENEVER the html page renders a dataset (a table of records, a bar chart, meters): the raw tool results the page was built from, as JSON, UNCHANGED — do not summarise it and do not write your own expectations, the check derives what must be true by itself (wrap a bare array as {"rows": [...]}). The page is then verified against it BEFORE publishing: row counts, bar lengths vs their values, bars whose width the CSS throws away, and placeholder residue. If they disagree nothing is sent and you get the defects back, using one of your two attempts. Only valid with `html` — passing it with `markdown` is an error.' },
           kind: { type: 'string', description: 'Optional label for what this is, e.g. "report", "plan", "dashboard", "diagram". Stored in your index.' },
           favicon: { type: 'string', description: 'Optional emoji used as the browser-tab icon, e.g. "📊".' },
@@ -1061,7 +1103,8 @@ records this automatically; you don't store it yourself.)`,
     {
       name: 'artifact_update',
       description:
-        'Revise an EXISTING artifact by id — the shareable URL stays the same, the content is replaced (new version). Pass the fields to change (title and/or markdown|html). '
+        'Revise an EXISTING artifact by id — the shareable URL stays the same, the content is replaced (new version). Pass the fields to change (title and/or markdown|html|text). '
+        + '`text` only replaces an artifact that was PUBLISHED as text, and it keeps its original contentType — the server refuses a type change and any doc↔text conversion. '
         + 'Prefer `markdown` for the same reason artifact_publish does: Zibby generates the document, so it cannot come out malformed. An update is validated exactly like a publish — including the optional `data` check when you send new `html` that renders a dataset — and if the new content is broken it is REFUSED, the page keeps its last good version, and the rejection shares the same two attempts as publish. Returns { id, url }.',
       input_schema: {
         type: 'object',
@@ -1070,6 +1113,7 @@ records this automatically; you don't store it yourself.)`,
           title: { type: 'string', description: 'New title (optional).' },
           markdown: { type: 'string', description: `PREFERRED. New Markdown content (optional) — Zibby renders the document skeleton. Supports ${MARKDOWN_SUPPORTS}. Provide this OR html.` },
           html: { type: 'string', description: 'New HTML content (optional), served verbatim — only for layouts Markdown cannot express. Provide this OR markdown.' },
+          text: { type: 'string', description: 'New raw text content (optional) — only for an artifact that was PUBLISHED as text. It keeps its original contentType; the server refuses a type change or a doc↔text conversion. Provide at most one of markdown|html|text.' },
           data: { type: 'object', description: 'Optional — same as on artifact_publish: when the new `html` renders a dataset, pass the raw tool results it was built from and the page is checked against them before anything is sent. Only valid alongside new `html`.' },
           kind: { type: 'string', description: 'Optional updated kind label.' },
           favicon: { type: 'string', description: 'Optional updated emoji favicon.' },
