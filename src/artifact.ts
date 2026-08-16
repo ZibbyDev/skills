@@ -944,13 +944,16 @@ records this automatically; you don't store it yourself.)`,
           };
           // Type facts for the list surfaces: a text record carries the
           // NORMALIZED contentType + measured bytes (the server echoes both on
-          // the write), a document record carries its format. New publishes
-          // only — old rows have neither, and every consumer tolerates absence.
+          // the write), a document record carries its format — and BOTH carry
+          // bytes, so the list can show a size for every new publish. New
+          // publishes only — old rows have neither, and every consumer
+          // tolerates absence.
           if (picked.format === 'text') {
             record.contentType = typeof written.contentType === 'string' ? written.contentType : payload.contentType;
             record.bytes = typeof written.bytes === 'number' ? written.bytes : Buffer.byteLength(picked.content, 'utf8');
           } else {
             record.format = picked.format;
+            record.bytes = Buffer.byteLength(picked.content, 'utf8');
           }
           try { await indexStore(id, record); } catch (e) {
             // Blob is published; surface the index warning but don't fail the publish.
@@ -1018,6 +1021,7 @@ records this automatically; you don't store it yourself.)`,
               record.bytes = typeof written.bytes === 'number' ? written.bytes : Buffer.byteLength(picked.content, 'utf8');
             } else {
               record.format = picked.format;
+              record.bytes = Buffer.byteLength(picked.content, 'utf8');
             }
           }
           if (typeof args?.summary === 'string' && args.summary.trim()) record.summary = args.summary.trim();

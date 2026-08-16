@@ -129,7 +129,7 @@ describe('artifact_publish text — raw source inline', () => {
     expect(rec.format).toBeUndefined(); // format is for documents only
   });
 
-  it('a DOCUMENT publish indexes its format instead (and no contentType/bytes)', async () => {
+  it('a DOCUMENT publish indexes its format (+ size) instead — never a contentType', async () => {
     global.fetch = mockFetch([
       ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '# hi' } })],
       ['/artifacts', () => ({ json: { id: ID, url: `http://box/a/${ID}`, createdAt: '2026-08-16T00:00:00Z' } })],
@@ -139,7 +139,9 @@ describe('artifact_publish text — raw source inline', () => {
     const rec = JSON.parse(calls.find((c) => c[0] === 'index' && c[2].op === 'store')[2].content);
     expect(rec.format).toBe('markdown');
     expect(rec.contentType).toBeUndefined();
-    expect(rec.bytes).toBeUndefined();
+    // Docs carry a size too (since 0.2.21) so the list can show one for every
+    // new publish; the type discriminator stays format-vs-contentType.
+    expect(rec.bytes).toBe(Buffer.byteLength('# hi', 'utf8'));
   });
 
   it('requires contentType with text — a malformed call, no request made, no budget spent', async () => {
@@ -267,6 +269,7 @@ describe('artifact_publish share:true — publish and open the door in one call'
     expect(JSON.parse(indexed[0].content)).toEqual({
       id: ID, title: 'T', url: `http://box/a/${ID}`, kind: null,
       createdAt: '2026-07-17T00:00:00Z', summary: 'T', format: 'html',
+      bytes: Buffer.byteLength('<h1>hi</h1>', 'utf8'),
     });
   });
 
