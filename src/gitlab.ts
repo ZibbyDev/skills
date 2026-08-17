@@ -277,7 +277,17 @@ export async function glFetch(path, opts: any = {}) {
   });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
-    throw new Error(`GitLab API ${res.status}: ${err.slice(0, 300)}`);
+    // NAME THE HOST. A bare `GitLab API 401: {"message":"401 Unauthorized"}` is
+    // indistinguishable from a bad token, so it sends everyone to check scopes,
+    // memberships and repo selections — while the real cause can be that the
+    // request went to the WRONG SERVER. That is not hypothetical: a box-global
+    // GITLAB_URL outranked the per-tenant host and sent valid self-hosted PATs
+    // to gitlab.com, and the 401 blamed the token for a day. The host is the one
+    // fact the caller cannot recover from the error, and it is not a secret.
+    // Keep `GitLab API <status>` as the literal prefix — the 409/400 and
+    // 405/406/404 branches below match on it.
+    const status = `GitLab API ${res.status} @ ${gitlabApiBase()}`;
+    throw new Error(`${status}: ${err.slice(0, 300)}`);
   }
   if (opts.raw) return res.text();
   return res.json();
