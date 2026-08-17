@@ -16,14 +16,20 @@
  *     '@zibby/core/backend-client' or locally reimplements the same client
  *     (reads process.env.ZIBBY_ACCOUNT_API_URL — the kvMemory/datasetStore/
  *     gbrain/artifact pattern), or imports a SHARED CREDENTIAL RESOLVER that
- *     does the backend call on its behalf (today: larkApp.ts, the ONE decider
- *     of which Lark app a consumer authenticates as). That third rule is
- *     deliberately an explicit, named list rather than blanket transitivity —
- *     "imports something that somewhere imports the client" sweeps in modules
- *     whose CHILD never talks to the backend at all. Without it, extracting a
- *     resolver would silently DROP its consumers out of this tripwire, which is
- *     exactly the invisible coverage loss the suite exists to prevent: ADD the
- *     next shared resolver to RESOLVER_MODULES when you write one.
+ *     makes the backend call on its behalf (larkApp.ts today). The resolver set
+ *     is DERIVED, never listed: a resolver is a module that is itself
+ *     backend-calling AND exports no skill object — i.e. the "pure helper" this
+ *     suite already recognised and exempted (reviewMemoryIo). The missing half
+ *     was that a helper's IMPORTERS inherit its obligation, so extracting a
+ *     resolver silently dropped its consumers out of the tripwire.
+ *
+ *     Why that shape and not blanket transitivity ("imports something that
+ *     somewhere imports the client"): tried, and it swept in chatProgress,
+ *     git-write and trackers/index, which import a SIBLING SKILL (lark.ts,
+ *     github.ts) to alias or reuse it. Importing a sibling skill is not
+ *     delegation and says nothing about your own child's env; importing a
+ *     credential helper is and does. Keying on "has no skill export" separates
+ *     the two exactly, with nothing to keep in sync by hand.
  *     Comments can't trip it: the import checks match real import statements.
  *   - REFLECTION asserts the EFFECTIVE child env: with the three session keys
  *     present in process.env, `skill.resolve()` must forward all of
@@ -116,31 +122,102 @@ function resolveWithSessionEnv(skill: any) {
   }
 }
 
-/**
- * Shared credential resolvers: helper modules whose whole job is to make the
- * backend call for a family of skills. A skill importing one IS backend-calling
- * even though its own source never names the client. Keep this list short and
- * explicit — see the header for why blanket transitivity is the wrong rule.
- */
-const RESOLVER_MODULES = ['./larkApp.js'] as const;
-
-function importsSharedResolver(text: string): boolean {
-  return RESOLVER_MODULES.some((m) => new RegExp(
-    String.raw`^\s*import\s[^;]*?from\s+['"]` + m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + String.raw`['"]`, 'm',
-  ).test(text));
+/** Does `text` really import the sibling module `file` (src-relative)? */
+function importsLocalModule(text: string, file: string): boolean {
+  const base = basename(file).replace(/\.ts$/, '');
+  return new RegExp(
+    String.raw`^\s*(?:import|export)\s[^;]*?from\s+['"]\.{1,2}/(?:[\w./-]*/)?` + base + String.raw`\.js['"]`,
+    'm',
+  ).test(text);
 }
 
 const sources = listSkillSources();
-const backendCalling = sources.filter((f) => {
-  const text = readFileSync(join(srcDir, f), 'utf-8');
-  return importsBackendClient(text) || reimplementsBackendClient(text) || importsSharedResolver(text);
-});
+const sourceText = new Map(sources.map((f) => [f, readFileSync(join(srcDir, f), 'utf-8')]));
+
+/** Directly reaches Zibby's backend from its own source. */
+const directlyBackendCalling = sources.filter(
+  (f) => importsBackendClient(sourceText.get(f)!) || reimplementsBackendClient(sourceText.get(f)!),
+);
+
+/**
+ * SHARED CREDENTIAL RESOLVERS, derived: backend-calling modules that export no
+ * skill object. Chained helpers are folded in by fixpoint (a helper importing a
+ * helper is still a helper); a module WITH a skill export can never enter the
+ * set, which is what keeps sibling-skill imports from being mistaken for
+ * delegation. Bounded by the module count, so it terminates on a cycle.
+ */
+async function deriveResolverModules(): Promise<string[]> {
+  const noSkillExport = new Set<string>();
+  for (const f of sources) {
+    const mod = await import(`../${f.replace(/\.ts$/, '')}`);
+    if (skillExports(mod).length === 0) noSkillExport.add(f);
+  }
+  const resolvers = new Set(directlyBackendCalling.filter((f) => noSkillExport.has(f)));
+  for (let pass = 0; pass < sources.length; pass++) {
+    let grew = false;
+    for (const f of sources) {
+      if (resolvers.has(f) || !noSkillExport.has(f)) continue;
+      if ([...resolvers].some((r) => importsLocalModule(sourceText.get(f)!, r))) {
+        resolvers.add(f);
+        grew = true;
+      }
+    }
+    if (!grew) break;
+  }
+  return [...resolvers].sort();
+}
+
+const resolverModules = await deriveResolverModules();
+const delegatedBackendCalling = sources.filter(
+  (f) => !directlyBackendCalling.includes(f)
+    && resolverModules.some((r) => importsLocalModule(sourceText.get(f)!, r)),
+);
+const backendCalling = sources.filter(
+  (f) => directlyBackendCalling.includes(f) || delegatedBackendCalling.includes(f),
+);
 
 describe('backend-calling skills forward the session env to their MCP child', () => {
   it('the source scan itself works (known positives are flagged)', () => {
     for (const name of ['github.ts', 'lark.ts', 'larkDocs.ts', 'larkAttendance.ts', 'artifact.ts', 'sentry.ts', 'slack.ts']) {
       expect(backendCalling, `${name} must be detected as backend-calling`).toContain(name);
     }
+  });
+
+  it('the RESOLVER derivation works, and works by DELEGATION not by luck', () => {
+    // Probe validity for the derived half. Without these, a broken derivation
+    // returns an empty resolver set and the suite silently loses every skill
+    // that reaches the backend through a helper — the exact invisible coverage
+    // loss this mechanism replaced a hand-maintained list to prevent.
+    expect(resolverModules, 'larkApp.ts is a credential helper with no skill export')
+      .toContain('larkApp.ts');
+    for (const consumer of ['larkDocs.ts', 'larkAttendance.ts']) {
+      expect(delegatedBackendCalling, `${consumer} reaches the backend only via larkApp.ts`)
+        .toContain(consumer);
+      expect(directlyBackendCalling, `${consumer} must be caught by DELEGATION, not directly`)
+        .not.toContain(consumer);
+    }
+    // …and the false positives that killed blanket transitivity stay out: these
+    // import a sibling SKILL (lark.ts / github.ts), which is aliasing, not
+    // delegation, and says nothing about their own child's env.
+    for (const sibling of ['chatProgress.ts', 'git-write.ts', 'chat-notify.ts']) {
+      expect(resolverModules, `${sibling} must never be treated as a resolver`)
+        .not.toContain(sibling);
+      expect(delegatedBackendCalling, `${sibling} imports a sibling skill, not a resolver`)
+        .not.toContain(sibling);
+    }
+    // A module WITH a skill export can never be a resolver — the property the
+    // whole separation rests on. The set is DERIVED; this snapshot only makes a
+    // surprise loud. Note the failure direction: forgetting to update this list
+    // turns the suite RED, it can never silently drop coverage (which is what
+    // the hand-maintained RESOLVER_MODULES list it replaced could do).
+    expect(resolverModules, 'the derived resolver set changed — confirm the new entry is '
+      + 'a credential/IO helper (backend-calling, no skill export) and record it here')
+      .toEqual([
+        'larkApp.ts',        // the Lark app-credential resolver
+        'llm-billing.ts',    // provider cost/usage fetchers
+        'review.ts',         // pure re-export barrel over reviewMemoryIo (chained helper)
+        'reviewMemoryIo.ts', // review-record store/recall over the backend route
+      ]);
   });
 
   it.each(backendCalling)('%s', async (file) => {

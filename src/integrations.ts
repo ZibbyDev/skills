@@ -132,11 +132,19 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   github: { id: 'github', name: 'GitHub', connectPath: '/integrations?provider=github' },
   gitlab: { id: 'gitlab', name: 'GitLab', connectPath: '/integrations?provider=gitlab' },
   slack:  { id: 'slack',  name: 'Slack',  connectPath: '/integrations?provider=slack'  },
-  lark:   { id: 'lark',   name: 'Lark',   connectPath: '/integrations?provider=lark'   },
-  // DISPLAY name only — the id `lark_docs` is load-bearing (DDB integration
-  // rows key on it). The card is the ACCOUNT-LEVEL Lark application credential:
-  // docs/wiki today, other org-wide read surfaces on the same app next, so it
-  // is named for the app rather than for one of its uses.
+  // DISPLAY names only — the ids `lark` / `lark_docs` are load-bearing (DDB
+  // integration rows key on `provider`, LARK_DOCS_* env, connectPath) and never
+  // change with the copy. The names disambiguate the TWO Lark credentials
+  // ("Lark" alone reads as one thing): the PROJECT-SCOPED chat/bot app vs the
+  // ACCOUNT-LEVEL application. `lark_docs` is named for the APP, not for docs:
+  // one app_id + app_secret that already serves docs/wiki and is what every
+  // other org-wide read surface rides.
+  //
+  // These must match backend/src/services/skill-integrations.js entry for entry
+  // — `lark` said "Lark" here and "Lark Chat" there until 2026-08-17, i.e. the
+  // same provider rendered under two names depending on which surface answered.
+  // __tests__/integration-registry-parity.test.ts is the tripwire.
+  lark:   { id: 'lark',   name: 'Lark Chat', connectPath: '/integrations?provider=lark' },
   lark_docs: { id: 'lark_docs', name: 'Lark App', connectPath: '/integrations?provider=lark_docs' },
   openai_billing: {
     id: 'openai_billing',
