@@ -218,10 +218,36 @@ describe('lark-attendance guard rails', () => {
     }
   });
 
+  test('the OPERATOR id is required, refused locally, and never guessed', async () => {
+    // WIRE-VERIFIED: without a top-level `user_id` Lark answers 1220001
+    // "Need user_id" and empty data. Guessing one (the first member, the
+    // group's bind_default_user_ids, …) would succeed and return a full table
+    // built from the WRONG saved statistics view — silently-wrong data, which
+    // is worse than a refusal. So the refusal happens HERE, before the call.
+    const { result, calls } = await drive('larkattendance_query_stats', {
+      userIds: ['u1', 'u2'], startDate: 20260401, endDate: 20260430,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/operatorUserId is required/);
+    expect(result.error).toMatch(/Need user_id/);
+    expect(result.error).toMatch(/view/i);
+    expect(calls.filter((c) => !c.url.includes(AUTH_PATH))).toHaveLength(0);
+    // Specifically: no member id leaked into the operator slot.
+    expect(JSON.stringify(result)).not.toMatch(/"user_id"\s*:\s*"u1"/);
+  });
+
+  test('the schema marks operatorUserId required, so the model is told up front', async () => {
+    vi.resetModules();
+    const { larkAttendanceSkill } = await import('../larkAttendance.js');
+    const tool = larkAttendanceSkill.tools.find((t: any) => t.name === 'larkattendance_query_stats');
+    expect(tool.input_schema.required).toContain('operatorUserId');
+    expect(tool.input_schema.properties.operatorUserId.description).toMatch(/REQUIRED/);
+  });
+
   test('an over-cap batch is REFUSED, never silently truncated', async () => {
     const many = Array.from({ length: 201 }, (_, i) => `u${i}`);
     const { result } = await drive('larkattendance_query_stats', {
-      userIds: many, startDate: 20260401, endDate: 20260430,
+      userIds: many, startDate: 20260401, endDate: 20260430, operatorUserId: 'admin1',
     });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/at most 200 user ids/i);
@@ -236,7 +262,7 @@ describe('lark-attendance guard rails', () => {
 
   test('an over-long range is refused with the documented cap, before the call', async () => {
     const { result, calls } = await drive('larkattendance_query_stats', {
-      userIds: ['u1'], startDate: 20260401, endDate: 20260531,
+      userIds: ['u1'], startDate: 20260401, endDate: 20260531, operatorUserId: 'admin1',
     });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/caps this query at 31 days/);
@@ -252,7 +278,7 @@ describe('lark-attendance guard rails', () => {
 
   test('a non-existent calendar date is rejected rather than sent as garbage', async () => {
     const { result } = await drive('larkattendance_query_stats', {
-      userIds: ['u1'], startDate: '2026-02-30', endDate: '2026-03-01',
+      userIds: ['u1'], startDate: '2026-02-30', endDate: '2026-03-01', operatorUserId: 'admin1',
     });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/yyyyMMdd/);
@@ -281,22 +307,61 @@ describe('lark-attendance wire shape', () => {
     expect(result.groups).toEqual([{ groupId: 'g1', groupName: 'A' }]);
   });
 
-  test('get_group surfaces the member ids that scope every later data call', async () => {
-    const { result, calls } = await drive('larkattendance_get_group', { groupId: 'g1' }, () => ({
-      code: 0,
-      data: {
-        group_id: 'g1',
-        group_name: '技术',
-        bind_user_ids: ['u1', 'u2'],
-        bind_dept_ids: ['od_x'],
-        group_leader_ids: ['u9'],
-      },
-    }));
+  // WIRE-VERIFIED fixture (live tenant, 2026-08-17). The id-bearing keys are
+  // exactly these; `member_ids` / `member_user_ids` DO NOT EXIST, and
+  // `group_leader_ids` — which Lark's docs list — was NOT returned.
+  const LIVE_GROUP_SHAPE = {
+    group_id: 'g1',
+    group_name: 'G',
+    bind_user_ids: ['u1', 'u2'],
+    bind_dept_ids: ['od_x'],
+    except_user_ids: ['u3'],
+    except_dept_ids: ['od_y'],
+    bind_default_user_ids: ['u4'],
+    bind_default_dept_ids: ['od_z'],
+    need_punch_members: [{}],
+    no_need_punch_members: [{}],
+  };
+
+  test('get_group reads the REAL member field (bind_user_ids), not an invented one', async () => {
+    const { result, calls } = await drive(
+      'larkattendance_get_group', { groupId: 'g1' }, () => ({ code: 0, data: LIVE_GROUP_SHAPE }),
+    );
     expect(apiCall(calls).url).toContain('employee_type=employee_id');
     expect(apiCall(calls).url).toContain('dept_type=open_id');
+    // The member list is the scope for every later data call — if this were
+    // sourced from a field that does not exist it would be [], the model would
+    // get no ids, and every stats call would silently return nothing.
     expect(result.memberUserIds).toEqual(['u1', 'u2']);
     expect(result.memberDeptIds).toEqual(['od_x']);
-    expect(result.leaderUserIds).toEqual(['u9']);
+  });
+
+  test('get_group keeps the THREE exclusion concepts distinct', async () => {
+    const { result } = await drive(
+      'larkattendance_get_group', { groupId: 'g1' }, () => ({ code: 0, data: LIVE_GROUP_SHAPE }),
+    );
+    // Removed from the group vs in the group but not required to punch — they
+    // are different populations and collapsing them would mis-scope a report.
+    expect(result.excludedUserIds).toEqual(['u3']);
+    expect(result.excludedDeptIds).toEqual(['od_y']);
+    expect(result.noPunchUserIds).toEqual(['u4']);
+    expect(result.noPunchDeptIds).toEqual(['od_z']);
+  });
+
+  test('an ABSENT group_leader_ids is omitted, never reported as an empty list', async () => {
+    // "[]" would read as "this group has no leaders" — a different claim from
+    // "Lark did not tell us", and it is what made the tool description point
+    // the model at a dead field for the stats operator id.
+    const { result } = await drive(
+      'larkattendance_get_group', { groupId: 'g1' }, () => ({ code: 0, data: LIVE_GROUP_SHAPE }),
+    );
+    expect('leaderUserIds' in result).toBe(false);
+    // …and it IS surfaced on a tenant that does return it.
+    const { result: withLeaders } = await drive(
+      'larkattendance_get_group', { groupId: 'g1' },
+      () => ({ code: 0, data: { ...LIVE_GROUP_SHAPE, group_leader_ids: ['u9'] } }),
+    );
+    expect(withLeaders.leaderUserIds).toEqual(['u9']);
   });
 
   test('list_stats_fields flattens the per-tenant field groups (incl. 自定义字段)', async () => {
@@ -319,34 +384,52 @@ describe('lark-attendance wire shape', () => {
     }]);
   });
 
-  test('query_stats sends the scope Lark expects and can filter to the picked codes', async () => {
+  // WIRE-VERIFIED row shape (live tenant, 2026-08-17): data.user_datas[] is
+  // { name, user_id, datas:[{ title, … }] } + data.invalid_user_list, and a
+  // one-month query returns ~43 cells per user because Lark mixes period
+  // totals with identity columns AND one column per DAY of the range.
+  const LIVE_STATS_ROW = {
+    name: 'Ann',
+    user_id: 'u1',
+    datas: [
+      { code: 'c1', title: '实际出勤时长(小时)', value: '160' },
+      { code: 'c2', title: '工作日出勤天数-旧', value: '20' },
+      { code: 'c3', title: '迟到次数', value: '3' },
+      { code: 'c4', title: '部门', value: 'R&D' },
+      { code: 'c5', title: '工号', value: '0001' },
+      { code: 'c6', title: '2026-04-24 星期五', value: '8' },
+    ],
+  };
+
+  test('query_stats sends all THREE identities and can filter to the picked codes', async () => {
     const { result, calls } = await drive('larkattendance_query_stats', {
       userIds: ['u1'],
       startDate: '2026-04-01',
       endDate: '2026-04-30',
       fieldCodes: ['c1'],
       operatorUserId: 'admin1',
-    }, () => ({
-      code: 0,
-      data: {
-        user_datas: [{
-          name: 'Ann',
-          user_id: 'u1',
-          datas: [
-            { code: 'c1', title: '项目工时', value: '160' },
-            { code: 'c2', title: '迟到次数', value: '3' },
-          ],
-        }],
-        invalid_user_list: ['u404'],
-      },
-    }));
+    }, () => ({ code: 0, data: { user_datas: [LIVE_STATS_ROW], invalid_user_list: ['u404'] } }));
     const body = JSON.parse(apiCall(calls).init.body);
+    // user_ids = whose data; user_id = the OPERATOR; employee_type = the id form.
     expect(body).toMatchObject({
       stats_type: 'month', start_date: 20260401, end_date: 20260430, user_ids: ['u1'], user_id: 'admin1',
     });
+    expect(apiCall(calls).url).toContain('employee_type=employee_id');
     // fieldCodes trims the columns, it does not change what was requested.
-    expect(result.users[0].fields).toEqual([{ code: 'c1', title: '项目工时', value: '160' }]);
+    expect(result.users[0].fields).toEqual([{ code: 'c1', title: '实际出勤时长(小时)', value: '160' }]);
     expect(result.invalidUserIds).toEqual(['u404']);
+  });
+
+  test('query_stats returns the whole wide row (identity + per-day cells) unfiltered', async () => {
+    const { result } = await drive('larkattendance_query_stats', {
+      userIds: ['u1'], startDate: 20260401, endDate: 20260430, operatorUserId: 'admin1',
+    }, () => ({ code: 0, data: { user_datas: [LIVE_STATS_ROW], invalid_user_list: [] } }));
+    expect(result.users[0]).toMatchObject({ userId: 'u1', name: 'Ann' });
+    // Nothing is dropped — a per-day column and an identity column are as real
+    // as a total, and the model matches on `title`.
+    expect(result.users[0].fields.map((f: any) => f.title)).toEqual([
+      '实际出勤时长(小时)', '工作日出勤天数-旧', '迟到次数', '部门', '工号', '2026-04-24 星期五',
+    ]);
   });
 
   test('query_records tolerates unknown ids instead of failing the whole batch', async () => {

@@ -37,13 +37,24 @@
  * data call takes an explicit, caller-supplied `userIds` scope, which is also
  * what Lark's own API requires. Group/field listings are metadata only.
  *
+ * PROVENANCE: shapes below marked [WIRE-VERIFIED] were confirmed against a real
+ * tenant on 2026-08-17; everything else comes from Lark's published docs. The
+ * probe corrected the docs twice (the group endpoint's member field names, and
+ * `user_id` being required on the stats query), so prefer the marked claims and
+ * treat an unmarked one as "documented, not observed".
+ *
  * Attendance v1 API (host-relative), all read paths:
  *   GET  /open-apis/attendance/v1/groups?page_size&page_token
  *          → { group_list:[{group_id,group_name}], page_token, has_more }
  *          scope: attendance:rule:readonly
  *   GET  /open-apis/attendance/v1/groups/{id}?employee_type&dept_type=open_id
  *          → { group_id, group_name, bind_user_ids, bind_dept_ids,
- *              bind_default_user_ids, group_leader_ids, ... }
+ *              except_user_ids, except_dept_ids, bind_default_user_ids,
+ *              bind_default_dept_ids, need_punch_members,
+ *              no_need_punch_members, ... }   [WIRE-VERIFIED]
+ *          NB there is NO `member_ids` / `member_user_ids`; `bind_user_ids`
+ *          IS the member list. `group_leader_ids` is documented but was not
+ *          returned by the live tenant.
  *          scope: attendance:rule:readonly
  *   POST /open-apis/attendance/v1/user_stats_fields/query?employee_type
  *          body { locale, stats_type, start_date, end_date }  (≤40-day span)
@@ -51,9 +62,12 @@
  *          scope: attendance:task:readonly
  *   POST /open-apis/attendance/v1/user_stats_datas/query?employee_type
  *          body { locale, stats_type, start_date, end_date, user_ids(≤200),
- *                 user_id, need_history, current_group_only }  (≤31-day span)
- *          → { user_datas:[{name,user_id,datas:[{code,title,value,…}]}],
- *              invalid_user_list }
+ *                 user_id (REQUIRED — the OPERATOR; omitting it returns
+ *                 1220001 "Need user_id" [WIRE-VERIFIED]),
+ *                 need_history, current_group_only }  (≤31-day span)
+ *          → { user_datas:[{name,user_id,datas:[{title,…}]}],
+ *              invalid_user_list }   [WIRE-VERIFIED: ~43 cells per user for a
+ *          one-month range — period totals + identity columns + one per DAY]
  *          scope: attendance:task:readonly
  *   POST /open-apis/attendance/v1/user_tasks/query?employee_type&ignore_invalid_users
  *          body { user_ids(≤50), check_date_from, check_date_to,
@@ -346,6 +360,7 @@ Read-only access to this tenant's Lark/Feishu attendance data. NOTHING about the
 2. \`larkattendance_get_group\` → that group's member user ids (the scope for every data call).
 3. \`larkattendance_list_stats_fields\` → every statistic column available for the period, INCLUDING this tenant's 自定义字段. Match the user's words ("工时", "出勤天数", …) against the returned \`title\`s and pass the matching \`code\`s onward.
 4. \`larkattendance_query_stats\` (aggregated numbers) and/or \`larkattendance_query_records\` (raw clock-in/out).
+\`larkattendance_query_stats\` also needs an \`operatorUserId\` — the attendance admin the query runs AS. Lark rejects the call without one, and it selects the saved statistics view that decides which columns come back, so this skill refuses to invent it: if the prompt did not supply one, ASK for it rather than substituting a member id.
 Identity mapping: attendance ids are the tenant \`user_id\` (employee_id), NOT the \`open_id\` the \`lark\` skill's \`lark_lookup_user_by_email\` returns — use \`larkattendance_resolve_users\` to turn emails into attendance ids. For chat/DM routing keep using the \`lark\` skill's tools.
 Attendance is personal HR data: every data tool requires an explicit \`userIds\` list, and there is no whole-tenant dump. Report the numbers as returned; do not invent a column the tenant does not have.
 These tools return { ok:false, error } on failure — read the error, it names the missing permission or the range limit.`,
@@ -411,6 +426,20 @@ These tools return { ok:false, error } on failure — read the error, it names t
             `/open-apis/attendance/v1/groups/${encodeURIComponent(groupId)}?${qs.toString()}`,
           );
           const arr = (v: any) => (Array.isArray(v) ? v.map((x: any) => String(x)) : []);
+          // WIRE-VERIFIED (live tenant, 2026-08-17): the id-bearing keys this
+          // endpoint really returns are bind_user_ids (the member list — 217
+          // ids there), bind_dept_ids, except_user_ids, except_dept_ids,
+          // bind_default_user_ids, bind_default_dept_ids, plus the
+          // need_punch_members / no_need_punch_members object arrays.
+          // `member_ids` and `member_user_ids` DO NOT EXIST — do not reach for
+          // the obvious-sounding name. Three distinct exclusion concepts are
+          // kept distinct here rather than collapsed into one "exempt" bag:
+          //   except_*        — removed from the group entirely
+          //   bind_default_*  — in the group but not required to punch
+          // The scoped-rule arrays (need_punch_members / no_need_punch_members)
+          // are deliberately NOT mapped: their element shape is not
+          // wire-verified, and inventing field names is exactly the bug this
+          // comment exists to prevent.
           return JSON.stringify({
             ok: true,
             groupId: String(data?.group_id || groupId),
@@ -418,9 +447,18 @@ These tools return { ok:false, error } on failure — read the error, it names t
             employeeType,
             memberUserIds: arr(data?.bind_user_ids),
             memberDeptIds: arr(data?.bind_dept_ids),
-            exemptUserIds: arr(data?.bind_default_user_ids),
-            exemptDeptIds: arr(data?.bind_default_dept_ids),
-            leaderUserIds: arr(data?.group_leader_ids),
+            excludedUserIds: arr(data?.except_user_ids),
+            excludedDeptIds: arr(data?.except_dept_ids),
+            noPunchUserIds: arr(data?.bind_default_user_ids),
+            noPunchDeptIds: arr(data?.bind_default_dept_ids),
+            // Documented by Lark but ABSENT from the live response, so it is
+            // omitted rather than reported as an empty array — "[]" would read
+            // as "this group has no leaders", which is a different claim from
+            // "Lark did not tell us". Nothing may source the stats operator id
+            // from here (see larkattendance_query_stats).
+            ...(Array.isArray(data?.group_leader_ids)
+              ? { leaderUserIds: arr(data.group_leader_ids) }
+              : {}),
           });
         }
 
@@ -456,20 +494,43 @@ These tools return { ok:false, error } on failure — read the error, it names t
           const statsType = pickEnum(args?.statsType ?? args?.stats_type, STATS_TYPES, 'month');
           const locale = pickEnum(args?.locale, LOCALES, 'zh');
           const employeeType = employeeTypeArg(args);
-          // Lark's newer tenants REQUIRE an operator user_id on this endpoint.
-          // Pass it through when given; when absent let Lark decide (older
-          // tenants accept the call) — the error text names what is missing.
+          // REQUIRED, and we refuse rather than guess. WIRE-VERIFIED (live
+          // tenant, 2026-08-17): the identical body WITHOUT a top-level
+          // `user_id` returns code 1220001 "Need user_id" and empty data; WITH
+          // one it returns code 0 and real rows. This is a THIRD identity,
+          // distinct from the `user_ids` array (whose data you want) and from
+          // `employee_type` (the id FORM) — it is the querying OPERATOR.
+          //
+          // WHY NO DEFAULT: the operator selects which saved statistics VIEW
+          // applies, and the view decides WHICH COLUMNS come back. Substituting
+          // some id we happened to have (the first member, the group's
+          // bind_default_user_ids, …) would return a full, plausible,
+          // successfully-parsed table built from the WRONG column set — a
+          // silently-wrong answer, the one failure mode worth refusing a call
+          // over. So an absent operator is a loud local error, never a guess.
           const operatorUserId = String(args?.operatorUserId ?? args?.user_id ?? '').trim();
+          if (!operatorUserId) {
+            return JSON.stringify({
+              ok: false,
+              error: 'operatorUserId is required by Lark (the API rejects this call with 1220001 "Need user_id"). '
+                + 'It is the OPERATOR performing the query — a third id, not one of `userIds` and not `employeeType`. '
+                + 'It must be a user whose saved attendance statistics view contains the columns you want (normally an '
+                + 'attendance admin), because that view decides which columns Lark returns. This skill will NOT pick one '
+                + 'for you: substituting an arbitrary member would silently return the wrong column set instead of failing. '
+                + 'Ask the caller/prompt for the attendance admin\'s user id, or resolve their email with '
+                + 'larkattendance_resolve_users.',
+            });
+          }
           const body: any = {
             locale,
             stats_type: statsType,
             start_date: period.startDate,
             end_date: period.endDate,
             user_ids: scope.ids,
+            user_id: operatorUserId,
             need_history: args?.needHistory === true,
             current_group_only: args?.currentGroupOnly === true,
           };
-          if (operatorUserId) body.user_id = operatorUserId;
 
           const rawCodes = Array.isArray(args?.fieldCodes) ? args.fieldCodes : null;
           const wantedCodes: string[] = rawCodes
@@ -595,7 +656,7 @@ These tools return { ok:false, error } on failure — read the error, it names t
     },
     {
       name: 'larkattendance_get_group',
-      description: 'DISCOVERY. Read one attendance group and, crucially, ITS MEMBERS — memberUserIds is the scope you pass as userIds to larkattendance_query_stats / larkattendance_query_records. Returns { ok, groupId, groupName, employeeType, memberUserIds, memberDeptIds, exemptUserIds, exemptDeptIds, leaderUserIds }. Members bound by DEPARTMENT appear in memberDeptIds, not memberUserIds — for those, resolve the people another way (e.g. larkattendance_resolve_users from emails you already have).',
+      description: 'DISCOVERY. Read one attendance group and, crucially, ITS MEMBERS — memberUserIds is the scope you pass as userIds to larkattendance_query_stats / larkattendance_query_records (a real group can hold hundreds, so expect to batch). Returns { ok, groupId, groupName, employeeType, memberUserIds, memberDeptIds, excludedUserIds, excludedDeptIds, noPunchUserIds, noPunchDeptIds }. THREE different exclusion lists, do not conflate them: excludedUserIds are removed from the group; noPunchUserIds are in the group but not required to clock in (they still have statistics). Members bound by DEPARTMENT appear in memberDeptIds, not memberUserIds — resolve those people another way (e.g. larkattendance_resolve_users from emails you already have). Lark does not reliably return the group leaders here, so leaderUserIds may be absent — never source the query operator id from this tool.',
       input_schema: {
         type: 'object',
         properties: {
@@ -622,7 +683,7 @@ These tools return { ok:false, error } on failure — read the error, it names t
     },
     {
       name: 'larkattendance_query_stats',
-      description: 'The numbers: per-user attendance statistics (work hours, attendance days, exceptions, custom fields) for a period. REQUIRES an explicit userIds list (max 200) — attendance is personal data and there is no whole-tenant read; get the ids from larkattendance_get_group or larkattendance_resolve_users. Range is capped at 31 days. Pass fieldCodes (from larkattendance_list_stats_fields) to return only the columns you need. Returns { ok, statsType, startDate, endDate, users:[{ userId, name, fields:[{ code, title, value, timeUnit? }] }], invalidUserIds }. Values are STRINGS exactly as Lark returns them — report them as-is, do not re-derive. NOTE: the columns Lark returns follow the tenant\'s saved statistics view (考勤 > 统计设置); if a field that larkattendance_list_stats_fields advertises is absent from the result, it is switched off in that view and an admin must enable it.',
+      description: 'The numbers: per-user attendance statistics (work hours, attendance days, exceptions, custom fields) for a period. Needs THREE separate things: userIds (whose data you want, max 200), operatorUserId (WHO IS ASKING — required by Lark, see below), and the date range (max 31 days). Attendance is personal data and there is no whole-tenant read; get ids from larkattendance_get_group or larkattendance_resolve_users. Returns { ok, statsType, startDate, endDate, users:[{ userId, name, fields:[{ code, title, value, durationNum? }] }], invalidUserIds }. Values are STRINGS exactly as Lark returns them — report them as-is, do not re-derive. EXPECT MANY COLUMNS: a one-month query returns roughly 40+ cells per person, because Lark mixes period totals (e.g. an "actual attendance hours" column, late/early counts) with identity columns (department, employee number) AND one column PER DAY of the range — so match on `title` rather than assuming a short list, and pass fieldCodes to trim. The exact set of columns follows the SAVED STATISTICS VIEW of the operatorUserId (考勤 > 统计设置), so if a field that larkattendance_list_stats_fields advertises is missing from the result, it is switched off in that operator\'s view and an admin must enable it — or you are querying as the wrong operator.',
       input_schema: {
         type: 'object',
         properties: {
@@ -633,11 +694,11 @@ These tools return { ok:false, error } on failure — read the error, it names t
           fieldCodes: { type: 'array', items: { type: 'string' }, description: 'Optional filter — only these field codes/titles are returned. Omit to get every column.' },
           locale: { type: 'string', description: "Field-title language: 'zh' (default), 'en', or 'ja'." },
           employeeType: { type: 'string', description: "'employee_id' (default) or 'employee_no' — must match the form of userIds." },
-          operatorUserId: { type: 'string', description: 'Operator user id. Newer Lark tenants require it on this endpoint; pass an admin/group-leader id (e.g. from leaderUserIds) if Lark rejects the call without one.' },
+          operatorUserId: { type: 'string', description: 'REQUIRED. The user id of the OPERATOR performing the query — a third id, distinct from `userIds` (whose data you want) and from `employeeType` (the id form). Lark rejects the call without it (1220001 "Need user_id"). It should be an attendance admin whose saved statistics view contains the columns you need, because that view decides which columns come back. This skill will not pick one for you — get it from the caller/prompt, or from an email via larkattendance_resolve_users.' },
           needHistory: { type: 'boolean', description: 'Include transferred/departed staff (default false).' },
           currentGroupOnly: { type: 'boolean', description: 'Restrict to the user\'s current attendance group (default false).' },
         },
-        required: ['userIds', 'startDate', 'endDate'],
+        required: ['userIds', 'operatorUserId', 'startDate', 'endDate'],
       },
     },
     {
