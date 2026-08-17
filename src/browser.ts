@@ -39,6 +39,31 @@ function withHeadlessArg(args, wantHeadless) {
   return [...filtered, '--headless'];
 }
 
+const BASE_PROMPT_FRAGMENT = `Execute this test using the browser tools available to you. You MUST make actual browser tool calls — do not fabricate results.
+If you DO NOT have access to browser tools → return {"success": false, "steps": [], "browserClosed": false, "notes": "No browser tools available"}.
+DO NOT return success: true unless you ACTUALLY called browser tools.`;
+
+/**
+ * Dev-server preview guidance — appended ONLY when the platform injected the
+ * preview env into this run (self-host dispatcher; absent ⇒ the fragment is
+ * byte-identical to the historical one). This is the ONE place the recipe
+ * lives: every node that binds the browser skill inherits it automatically,
+ * so no template author has to remember the URL shape. Env-var NAMES only —
+ * the token value itself never goes into a persisted prompt (security
+ * invariant #4); the model materializes it via Bash at use time.
+ */
+function previewPromptFragment(): string {
+  if (!process.env.PREVIEW_BASE_URL || !process.env.PREVIEW_TOKEN) return '';
+  return `
+
+## Previewing a server YOU start in this container (dev-server preview)
+The browser runs in an ISOLATED container: localhost/private URLs are unreachable from it — NEVER navigate to http://localhost:<port>. To let the browser view a server you start in this run (npm run dev, vite, a mock API — anything HTTP):
+1. Start the server bound to 0.0.0.0 (e.g. \`npm run dev -- --host\` or \`HOST=0.0.0.0\`); a localhost-only bind is unreachable from outside this container.
+2. Build the preview URL from this run's injected env (Bash): \`echo "$PREVIEW_BASE_URL/<port>/?pvt=$PREVIEW_TOKEN"\` — substitute your server's actual port.
+3. browser_navigate to that exact URL. The first load does a cookie handshake and redirects; after that, assets, XHR and hot-reload all work — screenshots and video too.
+The preview lives only as long as this run. Do not put PREVIEW_TOKEN anywhere except that URL.`;
+}
+
 export const browserSkill: any = {
   id: 'browser',
   serverName: 'playwright',
@@ -49,9 +74,7 @@ export const browserSkill: any = {
   envKeys: [],
   tools: [],
 
-  promptFragment: `Execute this test using the browser tools available to you. You MUST make actual browser tool calls — do not fabricate results.
-If you DO NOT have access to browser tools → return {"success": false, "steps": [], "browserClosed": false, "notes": "No browser tools available"}.
-DO NOT return success: true unless you ACTUALLY called browser tools.`,
+  promptFragment: () => BASE_PROMPT_FRAGMENT + previewPromptFragment(),
 
   resolve({ sessionPath, workspace, nodeName, headless }: any = {}) {
     const bin = resolveBrowserBin();
