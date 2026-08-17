@@ -15,8 +15,16 @@
  *   - SOURCE SCAN decides "backend-calling": the module either really imports
  *     '@zibby/core/backend-client' or locally reimplements the same client
  *     (reads process.env.ZIBBY_ACCOUNT_API_URL — the kvMemory/datasetStore/
- *     gbrain/artifact pattern). Comments can't trip it: the import check
- *     matches real import statements only.
+ *     gbrain/artifact pattern), or imports a SHARED CREDENTIAL RESOLVER that
+ *     does the backend call on its behalf (today: larkApp.ts, the ONE decider
+ *     of which Lark app a consumer authenticates as). That third rule is
+ *     deliberately an explicit, named list rather than blanket transitivity —
+ *     "imports something that somewhere imports the client" sweeps in modules
+ *     whose CHILD never talks to the backend at all. Without it, extracting a
+ *     resolver would silently DROP its consumers out of this tripwire, which is
+ *     exactly the invisible coverage loss the suite exists to prevent: ADD the
+ *     next shared resolver to RESOLVER_MODULES when you write one.
+ *     Comments can't trip it: the import checks match real import statements.
  *   - REFLECTION asserts the EFFECTIVE child env: with the three session keys
  *     present in process.env, `skill.resolve()` must forward all of
  *     PROJECT_API_TOKEN + ZIBBY_ACCOUNT_API_URL + ZIBBY_ENV. This is asserted
@@ -108,15 +116,29 @@ function resolveWithSessionEnv(skill: any) {
   }
 }
 
+/**
+ * Shared credential resolvers: helper modules whose whole job is to make the
+ * backend call for a family of skills. A skill importing one IS backend-calling
+ * even though its own source never names the client. Keep this list short and
+ * explicit — see the header for why blanket transitivity is the wrong rule.
+ */
+const RESOLVER_MODULES = ['./larkApp.js'] as const;
+
+function importsSharedResolver(text: string): boolean {
+  return RESOLVER_MODULES.some((m) => new RegExp(
+    String.raw`^\s*import\s[^;]*?from\s+['"]` + m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + String.raw`['"]`, 'm',
+  ).test(text));
+}
+
 const sources = listSkillSources();
 const backendCalling = sources.filter((f) => {
   const text = readFileSync(join(srcDir, f), 'utf-8');
-  return importsBackendClient(text) || reimplementsBackendClient(text);
+  return importsBackendClient(text) || reimplementsBackendClient(text) || importsSharedResolver(text);
 });
 
 describe('backend-calling skills forward the session env to their MCP child', () => {
   it('the source scan itself works (known positives are flagged)', () => {
-    for (const name of ['github.ts', 'lark.ts', 'larkDocs.ts', 'artifact.ts', 'sentry.ts', 'slack.ts']) {
+    for (const name of ['github.ts', 'lark.ts', 'larkDocs.ts', 'larkAttendance.ts', 'artifact.ts', 'sentry.ts', 'slack.ts']) {
       expect(backendCalling, `${name} must be detected as backend-calling`).toContain(name);
     }
   });
@@ -158,6 +180,7 @@ describe('backend-calling skills forward the session env to their MCP child', ()
       ['github.ts', 'githubSkill'],
       ['lark.ts', 'larkSkill'],
       ['larkDocs.ts', 'larkDocsSkill'],
+      ['larkAttendance.ts', 'larkAttendanceSkill'],
       ['artifact.ts', 'artifactSkill'],
     ] as const;
     return Promise.all(mods.map(async ([file, exportName]) => {

@@ -4,7 +4,8 @@
  * THE BUG THIS PINS (reproduced on two boxes, 2026-08-12)
  * ──────────────────────────────────────────────────────
  * The platform grew a dedicated Lark Docs app: its own `lark_docs` integration
- * row + connect/disconnect (backend handlers/lark.js), its own "Lark Docs" card,
+ * row + connect/disconnect (backend handlers/lark.js), its own card (labelled
+ * "Lark Docs" then, "Lark App" since — the id never moved),
  * its own LARK_DOCS_* injection (workflow-executor), and its own DECLARATION
  * (`skill-integrations.js` maps skill `lark-docs` → provider `lark_docs`).
  * This skill's auth chokepoint never moved: it asked
@@ -153,10 +154,18 @@ describe('Lark Docs declaration', () => {
     expect(larkDocsSkill.requiresIntegration).toEqual(['lark_docs', 'lark']);
   });
 
-  test('TRIPWIRE: envKeys lists every process.env.LARK* the module reads', async () => {
+  test('TRIPWIRE: envKeys lists every process.env.LARK* the resolution reads', async () => {
     vi.resetModules();
     const { larkDocsSkill } = await import('../larkDocs.js');
-    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'larkDocs.ts'), 'utf8');
+    // The app-credential resolution moved to the SHARED larkApp.ts (one decider
+    // for every tenant-wide Lark reader: docs + attendance), so the reader-side
+    // scan must follow it there — scanning larkDocs.ts alone would now match
+    // nothing and pass vacuously. Both files are read so the tripwire keeps
+    // working whichever side a future env name is added on.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = ['larkDocs.ts', 'larkApp.ts']
+      .map((f) => readFileSync(join(here, '..', f), 'utf8'))
+      .join('\n');
     const read = new Set(Array.from(src.matchAll(/\bLARK[A-Z0-9_]*\b/g), (m) => m[0])
       .filter((n) => /^LARK(_DOCS)?_(APP_ID|APP_SECRET|HOST)$/.test(n)));
     expect(read.size).toBeGreaterThan(0);

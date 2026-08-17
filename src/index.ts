@@ -25,6 +25,7 @@ import { notionSkill } from './notion.js';
 import { linkedinSkill } from './linkedin.js';
 import { googleDocsSkill } from './googleDocs.js';
 import { larkDocsSkill } from './larkDocs.js';
+import { larkAttendanceSkill } from './larkAttendance.js';
 import { chatNotifySkill } from './chat-notify.js';
 import { memorySkill } from './memory.js';
 import { skillInstallerSkill } from './skill-installer.js';
@@ -77,6 +78,7 @@ reg(notionSkill);
 reg(linkedinSkill);
 reg(googleDocsSkill);
 reg(larkDocsSkill);
+reg(larkAttendanceSkill);
 reg(chatNotifySkill);
 reg(sentrySkill);
 reg(memorySkill);
@@ -113,7 +115,7 @@ reg({ ...slackSkill, id: 'slack_notify' });
 // identical shape, now the complete superset (drift gone).
 export { SKILL_IDS as SKILLS } from '@zibby/skill-ids';
 
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, vikunjaSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, artifactSkill, chartRenderSkill, reportCheckSkill, codeStatsSkill, chatProgressSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, vikunjaSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, larkAttendanceSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, datasetStoreSkill, artifactSkill, chartRenderSkill, reportCheckSkill, codeStatsSkill, chatProgressSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,

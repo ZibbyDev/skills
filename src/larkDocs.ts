@@ -5,16 +5,18 @@
  * It runs on the DEDICATED Lark Docs app (integration `lark_docs`) — the app
  * carrying the docx (+ wiki/drive) scopes — and falls back to the chat app
  * (`lark`) so a single-app setup keeps working. Auth:
- *   resolveLarkDocsApp() → { appId, appSecret, host } →
+ *   resolveLarkApp() (shared, larkApp.ts) → { appId, appSecret, host } →
  *   tenant_access_token (cached ~2h) → Bearer on every Docx call.
  *
  * Design rules (mirrors notion.js / googleDocs.js):
- *   - resolveLarkDocsApp() is the SINGLE auth chokepoint (via the
- *     larkDocsApi() helper). Don't re-resolve at call sites.
+ *   - resolveLarkApp() is the SINGLE auth chokepoint (via the
+ *     larkDocsApi() helper). Don't re-resolve at call sites. It lives in
+ *     larkApp.ts because the docs app is also what other tenant-wide Lark
+ *     readers (lark-attendance) must use — one decider, not one per skill.
  *   - handleToolCall() dispatches the tools and NEVER throws — any HTTP or
  *     parse failure is returned as { ok:false, error } so a missing/broken
  *     Lark connection can't crash the run.
- *   - Region-aware host: whatever resolveLarkDocsApp() returns as
+ *   - Region-aware host: whatever resolveLarkApp() returns as
  *     `host` (open.feishu.cn vs open.larksuite.com) is used verbatim, so the
  *     skill always matches the connected app's region. No baked host, no CLI,
  *     no heavy deps — pure `fetch`.
@@ -36,8 +38,8 @@
 import { existsSync, statSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { basename, dirname, resolve as resolvePath } from 'path';
-import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { LARK_APP_ENV_KEYS, resolveLarkApp } from './larkApp.js';
 
 /**
  * Resolve the generic skill MCP server binary (bin/mcp-skill.mjs), derived
@@ -70,87 +72,17 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const TOKEN_TTL_MS = 100 * 60 * 1000;
 let tokenCache = null; // { token, expiresAt, appId }
 
-const DEFAULT_LARK_HOST = 'https://open.larksuite.com';
-
 /**
- * The two env trios that can carry a Lark app credential, in PRECEDENCE order:
- * the DOCS app first, the CHAT app as the single-app fallback. These names are
- * the pre-existing platform contract — `workflow-executor.js` injects
- * LARK_DOCS_* from the `lark_docs` integration row and LARK_* from the `lark`
- * one, and lark-kb-sync's fetch-node reads them in this same order.
+ * Every env name the SHARED app-credential resolution can read (→ envKeys).
+ * Re-exported under its historical name; the list is DERIVED from larkApp.ts's
+ * precedence order, never a second hand-kept copy.
  */
-const LARK_APP_ENV_TRIOS = Object.freeze([
-  Object.freeze({ appId: 'LARK_DOCS_APP_ID', appSecret: 'LARK_DOCS_APP_SECRET', host: 'LARK_DOCS_HOST' }),
-  Object.freeze({ appId: 'LARK_APP_ID', appSecret: 'LARK_APP_SECRET', host: 'LARK_HOST' }),
-]);
-
-/** Every env name the app-credential resolution below can read (→ envKeys). */
-export const LARK_DOCS_APP_ENV_KEYS = Object.freeze(
-  LARK_APP_ENV_TRIOS.flatMap((t) => [t.appId, t.appSecret, t.host]),
-);
-
-/** Lark hosts are used as `${host}/open-apis/...` — force an absolute origin. */
-function normalizeHost(raw) {
-  const h = String(raw || '').trim().replace(/\/+$/, '');
-  if (!h) return DEFAULT_LARK_HOST;
-  return /^https?:\/\//i.test(h) ? h : `https://${h}`;
-}
-
-function appFromEnvTrio(trio) {
-  const appId = String(process.env[trio.appId] || '').trim();
-  const appSecret = String(process.env[trio.appSecret] || '').trim();
-  if (!appId || !appSecret) return null;
-  return { appId, appSecret, host: normalizeHost(process.env[trio.host]) };
-}
-
-/**
- * Resolve the Lark APP CREDENTIAL to mint the tenant token from — THE single
- * place that knows "Lark Docs" is a SEPARATE app from "Lark Chat".
- *
- * WHY THIS IS NOT JUST resolveIntegrationToken('lark') (the bug it closes)
- * ──────────────────────────────────────────────────────────────────────
- * The platform grew a dedicated `lark_docs` account integration (its own
- * connect/disconnect in handlers/lark.js, its own "Lark Docs" card, its own
- * LARK_DOCS_* injection) and the DECLARATION moved with it —
- * skill-integrations.js maps `'lark-docs' → lark_docs`. The RUNTIME did not:
- * this skill still asked for `lark`, and the backend token endpoint had no
- * `lark_docs` case at all. So an account with the docs app connected and the
- * chat app not passed every gate (green card, green toggle, deploy allowed)
- * and then failed at call time with "lark is not connected" — a TWO-PLACES
- * drift with nothing screaming, reproduced on two boxes 2026-08-12.
- *
- * PRECEDENCE (docs app first, chat app as the single-app fallback):
- *   1. LARK_DOCS_* env  — the docs app the executor injected
- *   2. LARK_* env       — the chat app (one Lark app carrying both scopes)
- *   3. resolveIntegrationToken('lark_docs') → the backend resolver, which
- *      applies the SAME docs-row-then-chat-row order server-side for callers
- *      that have no injected env (the Copilot: in-process/Lambda turns get no
- *      executor env, only the per-turn JWT).
- */
-async function resolveLarkDocsApp() {
-  for (const trio of LARK_APP_ENV_TRIOS) {
-    const app = appFromEnvTrio(trio);
-    if (app) return app;
-  }
-  try {
-    const t: any = await resolveIntegrationToken(INTEGRATIONS.LARK_DOCS);
-    return { appId: t?.appId, appSecret: t?.appSecret, host: normalizeHost(t?.host) };
-  } catch (err: any) {
-    // COMPAT, narrowly scoped: a box whose CONTROL-PLANE predates the
-    // `lark_docs` token resolver answers 400 "Unknown provider: lark_docs".
-    // A run container installs @zibby/skills fresh at [setup] npm install, so a
-    // NEW skill genuinely meets an OLD backend there. Retry the chat provider
-    // ONLY for that one signature — every other failure (404 not connected,
-    // 401, network) propagates so a real problem is never masked. Remove once
-    // no supported self-host release predates the resolver.
-    if (!/unknown provider/i.test(String(err?.message || ''))) throw err;
-    const t: any = await resolveIntegrationToken(INTEGRATIONS.LARK);
-    return { appId: t?.appId, appSecret: t?.appSecret, host: normalizeHost(t?.host) };
-  }
-}
+export const LARK_DOCS_APP_ENV_KEYS = LARK_APP_ENV_KEYS;
 
 async function getTenantAccessToken() {
-  const { appId, appSecret, host } = await resolveLarkDocsApp();
+  // Auth chokepoint: the app credential comes from the SHARED resolver
+  // (larkApp.ts) — docs app first, chat app fallback, backend last.
+  const { appId, appSecret, host } = await resolveLarkApp();
   if (tokenCache && tokenCache.appId === appId && tokenCache.expiresAt > Date.now()) {
     return { token: tokenCache.token, host };
   }
@@ -463,13 +395,13 @@ export const larkDocsSkill: any = {
   allowedTools: ['mcp__larkdocs__*'],
   // The DOCS app is the declared requirement (matches backend
   // skill-integrations.js `'lark-docs' → lark_docs`); the CHAT app is accepted
-  // as the single-app fallback because resolveLarkDocsApp() really does fall
+  // as the single-app fallback because resolveLarkApp() really does fall
   // back to it. An ARRAY means "any ONE of these" to both availability gates
   // (agent-workflow strategy-registry + core strategies), so an account with
   // only the docs app connected keeps the prompt fragment it used to lose.
   requiresIntegration: [INTEGRATIONS.LARK_DOCS, INTEGRATIONS.LARK],
   description: 'Lark / Feishu Docs — read, create, append, and insert images into Lark documents (docx).',
-  // resolveLarkDocsApp() reads the injected LARK_DOCS_*/LARK_* app creds and,
+  // resolveLarkApp() reads the injected LARK_DOCS_*/LARK_* app creds and,
   // failing that, calls OUR OWN backend for them (Lark mints a tenant token
   // from app_id+secret — no single-bearer self-host fast path exists). envKeys
   // IS the spawned MCP child's ENTIRE environment, so BOTH halves must be
@@ -491,7 +423,7 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
    * module's larkDocsSkill export, so the AGENT gets real mcp__larkdocs__*
    * tools. The child does NOT inherit the run env — the env returned here is
    * its ENTIRE environment, so the backend-session allowlist (envKeys) MUST be
-   * forwarded or resolveLarkDocsApp() dies inside the child with a
+   * forwarded or resolveLarkApp() dies inside the child with a
    * misleading session error. (The 0.2.7 fix declared envKeys but this
    * resolve() still returned env:{} — the drift the
    * backend-session-env-contract test now pins.) When unconnected,
