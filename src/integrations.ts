@@ -133,7 +133,11 @@ export const INTEGRATION_REGISTRY = Object.freeze({
   gitlab: { id: 'gitlab', name: 'GitLab', connectPath: '/integrations?provider=gitlab' },
   slack:  { id: 'slack',  name: 'Slack',  connectPath: '/integrations?provider=slack'  },
   lark:   { id: 'lark',   name: 'Lark',   connectPath: '/integrations?provider=lark'   },
-  lark_docs: { id: 'lark_docs', name: 'Lark Docs', connectPath: '/integrations?provider=lark_docs' },
+  // DISPLAY name only — the id `lark_docs` is load-bearing (DDB integration
+  // rows key on it). The card is the ACCOUNT-LEVEL Lark application credential:
+  // docs/wiki today, other org-wide read surfaces on the same app next, so it
+  // is named for the app rather than for one of its uses.
+  lark_docs: { id: 'lark_docs', name: 'Lark App', connectPath: '/integrations?provider=lark_docs' },
   openai_billing: {
     id: 'openai_billing',
     name: 'OpenAI Admin',
