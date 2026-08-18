@@ -48,11 +48,18 @@ DO NOT return success: true unless you ACTUALLY called browser tools.`;
  * preview env into this run (self-host dispatcher; absent ⇒ the fragment is
  * byte-identical to the historical one). This is the ONE place the recipe
  * lives: every node that binds the browser skill inherits it automatically,
- * so no template author has to remember the URL shape. Env-var NAMES only —
+ * so no template author has to remember the URL shape.
+ *
+ * EXPORTED because binding the browser SKILL is not the only way a node gets a
+ * browser: an agent can be handed one as a custom MCP server (row data), and
+ * that path carries no prompt fragment at all — so the recipe never rendered
+ * and the agent rediscovered the URL shape by trial and error, navigating to
+ * localhost first (measured, 2026-08-18). A template in that position imports
+ * THIS function rather than restating the recipe. Env-var NAMES only —
  * the token value itself never goes into a persisted prompt (security
  * invariant #4); the model materializes it via Bash at use time.
  */
-function previewPromptFragment(): string {
+export function devServerPreviewRecipe(): string {
   if (!process.env.PREVIEW_BASE_URL || !process.env.PREVIEW_TOKEN) return '';
   return `
 
@@ -75,7 +82,7 @@ export const browserSkill: any = {
   envKeys: [],
   tools: [],
 
-  promptFragment: () => BASE_PROMPT_FRAGMENT + previewPromptFragment(),
+  promptFragment: () => BASE_PROMPT_FRAGMENT + devServerPreviewRecipe(),
 
   resolve({ sessionPath, workspace, nodeName, headless }: any = {}) {
     const bin = resolveBrowserBin();
