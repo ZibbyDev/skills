@@ -39,6 +39,14 @@ describe('browser skill preview prompt fragment', () => {
     expect(f).toContain('$PREVIEW_BASE_URL/<port>/?pvt=$PREVIEW_TOKEN');
     expect(f).toContain('0.0.0.0');
     expect(f).toMatch(/NEVER navigate to http:\/\/localhost/);
+    // the DON'T-set-a-base fact. The platform routes root-absolute assets back
+    // itself (preview-server.js ROOT_COOKIE); an agent that "fixes" the blank
+    // page by pointing Vite's `base` at the preview prefix instead lands in a
+    // redirect loop — observed twice in one real run, 2026-08-18, before it
+    // started hand-writing prefix-rewriting middleware.
+    expect(f).toMatch(/do NOT set a base path/i);
+    expect(f).toMatch(/basePath|PUBLIC_URL/);
+    expect(f).toMatch(/LOOP/);
     // the base contract survives untouched
     expect(f).toContain('You MUST make actual browser tool calls');
   });

@@ -60,7 +60,8 @@ function previewPromptFragment(): string {
 The browser runs in an ISOLATED container: localhost/private URLs are unreachable from it — NEVER navigate to http://localhost:<port>. To let the browser view a server you start in this run (npm run dev, vite, a mock API — anything HTTP):
 1. Start the server bound to 0.0.0.0 (e.g. \`npm run dev -- --host\` or \`HOST=0.0.0.0\`); a localhost-only bind is unreachable from outside this container.
 2. Build the preview URL from this run's injected env (Bash): \`echo "$PREVIEW_BASE_URL/<port>/?pvt=$PREVIEW_TOKEN"\` — substitute your server's actual port.
-3. browser_navigate to that exact URL. The first load does a cookie handshake and redirects; after that, assets, XHR and hot-reload all work — screenshots and video too.
+3. Serve your app at its own ROOT and leave the URL prefix alone — do NOT set a base path for the preview (Vite \`base\`, Next.js \`basePath\`, CRA \`PUBLIC_URL\`). The platform routes this page's root-absolute requests (\`/assets/…\`, \`/@vite/client\`, XHR) back to your server for you. Setting a base to the preview prefix makes the dev server redirect to it in a LOOP, and re-adding the prefix by hand is never needed.
+4. browser_navigate to that exact URL. The first load does a cookie handshake and redirects; after that, assets, XHR and hot-reload all work — screenshots and video too.
 The preview lives only as long as this run. Do not put PREVIEW_TOKEN anywhere except that URL.`;
 }
 
