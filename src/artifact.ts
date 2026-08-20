@@ -156,6 +156,29 @@ function indexScope(id) {
 }
 
 /**
+ * THE PLATFORM HALF OF AN ARTIFACT'S NAME — read from the run's ENV, never from
+ * a tool argument.
+ *
+ * The Artifacts tab listed three rows all called "Vikunja Frontend Exploration
+ * Report". That is not a prompting failure to be scolded away: a model asked to
+ * pick a distinctive title has no way to know what it called the last one, so
+ * uniqueness that depends on the agent remembering to be unique is not a
+ * property, it is a hope. `EXECUTION_ID` is minted by the executor and injected
+ * into every run container (cloud ECS and the self-host docker dispatcher use
+ * the same env array), so it is unique by construction and the model cannot
+ * author it — the same standing this skill's `WORKFLOW_TYPE` namespace already
+ * has, and the same "IDENTITY, NEVER AUTHORITY" terms: it picks what a reader is
+ * SHOWN, never what a caller may reach.
+ *
+ * Returns null outside a run (the local CLI, the Copilot's Lambda) — the field
+ * is then simply absent and every surface renders exactly as it does today.
+ */
+function runContext() {
+  const id = typeof process.env.EXECUTION_ID === 'string' ? process.env.EXECUTION_ID.trim() : '';
+  return id ? { runId: id } : null;
+}
+
+/**
  * What the model is told the markdown path CAN and CANNOT express. Kept as data
  * so the tool description, the prompt fragment and the retry advice all quote the
  * SAME list — and so a test can assert the description actually carries it.
@@ -760,6 +783,23 @@ credentials), so on the html path keep ALL CSS/JS/images INLINE (inline
 <style>/<script>, data: URIs) — every external URL is blocked and will simply not
 load. NEVER escape the document: send real tags, not \`&lt;div&gt;\`.
 
+### NAME IT FOR SOMEONE SCROLLING A LIST OF FIFTY, and CAPTION IT.
+The \`title\` is read in a list next to everything else you and your teammates
+have ever published, so it must say WHAT THIS ONE IS — the subject, not the
+genre. "Vikunja label sort toggle — 3 of 5 checks failed" survives that list;
+"Exploration Report" does not, and three of those in a row are indistinguishable.
+Name the specific thing: the ticket, the feature, the file, the finding.
+(You do not have to make it unique — Zibby stamps the run that produced each
+artifact and shows it beside the title, so two honest titles that happen to
+match are still told apart. Your job is to be SPECIFIC, not to be unique.)
+
+Then pass \`description\`: a short Markdown write-up shown UNDER the artifact on
+its page. A recording or a screenshot cannot explain itself — without this, the
+whole page says \`video/webm · 3.8 MB · Download\`. Say what it shows, what was
+checked, what the reader should conclude, and anything surprising. Headings,
+bullets and tables are all fine. It never appears in list views, so a real
+description costs nothing. Write one for every artifact a human will open.
+
 ### Every number on the page must come from a tool result or this transcript.
 Do not do arithmetic in prose and then print the answer — that is how a page ends
 up saying 42 in one place and 45 in another. If you need a total, compute it with
@@ -897,6 +937,13 @@ records this automatically; you don't store it yourself.)`,
           if (picked.format === 'text') payload.contentType = args.contentType.trim();
           if (typeof args?.kind === 'string' && args.kind.trim()) payload.kind = args.kind.trim();
           if (typeof args?.favicon === 'string' && args.favicon.trim()) payload.favicon = args.favicon.trim();
+          // The note that renders UNDER the artifact on its detail page. Sent
+          // only when non-empty, so a caller that omits it leaves the stored
+          // record byte-identical to one published before the field existed.
+          if (typeof args?.description === 'string' && args.description.trim()) payload.description = args.description;
+          // Provenance from the RUN, not from the model (see runContext).
+          const ctx = runContext();
+          if (ctx) payload.context = ctx;
 
           // Publish AND open the door in one call, when the readers have no
           // account. `share` ONLY — never a caller-supplied password: a model
@@ -942,6 +989,20 @@ records this automatically; you don't store it yourself.)`,
             createdAt: written.createdAt || new Date().toISOString(),
             summary: typeof args?.summary === 'string' && args.summary.trim() ? args.summary.trim() : title,
           };
+          // PROVENANCE ON THE INDEX ROW — this is what lets the Artifacts tab
+          // tell two same-titled rows apart, and it is the ONE field here that
+          // is read back from the RESPONSE rather than composed locally.
+          //
+          // The backend stores provenance on the artifact's meta; this skill
+          // writes the index row. That is a pair which must agree, and nothing
+          // would scream if they drifted — so the pair is collapsed by
+          // DERIVATION: `written.context` is what the server actually stored,
+          // after its own trimming and its dropping of anything malformed.
+          // Never `payload.context`, which is merely what we asked for.
+          //
+          // NOT the description: every listing ships each index row's whole
+          // JSON to the browser, and no list surface renders a description.
+          if (written.context && typeof written.context === 'object') record.context = written.context;
           // Type facts for the list surfaces: a text record carries the
           // NORMALIZED contentType + measured bytes (the server echoes both on
           // the write), a document record carries its format — and BOTH carry
@@ -969,8 +1030,14 @@ records this automatically; you don't store it yourself.)`,
           const picked = pickContent(args);
           if (picked?.error) return JSON.stringify({ error: picked.error });
           const title = typeof args?.title === 'string' ? args.title.trim() : '';
-          if (!picked && !title) {
-            return JSON.stringify({ error: 'nothing to update — pass a new title and/or markdown|html' });
+          // A description-only revision is a legitimate update: the page was
+          // right, the explanation of it was missing. Counting it as "nothing to
+          // update" would force the model to re-send the whole document to
+          // attach one — which is both wasteful and a fresh chance to break a
+          // page that was already good.
+          const hasDescription = typeof args?.description === 'string' && args.description.trim();
+          if (!picked && !title && !hasDescription) {
+            return JSON.stringify({ error: 'nothing to update — pass a new title, description, and/or markdown|html' });
           }
           // Same rule as publish, and it also covers a title-only update: there is
           // no html in this call, so there is nothing for `data` to be checked against.
@@ -981,6 +1048,12 @@ records this automatically; you don't store it yourself.)`,
           if (picked) payload[picked.format] = picked.content;
           if (typeof args?.kind === 'string' && args.kind.trim()) payload.kind = args.kind.trim();
           if (typeof args?.favicon === 'string' && args.favicon.trim()) payload.favicon = args.favicon.trim();
+          if (hasDescription) payload.description = args.description;
+          // NO `context` on update. Provenance answers "which run PRODUCED
+          // this", and a later revision did not produce it — re-stamping the
+          // block with the current run would quietly rewrite history and break
+          // the one thing the field is for. The backend keeps the original
+          // (it is sticky across a rebuild); this simply never overwrites it.
 
           const written = await publishWithBudget(payload, picked?.format, pre?.preflight); // { id, url, updatedAt, createdAt? }
           if (written?.__rejected) return written.payload;
@@ -1099,6 +1172,7 @@ records this automatically; you don't store it yourself.)`,
           kind: { type: 'string', description: 'Optional label for what this is, e.g. "report", "plan", "dashboard", "diagram". Stored in your index.' },
           favicon: { type: 'string', description: 'Optional emoji used as the browser-tab icon, e.g. "📊".' },
           summary: { type: 'string', description: 'Optional one-line summary for your own index (defaults to the title). Helps you recall later what this page was.' },
+          description: { type: 'string', description: 'Optional Markdown note ABOUT this artifact, shown UNDERNEATH it on its detail page — what it shows, what was checked, what the reader should conclude, anything surprising. This is the artifact\'s caption, NOT its content: the page/file itself is the content, and a reader who opens it should be able to understand what they are looking at without asking you. Write it as a short report with headings, bullets and tables (same Markdown subset as the `markdown` field, 16 KB max). It is NOT shown in list views, so it costs nothing to write a real one.' },
           share: { type: 'boolean', description: 'Set true to publish the page WITH a password link in one step — the response then also carries { shareUrl, password }, which you send together. Use it whenever the people who asked are in a chat channel and have no Zibby account. Omit it (the default) for anything internal: the page is then readable only by logged-in members of this project, and no password exists.' },
         },
         required: ['title'],
@@ -1122,6 +1196,7 @@ records this automatically; you don't store it yourself.)`,
           kind: { type: 'string', description: 'Optional updated kind label.' },
           favicon: { type: 'string', description: 'Optional updated emoji favicon.' },
           summary: { type: 'string', description: 'Optional updated one-line index summary.' },
+          description: { type: 'string', description: 'Optional updated Markdown note shown under the artifact on its detail page. You may pass this ALONE to add or rewrite the explanation without touching the artifact itself — the content keeps its current version.' },
         },
         required: ['id'],
       },
