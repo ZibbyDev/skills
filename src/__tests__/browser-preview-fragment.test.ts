@@ -51,6 +51,32 @@ describe('browser skill preview prompt fragment', () => {
     expect(f).toContain('You MUST make actual browser tool calls');
   });
 
+  /**
+   * THE HANDSHAKE URL IS NOT AN APP ROUTE. Measured on run 1c154329
+   * (2026-08-20): after the handshake the browser sits on
+   * `/preview/<id>/<port>/`, a path the app's client-side router does not have,
+   * so Vikunja rendered its own "Not found" on a dev server that was working.
+   * The agent then tried the prefixed `/preview/<id>/<port>/labels`, got the
+   * same 404 ("The router isn't recognizing /labels from the direct URL"), and
+   * only got in by clicking a sidebar link — ~2.5 minutes, twice in one run.
+   * The proxy ALREADY routes an unprefixed path by handshake cookie, path
+   * unchanged (preview-server.js ROOT_COOKIE, pinned by its own test); nothing
+   * told the agent that. This asserts the recipe now does.
+   */
+  test('the recipe says the handshake URL is a DOOR, not a route — and gives the way in', () => {
+    process.env.PREVIEW_BASE_URL = 'http://control-plane:3002/preview/exec-1';
+    process.env.PREVIEW_TOKEN = 'pv1.exec-1.999.aabb';
+    const f = fragment();
+    // it names the symptom the agent will actually SEE...
+    expect(f).toMatch(/router/i);
+    expect(f).toMatch(/Not found|404/);
+    // ...the ORIGIN-ROOT escape, derived from the injected env, never hardcoded
+    expect(f).toContain('${PREVIEW_BASE_URL%/preview/*}');
+    expect(f).toMatch(/path UNCHANGED/i);
+    // ...and it explicitly refuses the wrong repair (the prefixed route)
+    expect(f).toMatch(/Do NOT reach for the prefixed/i);
+  });
+
   test('the token VALUE never leaks into the prompt (security invariant #4)', () => {
     process.env.PREVIEW_BASE_URL = 'http://control-plane:3002/preview/exec-1';
     process.env.PREVIEW_TOKEN = 'pv1.exec-1.999.deadbeefsecret';
