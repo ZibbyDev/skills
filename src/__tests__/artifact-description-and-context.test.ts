@@ -72,13 +72,17 @@ describe('1. provenance comes from the RUN, never from the model', () => {
     global.fetch = mockFetch({ context: { runId: 'exec-7f3a19c2' } }) as any;
 
     await artifactSkill.handleToolCall('artifact_publish', { title: 'T', html: '<p>x</p>' });
-    expect(writeBody().context).toEqual({ runId: 'exec-7f3a19c2' });
+    // The block now carries every provenance field the run's env supplies (this
+    // file sets WORKFLOW_TYPE at module load); `runId` is the one under test.
+    expect(writeBody().context).toMatchObject({ runId: 'exec-7f3a19c2' });
   });
 
-  it('sends NO context outside a run — the field is simply absent', async () => {
+  it('sends NO runId outside a run — the field is simply absent', async () => {
     global.fetch = mockFetch() as any; // EXECUTION_ID deleted in beforeEach
     await artifactSkill.handleToolCall('artifact_publish', { title: 'T', html: '<p>x</p>' });
-    expect(writeBody().context).toBeUndefined();
+    // Each provenance field is independently optional: no EXECUTION_ID ⇒ no
+    // runId, even though this file's WORKFLOW_TYPE still names the agent.
+    expect(writeBody().context?.runId).toBeUndefined();
     expect(indexRecord().context).toBeUndefined();
   });
 
@@ -92,7 +96,7 @@ describe('1. provenance comes from the RUN, never from the model', () => {
     await artifactSkill.handleToolCall('artifact_publish', {
       title: 'T', html: '<p>x</p>', context: { runId: 'exec-FORGED' },
     } as any);
-    expect(writeBody().context).toEqual({ runId: 'exec-real' });
+    expect(writeBody().context).toMatchObject({ runId: 'exec-real' });
   });
 
   it('neither tool advertises `context` as an input the model may set', () => {
@@ -115,7 +119,9 @@ describe('2. the index row is DERIVED from the server echo, not duplicated', () 
     global.fetch = mockFetch({ context: { runId: 'exec-normalised-by-server' } }) as any;
 
     await artifactSkill.handleToolCall('artifact_publish', { title: 'T', html: '<p>x</p>' });
-    expect(writeBody().context).toEqual({ runId: 'exec-raw' });
+    expect(writeBody().context).toMatchObject({ runId: 'exec-raw' });
+    // EXACT, not a subset: the row is the server's block verbatim, so a skill
+    // that merged its own fields into the echo fails here.
     expect(indexRecord().context).toEqual({ runId: 'exec-normalised-by-server' });
   });
 

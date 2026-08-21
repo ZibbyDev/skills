@@ -156,27 +156,83 @@ function indexScope(id) {
 }
 
 /**
- * THE PLATFORM HALF OF AN ARTIFACT'S NAME — read from the run's ENV, never from
- * a tool argument.
+ * PROVENANCE — every field read from the run's ENV, never from a tool argument.
  *
- * The Artifacts tab listed three rows all called "Vikunja Frontend Exploration
- * Report". That is not a prompting failure to be scolded away: a model asked to
- * pick a distinctive title has no way to know what it called the last one, so
- * uniqueness that depends on the agent remembering to be unique is not a
- * property, it is a hope. `EXECUTION_ID` is minted by the executor and injected
- * into every run container (cloud ECS and the self-host docker dispatcher use
- * the same env array), so it is unique by construction and the model cannot
- * author it — the same standing this skill's `WORKFLOW_TYPE` namespace already
- * has, and the same "IDENTITY, NEVER AUTHORITY" terms: it picks what a reader is
+ * THE ONE DECLARATION. This map is the single producer for BOTH halves of a pair
+ * that would otherwise have to be remembered: what `runContext()` READS, and
+ * what `resolve()` COPIES INTO THE MCP CHILD. There is no second list to keep in
+ * sync, because a skill's resolve() env IS its child's ENTIRE environment — not
+ * an addition to it (three separate incidents in this codebase: github, gitlab,
+ * and lark twice). An env var this skill reads but does not copy is simply
+ * absent in the process that reads it, and the symptom is a field that is
+ * quietly always missing — never an error.
+ *
+ *   runId        ← EXECUTION_ID        WHICH RUN produced this
+ *   workflowType ← WORKFLOW_TYPE       WHICH AGENT (also the index namespace)
+ *   workflowUuid ← WORKFLOW_UUID       which DEPLOYED agent — the type is a slug
+ *                                      shared by every deployment of it
+ *   nodeName     ← WORKFLOW_NODE_NAME  WHICH STEP. NOT injected by the executor:
+ *                                      the engine hands the graph node KEY to
+ *                                      resolve() per node, and resolve() puts it
+ *                                      on the child (see resolve, and browser.ts
+ *                                      which does the same with a session path).
+ *                                      The key IS the readable name — `develop`,
+ *                                      `qa_verify` — so there is no id to
+ *                                      translate. Brand-neutral by rule, and it
+ *                                      sits with the WORKFLOW_* the run already
+ *                                      carries.
+ *
+ * WHY ENV AND NOT A TOOL ARGUMENT. A model asked to pick a distinctive title
+ * produced three identical ones in a single day: uniqueness that depends on the
+ * agent remembering to be unique is not a property, it is a hope. These values
+ * are minted by the executor and the engine, so the model cannot author them —
+ * which is the entire reason a reader can trust them. Same "IDENTITY, NEVER
+ * AUTHORITY" terms as the `WORKFLOW_TYPE` namespace: they pick what a reader is
  * SHOWN, never what a caller may reach.
  *
- * Returns null outside a run (the local CLI, the Copilot's Lambda) — the field
- * is then simply absent and every surface renders exactly as it does today.
+ * Returns null outside a run (the local CLI, the Copilot's Lambda) — the block
+ * is then absent and every surface renders exactly as it does today.
  */
+const RUN_PROVENANCE_ENV = Object.freeze({
+  runId: 'EXECUTION_ID',
+  workflowType: 'WORKFLOW_TYPE',
+  workflowUuid: 'WORKFLOW_UUID',
+  nodeName: 'WORKFLOW_NODE_NAME',
+});
+
 function runContext() {
-  const id = typeof process.env.EXECUTION_ID === 'string' ? process.env.EXECUTION_ID.trim() : '';
-  return id ? { runId: id } : null;
+  const out: any = {};
+  for (const [field, envVar] of Object.entries(RUN_PROVENANCE_ENV)) {
+    const v = typeof process.env[envVar] === 'string' ? String(process.env[envVar]).trim() : '';
+    if (v) out[field] = v;
+  }
+  return Object.keys(out).length ? out : null;
 }
+
+/**
+ * THE VERDICT VOCABULARY, as the MODEL is shown it. One declaration for both
+ * tool schemas — publish and update cannot offer different words.
+ *
+ * ⚠️ THIS IS A HINT, NOT THE AUTHORITY. The backend owns the enum and rejects
+ * anything outside it; this skill sends the string through unvalidated. That is
+ * deliberate: a validator here would be a SECOND decider able to disagree with
+ * the first, and the index row is written from the server's ECHO, so a word the
+ * server refused produces no chip rather than a wrong one.
+ *
+ * The spellings are the vocabulary already shipping in the frontend-specialist
+ * PR check bullets, whose evidence-page legend reads "✅ passed, ❌ failed,
+ * ❔ never answered". They are APPEND-ONLY — written into records that outlive
+ * any deploy.
+ */
+const VERDICT_VALUES = Object.freeze(['passed', 'failed', 'unanswered']);
+const VERDICT_HINT = 'OPTIONAL outcome, shown as a chip beside this artifact in list views: '
+  + '"passed" (✅ what this checked came out right), "failed" (❌ it came out wrong), '
+  + '"unanswered" (❔ nobody could tell — the check did not run, the page did not load, the data was missing). '
+  + '"unanswered" is NOT "failed": "nobody looked" is not "it is broken", and reporting one as the other is the '
+  + 'single worst thing you can do with this field. '
+  + 'OMIT IT ENTIRELY when this artifact has no outcome to report — a reference page, a design write-up, an '
+  + 'exploration. Most artifacts are that, and no chip is shown for them, which is correct. A verdict invented so '
+  + 'the row looks finished makes every other verdict worthless.';
 
 /**
  * What the model is told the markdown path CAN and CANNOT express. Kept as data
@@ -800,6 +856,14 @@ checked, what the reader should conclude, and anything surprising. Headings,
 bullets and tables are all fine. It never appears in list views, so a real
 description costs nothing. Write one for every artifact a human will open.
 
+If — and ONLY if — this artifact reports an OUTCOME, pass \`verdict\`:
+\`passed\` (✅), \`failed\` (❌), or \`unanswered\` (❔ nobody could tell — the check
+never ran, the page never loaded). It shows as a chip in the list, so a reader
+scanning fifty rows sees which ones went wrong without opening any of them.
+\`unanswered\` is NOT \`failed\`. And most artifacts have no verdict at all — a
+reference page, a design, an exploration — so LEAVE IT OFF for those. A verdict
+invented to make a row look finished devalues every real one.
+
 ### Every number on the page must come from a tool result or this transcript.
 Do not do arithmetic in prose and then print the answer — that is how a page ends
 up saying 42 in one place and 45 in another. If you need a total, compute it with
@@ -881,10 +945,20 @@ sharing it silently.
 
 To recall WHAT YOU HAVE ALREADY PUBLISHED, use your kv-memory tool
 kv_recall_prefix with keyPrefix "artifact:" — each entry is the index record
-{ id, title, url, kind, createdAt, summary } for a page you made. (Publishing
-records this automatically; you don't store it yourself.)`,
+{ id, title, url, kind, createdAt, summary } for a page you made — plus
+\`verdict\` where one was given, and a \`context\` block naming the run, agent and
+node that produced it. (Publishing records all of this automatically; you don't
+store it yourself, and the context is the platform's — you cannot set it.)`,
 
-  resolve() {
+  /**
+   * @param {{ nodeName?: string }} opts — the engine passes the CURRENT GRAPH
+   *   NODE KEY here, per node, on every strategy that spawns MCP children
+   *   (node.ts builds `agentOptions.nodeName = this.name`; claude/codex/gemini/
+   *   cursor destructure it and re-resolve skills for each node). `browser.ts`
+   *   already consumes it the same way. It is the ONLY channel into the child:
+   *   an AsyncLocalStorage in the engine cannot cross a process boundary.
+   */
+  resolve({ nodeName }: any = {}) {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
     // module's artifactSkill export — same FIXED pattern as kvMemory/datasetStore
     // (NEVER return { command: null }). The module arg resolves relative to bin/
@@ -894,11 +968,27 @@ records this automatically; you don't store it yourself.)`,
     const env: any = {};
     for (const key of [
       'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'ZIBBY_USER_TOKEN',
-      // The namespace source (matches kv-memory) so the index scope lines up.
-      'WORKFLOW_TYPE',
+      // ⚠️ THIS LIST IS THE CHILD'S ENTIRE ENVIRONMENT, not an addition to it —
+      // for claude/gemini/cursor `mcp-server-config.js` sets `cfg.env =
+      // resolved.env` outright. So the provenance vars are DERIVED from
+      // RUN_PROVENANCE_ENV rather than retyped: a var `runContext()` reads but
+      // this list omits is silently absent in the child that reads it, which
+      // reads as "the platform never stamped it" and is invisible in testing
+      // (the in-process path — a code node importing this skill directly — has
+      // the full run env and works fine, so the bug hides).
+      // `WORKFLOW_TYPE` is in here twice over: it is also the index namespace.
+      ...Object.values(RUN_PROVENANCE_ENV),
     ]) {
       if (process.env[key]) env[key] = process.env[key];
     }
+    // WORKFLOW_NODE_NAME is the one provenance value that is NOT in the run
+    // container's env — the executor injects no node identifier (nothing at run
+    // launch knows which node will publish). The engine knows it per node and
+    // hands it here, so this is where it is stamped. Absent ⇒ absent: an engine
+    // old enough not to pass `nodeName`, or a code node that never goes through
+    // resolve(), leaves the field off entirely rather than guessing.
+    const node = typeof nodeName === 'string' ? nodeName.trim() : '';
+    if (node) env[RUN_PROVENANCE_ENV.nodeName] = node;
     return {
       type: 'stdio',
       command: 'node',
@@ -941,6 +1031,11 @@ records this automatically; you don't store it yourself.)`,
           // only when non-empty, so a caller that omits it leaves the stored
           // record byte-identical to one published before the field existed.
           if (typeof args?.description === 'string' && args.description.trim()) payload.description = args.description;
+          // THE VERDICT. Passed through UNVALIDATED and UNNORMALISED: the
+          // backend owns the enum, and a second validator here would be a second
+          // decider that can disagree with the first. Sent only when non-empty,
+          // so an artifact with no outcome stores no verdict.
+          if (typeof args?.verdict === 'string' && args.verdict.trim()) payload.verdict = args.verdict.trim();
           // Provenance from the RUN, not from the model (see runContext).
           const ctx = runContext();
           if (ctx) payload.context = ctx;
@@ -1003,6 +1098,13 @@ records this automatically; you don't store it yourself.)`,
           // NOT the description: every listing ships each index row's whole
           // JSON to the browser, and no list surface renders a description.
           if (written.context && typeof written.context === 'object') record.context = written.context;
+          // THE VERDICT, on the same terms and for the same reason: the LIST is
+          // where an outcome is scanned, and one word is what it costs. Also
+          // taken from the ECHO — the server owns the enum, so a value it
+          // refused never reaches the row and the chip is simply absent. That is
+          // the safe direction for a cross-repo pair to fail in: "nobody judged
+          // this", never a green tick nobody earned.
+          if (typeof written.verdict === 'string' && written.verdict) record.verdict = written.verdict;
           // Type facts for the list surfaces: a text record carries the
           // NORMALIZED contentType + measured bytes (the server echoes both on
           // the write), a document record carries its format — and BOTH carry
@@ -1036,8 +1138,12 @@ records this automatically; you don't store it yourself.)`,
           // attach one — which is both wasteful and a fresh chance to break a
           // page that was already good.
           const hasDescription = typeof args?.description === 'string' && args.description.trim();
-          if (!picked && !title && !hasDescription) {
-            return JSON.stringify({ error: 'nothing to update — pass a new title, description, and/or markdown|html' });
+          // A verdict-only revision is legitimate too, and it is the one this
+          // field exists for: the outcome became known AFTER the page was
+          // published (the re-run passed, the check that could not run ran).
+          const hasVerdict = typeof args?.verdict === 'string' && args.verdict.trim();
+          if (!picked && !title && !hasDescription && !hasVerdict) {
+            return JSON.stringify({ error: 'nothing to update — pass a new title, description, verdict, and/or markdown|html' });
           }
           // Same rule as publish, and it also covers a title-only update: there is
           // no html in this call, so there is nothing for `data` to be checked against.
@@ -1049,6 +1155,7 @@ records this automatically; you don't store it yourself.)`,
           if (typeof args?.kind === 'string' && args.kind.trim()) payload.kind = args.kind.trim();
           if (typeof args?.favicon === 'string' && args.favicon.trim()) payload.favicon = args.favicon.trim();
           if (hasDescription) payload.description = args.description;
+          if (hasVerdict) payload.verdict = args.verdict.trim();
           // NO `context` on update. Provenance answers "which run PRODUCED
           // this", and a later revision did not produce it — re-stamping the
           // block with the current run would quietly rewrite history and break
@@ -1086,6 +1193,13 @@ records this automatically; you don't store it yourself.)`,
             createdAt: prior.createdAt || written.createdAt || new Date().toISOString(),
             updatedAt: written.updatedAt || new Date().toISOString(),
           };
+          // THE VERDICT, refreshed from the ECHO on every update — not just when
+          // this call sent one. The server echoes what it has STORED (the field
+          // is sticky), so this keeps the row agreeing with the artifact even
+          // when a different caller set it, and it is the same one-authority
+          // derivation publish uses. `prior` is spread above, so an update that
+          // changes nothing here leaves the row's verdict exactly as it was.
+          if (typeof written.verdict === 'string' && written.verdict) record.verdict = written.verdict;
           // Same type facts as publish, refreshed only when content was sent —
           // a title-only update changes neither the type nor the size.
           if (picked) {
@@ -1173,6 +1287,7 @@ records this automatically; you don't store it yourself.)`,
           favicon: { type: 'string', description: 'Optional emoji used as the browser-tab icon, e.g. "📊".' },
           summary: { type: 'string', description: 'Optional one-line summary for your own index (defaults to the title). Helps you recall later what this page was.' },
           description: { type: 'string', description: 'Optional Markdown note ABOUT this artifact, shown UNDERNEATH it on its detail page — what it shows, what was checked, what the reader should conclude, anything surprising. This is the artifact\'s caption, NOT its content: the page/file itself is the content, and a reader who opens it should be able to understand what they are looking at without asking you. Write it as a short report with headings, bullets and tables (same Markdown subset as the `markdown` field, 16 KB max). It is NOT shown in list views, so it costs nothing to write a real one.' },
+          verdict: { type: 'string', enum: [...VERDICT_VALUES], description: VERDICT_HINT },
           share: { type: 'boolean', description: 'Set true to publish the page WITH a password link in one step — the response then also carries { shareUrl, password }, which you send together. Use it whenever the people who asked are in a chat channel and have no Zibby account. Omit it (the default) for anything internal: the page is then readable only by logged-in members of this project, and no password exists.' },
         },
         required: ['title'],
@@ -1197,6 +1312,7 @@ records this automatically; you don't store it yourself.)`,
           favicon: { type: 'string', description: 'Optional updated emoji favicon.' },
           summary: { type: 'string', description: 'Optional updated one-line index summary.' },
           description: { type: 'string', description: 'Optional updated Markdown note shown under the artifact on its detail page. You may pass this ALONE to add or rewrite the explanation without touching the artifact itself — the content keeps its current version.' },
+          verdict: { type: 'string', enum: [...VERDICT_VALUES], description: `Optional updated ${VERDICT_HINT} You may pass this ALONE when the outcome became known after publishing — the re-run passed, or the check that could not run finally ran.` },
         },
         required: ['id'],
       },
