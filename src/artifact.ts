@@ -256,6 +256,36 @@ const MARKDOWN_LACKS =
   'footnotes and strikethrough';
 
 /**
+ * HOW TO NAME AND CAPTION AN ARTIFACT — the platform's ONE statement of it.
+ *
+ * Same reason as the pair above: the prompt fragment and the tool schemas must
+ * quote the SAME words, or the model reads two different rules depending on
+ * which surface it happened to look at.
+ *
+ * ⚠️ THESE TWO ARE ALSO QUOTED OUTSIDE THIS REPO. The browser sidecar creates
+ * artifacts on an agent's behalf (a screenshot, a recording) and declares
+ * `artifactTitle` / `artifactDescription` on the tools that make them — before
+ * that, it invented the captions itself and produced eight rows in one run
+ * reading `Browser screenshot — page-<timestamp>.png`, each page saying
+ * `Screenshot of viewport`. It is a separate container in a separate repo and
+ * cannot import this module, so `sidecars/browser/src/artifact-caption.js`
+ * holds a copy and `sidecars/browser/src/__tests__/caption-guidance-parity.test.js`
+ * READS THIS FILE and fails when the two stop matching. Reword here, run that
+ * test, carry the new words across in the same change.
+ */
+export const ARTIFACT_TITLE_RULE =
+  'It is read in a list next to everything else you and your teammates have ever published, so it must '
+  + 'say WHAT THIS ONE IS — the subject, not the genre. "Vikunja label sort toggle — 3 of 5 checks failed" '
+  + 'survives that list; "Exploration Report" does not, and three of those in a row are indistinguishable. '
+  + 'Name the specific thing: the ticket, the feature, the file, the finding.';
+
+export const ARTIFACT_DESCRIPTION_RULE =
+  'A short Markdown note ABOUT this artifact, shown UNDER the artifact on its page — what it shows, '
+  + 'what was checked, what the reader should conclude, and anything surprising. A recording or a '
+  + 'screenshot cannot explain itself: without this the whole page says `video/webm · 3.8 MB · Download`. '
+  + 'It never appears in list views, so a real one costs nothing.';
+
+/**
  * How many REJECTED publishes the model may make before the tool stops it.
  *
  * Two, deliberately. The empirical finding on LLM HTML repair is that the first
@@ -840,21 +870,18 @@ credentials), so on the html path keep ALL CSS/JS/images INLINE (inline
 load. NEVER escape the document: send real tags, not \`&lt;div&gt;\`.
 
 ### NAME IT FOR SOMEONE SCROLLING A LIST OF FIFTY, and CAPTION IT.
-The \`title\` is read in a list next to everything else you and your teammates
-have ever published, so it must say WHAT THIS ONE IS — the subject, not the
-genre. "Vikunja label sort toggle — 3 of 5 checks failed" survives that list;
-"Exploration Report" does not, and three of those in a row are indistinguishable.
-Name the specific thing: the ticket, the feature, the file, the finding.
+The \`title\`: ${ARTIFACT_TITLE_RULE}
 (You do not have to make it unique — Zibby stamps the run that produced each
 artifact and shows it beside the title, so two honest titles that happen to
 match are still told apart. Your job is to be SPECIFIC, not to be unique.)
 
-Then pass \`description\`: a short Markdown write-up shown UNDER the artifact on
-its page. A recording or a screenshot cannot explain itself — without this, the
-whole page says \`video/webm · 3.8 MB · Download\`. Say what it shows, what was
-checked, what the reader should conclude, and anything surprising. Headings,
-bullets and tables are all fine. It never appears in list views, so a real
-description costs nothing. Write one for every artifact a human will open.
+Then pass \`description\`: ${ARTIFACT_DESCRIPTION_RULE} Headings, bullets and
+tables are all fine. Write one for every artifact a human will open.
+
+The SAME two rules govern an artifact a TOOL creates for you — a browser
+screenshot or recording carries \`artifactTitle\` / \`artifactDescription\` for
+exactly this reason. A tool cannot know what the capture was for; you do. Left
+blank, the row is named after a file and the page explains nothing.
 
 If — and ONLY if — this artifact reports an OUTCOME, pass \`verdict\`:
 \`passed\` (✅), \`failed\` (❌), or \`unanswered\` (❔ nobody could tell — the check
@@ -1277,7 +1304,7 @@ store it yourself, and the context is the platform's — you cannot set it.)`,
       input_schema: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: 'The page title (also the browser tab title).' },
+          title: { type: 'string', description: `The page title (also the browser tab title). ${ARTIFACT_TITLE_RULE}` },
           markdown: { type: 'string', description: `PREFERRED. The page content as Markdown — Zibby renders it into a styled, self-contained document, so you never author a skeleton. Supports ${MARKDOWN_SUPPORTS}. Does NOT support ${MARKDOWN_LACKS}. Provide this OR html, never both.` },
           html: { type: 'string', description: 'The EXCEPTION path — only for a layout Markdown cannot express (bar chart, gauge, custom grid, SVG diagram). A self-contained HTML document or fragment, served VERBATIM: you own the doctype, head, CSS and every tag. All assets must be inline (<style>/<script>, data: URIs). Provide this OR markdown, never both.' },
           text: { type: 'string', description: 'RAW SOURCE published as-is — code, a script, logs, JSON data, CSV. Stored verbatim (never rendered as an HTML page) and shown in a read-only code viewer with a download link. Requires `contentType`. For code, make `title` the filename (e.g. "deploy.sh" — the viewer derives the language from the extension) and set kind: "code". Provide this OR markdown OR html.' },
@@ -1286,7 +1313,7 @@ store it yourself, and the context is the platform's — you cannot set it.)`,
           kind: { type: 'string', description: 'Optional label for what this is, e.g. "report", "plan", "dashboard", "diagram". Stored in your index.' },
           favicon: { type: 'string', description: 'Optional emoji used as the browser-tab icon, e.g. "📊".' },
           summary: { type: 'string', description: 'Optional one-line summary for your own index (defaults to the title). Helps you recall later what this page was.' },
-          description: { type: 'string', description: 'Optional Markdown note ABOUT this artifact, shown UNDERNEATH it on its detail page — what it shows, what was checked, what the reader should conclude, anything surprising. This is the artifact\'s caption, NOT its content: the page/file itself is the content, and a reader who opens it should be able to understand what they are looking at without asking you. Write it as a short report with headings, bullets and tables (same Markdown subset as the `markdown` field, 16 KB max). It is NOT shown in list views, so it costs nothing to write a real one.' },
+          description: { type: 'string', description: `Optional. ${ARTIFACT_DESCRIPTION_RULE} This is the artifact's caption, NOT its content: the page/file itself is the content, and a reader who opens it should be able to understand what they are looking at without asking you. Write it as a short report with headings, bullets and tables (same Markdown subset as the \`markdown\` field, 16 KB max).` },
           verdict: { type: 'string', enum: [...VERDICT_VALUES], description: VERDICT_HINT },
           share: { type: 'boolean', description: 'Set true to publish the page WITH a password link in one step — the response then also carries { shareUrl, password }, which you send together. Use it whenever the people who asked are in a chat channel and have no Zibby account. Omit it (the default) for anything internal: the page is then readable only by logged-in members of this project, and no password exists.' },
         },

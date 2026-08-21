@@ -13,7 +13,10 @@ process.env.PROJECT_API_TOKEN = 'zby_pat_test';
 process.env.ZIBBY_ACCOUNT_API_URL = 'http://cp.local';
 process.env.WORKFLOW_TYPE = 'zibby-copilot';
 
-const { artifactSkill, __resetPublishBudget, __compareStoredSource } = await import('../artifact.js');
+const {
+  artifactSkill, __resetPublishBudget, __compareStoredSource,
+  ARTIFACT_TITLE_RULE, ARTIFACT_DESCRIPTION_RULE,
+} = await import('../artifact.js');
 
 // Route the mocked fetch by URL + parse the JSON body for assertions.
 function mockFetch(routes) {
@@ -418,6 +421,23 @@ describe('the tool contract makes markdown the default', () => {
     expect(artifactSkill.promptFragment).toMatch(/WRITE IT AS MARKDOWN/);
     expect(artifactSkill.promptFragment).toMatch(/pipe tables/);
     expect(artifactSkill.promptFragment).toMatch(/must come from a tool result/);
+  });
+
+  // ONE statement of how to name/caption an artifact, quoted by every surface
+  // that asks for one — the prompt AND both schema properties. A rule that
+  // lives in the prompt only is a rule the tool-schema reader never sees, and
+  // the browser sidecar quotes these same two constants for the artifacts it
+  // creates on the agent's behalf (its caption-guidance-parity test reads this
+  // file). Substring equality, so a reword cannot leave one surface behind.
+  it('the title + description RULES are one source, quoted by the prompt and by both schemas', () => {
+    for (const [rule, prop] of [
+      [ARTIFACT_TITLE_RULE, 'title'],
+      [ARTIFACT_DESCRIPTION_RULE, 'description'],
+    ] as const) {
+      expect(rule.length).toBeGreaterThan(80);
+      expect(artifactSkill.promptFragment).toContain(rule);
+      expect(publish().input_schema.properties[prop].description).toContain(rule);
+    }
   });
 });
 
