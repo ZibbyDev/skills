@@ -311,15 +311,120 @@ async function moveIssueToSprint({ issueKey, projectKey, sprintId, sprintName, t
 }
 
 /**
- * Low-level Jira REST helper. Resolves the OAuth bearer + cloudId via
- * resolveIntegrationToken('jira'), retries once on transient auth errors,
- * and returns parsed JSON (or `{ raw }` for non-JSON bodies).
+ * Resolve the Jira credential this process should use, normalized to ONE shape
+ * the request layer can switch on. A Jira connection is either:
  *
- * Exported so other templates (e.g. tracker-writeback) can issue Jira
- * REST calls the JIRA skill's MCP tools don't cover — currently the only
- * gap is attaching a PR remote-link; everything else (transition, comment)
- * has a first-class tool. Keep this the single auth/cloudId chokepoint;
- * don't re-implement token resolution at call sites.
+ *   • `{ authType: 'oauth', accessToken, cloudId }` — the 3LO connection. The
+ *     caller addresses `api.atlassian.com/ex/jira/<cloudId>` with a Bearer.
+ *   • `{ authType: 'token', apiToken, email, baseUrl }` — a paste-token /
+ *     self-host connection (backend `handlers/jira.js connectJiraToken`), or an
+ *     operator's `.env`. The caller addresses the instance DIRECTLY and
+ *     authenticates as HTTP Basic `email:apiToken`.
+ *
+ * TWO SOURCES, in this order:
+ *
+ *  1. The Basic-auth TRIO in the run env — `JIRA_API_TOKEN` + `JIRA_EMAIL` +
+ *     `JIRA_BASE_URL`, which `workflow-executor` injects for an
+ *     `authType:'token'` row (and the self-host docker dispatcher fills from the
+ *     operator `.env` when the table set none). All THREE are required, so a
+ *     half-set env can never shadow a working OAuth credential. This is the
+ *     `SELF_HOST_ENV` bargain the github/gitlab skills already make: complete on
+ *     its own, so no round-trip and the token never leaves the box.
+ *  2. `resolveIntegrationToken('jira')` → the backend's `/jira/token`. It
+ *     answers `{token, cloudId}` for OAuth and `{token, instanceUrl}` for a
+ *     token row (VERIFIED on the founder's box, 2026-08-22). It carries no
+ *     email, so the token branch reads that from the env alongside.
+ *
+ * The shape is chosen by WHAT THE CREDENTIAL CARRIES — never by an environment
+ * check. On cloud, an OAuth row injects no `JIRA_*` trio and answers with a
+ * `cloudId`, so the oauth branch is taken and the request is byte-identical to
+ * what this file built before.
+ */
+export async function resolveJiraCredential() {
+  const envToken = process.env.JIRA_API_TOKEN;
+  const envEmail = process.env.JIRA_EMAIL;
+  const envBase = process.env.JIRA_BASE_URL;
+  if (envToken && envEmail && envBase) {
+    return { authType: 'token', apiToken: envToken, email: envEmail, baseUrl: envBase };
+  }
+
+  const data: any = await resolveIntegrationToken('jira');
+  if (data?.cloudId) {
+    return { authType: 'oauth', accessToken: data.token, cloudId: data.cloudId };
+  }
+  // No cloudId ⇒ an API-token connection. `/jira/token` gives us the token and
+  // the instance; the email is the one field it does not carry.
+  return {
+    authType: 'token',
+    apiToken: data?.token,
+    email: envEmail || data?.email || '',
+    baseUrl: envBase || data?.instanceUrl || data?.baseUrl || process.env.ATLASSIAN_INSTANCE_URL || '',
+  };
+}
+
+/**
+ * A Jira REST request — `{ url, headers }` — as a PURE FUNCTION of the resolved
+ * credential. The run-time twin of the backend's `handlers/jira.js jiraApiCall`,
+ * deliberately the same shape so the two halves of one connection cannot drift.
+ *
+ * MEASURED against the founder's real instance (backend side, 2026-08-22):
+ *   • `api.atlassian.com/ex/jira/undefined/rest/api/3/project` + Bearer → 404
+ *   • `https://<instance>/rest/api/3/project` + Basic b64(email:apiToken) → 200
+ *   • `https://<instance>/rest/api/3/project` + Bearer → 403
+ * The third line is why the header is chosen by SHAPE and not shared: an
+ * Atlassian API token is a Basic-auth PASSWORD, never a bearer. One header
+ * cannot serve both.
+ *
+ * Both branches fail LOUD on a credential that cannot address an instance,
+ * rather than composing `.../undefined/...` and letting Atlassian word the
+ * error.
+ */
+export function jiraApiCall(cred: any, path: string, opts: any = {}) {
+  const c = cred || {};
+  const extra = {
+    Accept: 'application/json',
+    ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+    ...opts.headers,
+  };
+  if (c.authType === 'token') {
+    const base = String(c.baseUrl || c.instanceUrl || '').trim().replace(/\/+$/, '');
+    const token = c.apiToken || c.accessToken || '';
+    if (!base) throw new Error('Jira token connection has no base URL — reconnect Jira with its instance URL, or set JIRA_BASE_URL.');
+    if (!c.email) throw new Error('Jira token connection has no account email — reconnect Jira with the account email, or set JIRA_EMAIL.');
+    if (!token) throw new Error('Jira token connection has no API token — reconnect Jira, or set JIRA_API_TOKEN.');
+    return {
+      url: `${base}${path}`,
+      headers: {
+        Authorization: 'Basic ' + Buffer.from(`${c.email}:${token}`).toString('base64'),
+        ...extra,
+      },
+    };
+  }
+  if (typeof c.accessToken !== 'string' || !c.accessToken) {
+    throw new Error(`Invalid jira token type: ${typeof c.accessToken}`);
+  }
+  if (!c.cloudId) {
+    throw new Error('Invalid jira cloudId: missing');
+  }
+  return {
+    url: `https://api.atlassian.com/ex/jira/${c.cloudId}${path}`,
+    headers: {
+      Authorization: `Bearer ${c.accessToken}`,
+      ...extra,
+    },
+  };
+}
+
+/**
+ * Low-level Jira REST helper. Resolves the credential via
+ * `resolveJiraCredential()`, builds the request with `jiraApiCall()` (which
+ * knows the two connection shapes), retries once on transient auth errors, and
+ * returns parsed JSON (or `{ raw }` for non-JSON bodies).
+ *
+ * Exported so other templates (e.g. tracker-writeback, bug-autofix,
+ * board-runner) can issue Jira REST calls the JIRA skill's MCP tools don't
+ * cover. Keep this the single auth chokepoint; don't re-implement credential
+ * resolution at call sites.
  *
  * @param {string} path  Jira REST path, e.g. `/rest/api/3/issue/PROJ-1`
  * @param {{ method?: string, body?: any, headers?: object }} [opts]
@@ -327,22 +432,11 @@ async function moveIssueToSprint({ issueKey, projectKey, sprintId, sprintName, t
  */
 export async function jiraFetch(path, opts: any = {}) {
   const makeRequest = async () => {
-    const { token, cloudId } = await resolveIntegrationToken('jira');
-    if (typeof token !== 'string' || !token) {
-      throw new Error(`Invalid jira token type: ${typeof token}`);
-    }
-    if (!cloudId) {
-      throw new Error('Invalid jira cloudId: missing');
-    }
-    const url = `https://api.atlassian.com/ex/jira/${cloudId}${path}`;
+    const cred = await resolveJiraCredential();
+    const { url, headers } = jiraApiCall(cred, path, opts);
     const res = await fetch(url, {
       method: opts.method || 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json',
-        ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
-        ...opts.headers,
-      },
+      headers,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     if (!res.ok) {
