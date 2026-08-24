@@ -10,12 +10,12 @@
  *                 → { ok, upserted, deleted, chunks }
  *   POST /query   { kbId, query, topK }  → { ok, results:[{ sourceId, chunk, score }] }
  *   POST /delete  { kbId, sourceIds:[...] } → { ok, deleted }
- *   POST /stat    { kbId } → { ok, exists, sizeBytes, docs }
+ *   POST /stat    { kbId } → { ok, exists, sizeBytes, docs, lock }
  *   POST /drop    { kbId, confirm:true } → { ok, dropped }
  *   POST /compact { kbId, olderThanHours?, vacuum?:'light'|'none', halfvec? }
  *                 → { ok, purgedCount, vacuumMode, vacuumed, beforeBytes,
  *                     afterBytes, reclaimedBytes, halfvec }
- *   GET  /health  → { ok }
+ *   GET  /health  → { ok, stuckBrains }
  *
  * THREE operations remove data, and they differ by WHAT SURVIVES — that is the
  * whole vocabulary, and it is why none of them is called "purge" (the word means
@@ -35,7 +35,8 @@
 
 import http from 'node:http';
 import {
-  ingest, query, del, drop, stat, compact, health, withEmbedding, VACUUM_MODE_NAMES,
+  ingest, query, del, drop, stat, compact, health, withEmbedding, lockReport,
+  VACUUM_MODE_NAMES,
 } from './brain.js';
 
 // Per-agent embedding overrides carried on the request (set by the control-plane
@@ -210,6 +211,12 @@ async function handleDelete(body) {
  * STAT — how big this brain is and how many live documents it holds. Read-only
  * and side-effect free: an absent brain answers exists:false rather than being
  * created, so a size probe from a console page can never mint a brain.
+ *
+ * ALSO carries `lock` — whether this brain's single-writer lock is held, by
+ * which op, for how long, and how many callers are queued behind it. This is
+ * the ONE route that does not take the lock, which used to mean it was the one
+ * route that stayed cheerful while every other op on the brain was wedged. It
+ * now reports that instead of hiding it. See brain.js `stat`.
  */
 async function handleStat(body) {
   const kbId = typeof body?.kbId === 'string' ? body.kbId.trim() : '';
@@ -291,7 +298,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && (url === '/health' || url === '/')) {
       try {
         await health();
-        return sendJson(res, 200, { ok: true });
+        // `ok` still means exactly what it meant — the engine binary runs — and
+        // the status is still 200, so no existing probe changes behaviour. The
+        // extra number is the thing a flat `{ok:true}` could not say: this
+        // process is fine AND n of its brains have a lock holder that has
+        // outlived LOCK_HOLD_WARN_MS. A COUNT only — this route is deliberately
+        // unauthenticated, so it must not name brains.
+        const stuckBrains = lockReport().filter((l) => l.stuck).length;
+        return sendJson(res, 200, { ok: true, stuckBrains });
       } catch (e) {
         return sendJson(res, 503, { ok: false, error: String(e?.message || e) });
       }

@@ -103,12 +103,218 @@ function slugForSourceId(sourceId) {
 // PGLite takes a single-writer file lock per data dir, so concurrent gbrain
 // subprocesses on the SAME brain would collide. Serialize per brain; different
 // brains (kbIds) still run fully in parallel.
-const _locks = new Map();
-function withBrainLock(brainDir, fn) {
+//
+// ⚠️ THE WAIT IS BOUNDED. THE WORK IS NEVER CANCELLED. Those are two different
+// promises and conflating them is how this turns from a hang into data loss.
+//
+// What was here before was an UNBOUNDED FIFO promise chain per brain: every
+// caller did `prev.then(fn)` with no acquisition budget, no cancellation and no
+// queue bound. One `fn` that never settles therefore wedged EVERY later caller
+// for that brain for the life of the process — measured on a live box
+// (2026-08-24): `/stat` answered in 583ms, another brain's `/query` in 13.7s,
+// and one brain's `/query` never returned at all while the container sat at
+// 0.11% CPU and served `/health` in 75ms. Nothing anywhere reported it.
+//
+// The fix is deliberately asymmetric:
+//
+//   WAITERS get a budget. A caller that has not been given its turn within
+//   LOCK_ACQUIRE_TIMEOUT_MS abandons its place in the queue and rejects. It has
+//   not touched the store and never will — `run()` below re-checks `abandoned`
+//   at the instant it would call `fn`, so an abandoned turn is skipped, not
+//   deferred. That is the whole single-writer argument: the only thing a
+//   timeout can cancel here is work that has NOT STARTED.
+//
+//   THE HOLDER gets no deadline, only a watchdog. Its work is happening in
+//   ANOTHER process — a `gbrain serve` child over stdio, a spawned CLI, or
+//   PGLite's own worker holding brain.pglite open — and this process has no way
+//   to prove that process has let go of the file. Releasing the chain on a
+//   timer would hand the next caller a lock the previous one still physically
+//   holds: two writers on a single-writer file. This codebase has already paid
+//   for the weaker version of that mistake once (see stopServe: a
+//   signalled-but-alive child made an `rm` fail SILENTLY and a "dropped" store
+//   came back with the same inode). The only actor that can guarantee those fds
+//   are gone is the process/container itself, so a genuinely wedged holder is
+//   reported LOUDLY and left alone; the recovery is a sidecar restart, which is
+//   safe and cheap (serves are lazily restarted anyway).
+//
+// KNOWN UNBOUNDED HOLDERS, named rather than hidden: every leaf op here has its
+// own budget (`runGbrain` SIGKILLs at OP_TIMEOUT_MS, `rpc` rejects at the same)
+// EXCEPT the direct PGLite open in `withStore` — `new PGlite()` + `waitReady`
+// take no timeout and are exactly the call that contends for the single-writer
+// file lock. It is left unbounded ON PURPOSE: racing `waitReady` and walking
+// away would abandon a half-open store that may still take the lock afterwards,
+// which is the two-writer hazard again, one layer down. An `ingest` batch is
+// the other long holder — bounded per document, unbounded in the aggregate, and
+// legitimately so.
+const LOCK_ACQUIRE_TIMEOUT_MS = Number(process.env.LOCK_ACQUIRE_TIMEOUT_MS) || 120_000;
+// A hold longer than this is anomalous (only a large ingest batch reaches it
+// legitimately) and gets one warn naming the brain, the op and the queue.
+const LOCK_HOLD_WARN_MS = Number(process.env.LOCK_HOLD_WARN_MS) || 300_000;
+
+const _locks = new Map();       // brainDir → tail promise (never rejects)
+const _lockState = new Map();   // brainDir → { holder, since, waiters:Set }
+
+// Returned by an abandoned turn so the chain advances without ever calling fn.
+const _ABANDONED = Symbol('brain-lock-abandoned');
+
+function lockStateFor(brainDir) {
+  let st = _lockState.get(brainDir);
+  if (!st) { st = { holder: null, since: 0, waiters: new Set() }; _lockState.set(brainDir, st); }
+  return st;
+}
+
+/**
+ * What this brain's lock is doing right now. `now` is a parameter so a caller
+ * (and a test) can ask "is this holder stuck?" without faking a clock — the
+ * same trick sweepIdleBrains uses for idleness.
+ *
+ * This is the signal that did not exist: `/stat` is lock-free by design and so
+ * answered a cheerful `exists:true, sizeBytes:…` for a brain whose every other
+ * op was wedged. It now carries the lock alongside the size.
+ */
+function lockSnapshot(brainDir, now = Date.now()) {
+  const st = _lockState.get(brainDir);
+  const idle = { held: false, holder: null, heldMs: 0, queued: 0, longestWaitMs: 0, stuck: false };
+  if (!st) return idle;
+  const held = st.holder != null;
+  let longestWaitMs = 0;
+  for (const w of st.waiters) longestWaitMs = Math.max(longestWaitMs, now - w.since);
+  return {
+    held,
+    holder: held ? st.holder.label : null,
+    heldMs: held ? now - st.since : 0,
+    queued: st.waiters.size,
+    longestWaitMs,
+    stuck: held && (now - st.since) > LOCK_HOLD_WARN_MS,
+  };
+}
+
+/**
+ * Every brain whose lock is currently held or contended. Used by GET /health to
+ * count stuck brains — a liveness probe that reports `ok:true` while a brain is
+ * dead is exactly how this took a day to find.
+ *
+ * Returns brainDirs (hashed, non-enumerable), never kbIds.
+ */
+export function lockReport(now = Date.now()) {
+  const out = [];
+  for (const brainDir of _lockState.keys()) {
+    const s = lockSnapshot(brainDir, now);
+    if (s.held || s.queued > 0) out.push({ brainDir, ...s });
+  }
+  return out;
+}
+
+/**
+ * Run `fn` with this brain's lock held, waiting at most `acquireTimeoutMs` for
+ * a turn.
+ *
+ * @param {string} brainDir
+ * @param {() => Promise<any>} fn      runs ONLY if this call actually gets its turn
+ * @param {{label?: string, acquireTimeoutMs?: number}} [opts]
+ *        `label` names the op in the warn/status surfaces ('ingest', 'query'…).
+ */
+function withBrainLock(brainDir, fn, opts = {}) {
+  const label = opts.label || 'op';
+  const acquireTimeoutMs = Number.isFinite(opts.acquireTimeoutMs)
+    ? opts.acquireTimeoutMs
+    : LOCK_ACQUIRE_TIMEOUT_MS;
+
+  const st = lockStateFor(brainDir);
+  const waiter = { label, since: Date.now(), abandoned: false, acquired: false };
+  st.waiters.add(waiter);
+
   const prev = _locks.get(brainDir) || Promise.resolve();
-  const next = prev.catch(() => {}).then(fn);
-  _locks.set(brainDir, next.catch(() => {}));
-  return next;
+
+  // The chain link. It resolves an OUTCOME envelope instead of rejecting, so
+  // the tail can never carry an unhandled rejection and a failing op can never
+  // break the queue behind it (the old code relied on two separate .catch()es
+  // for that).
+  const next = prev.catch(() => {}).then(() => {
+    st.waiters.delete(waiter);
+    // ⛔ THE SINGLE-WRITER GUARANTEE. A waiter that gave up gets skipped HERE,
+    // before fn is ever called — so a timed-out caller performs no store access
+    // at all, and the turn it abandoned is handed straight to the next waiter.
+    if (waiter.abandoned) return _ABANDONED;
+
+    waiter.acquired = true;
+    if (waiter.disarm) waiter.disarm();
+    st.holder = waiter;
+    st.since = Date.now();
+
+    const holdTimer = setTimeout(() => {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[gbrain] brain lock HELD >${LOCK_HOLD_WARN_MS}ms by '${label}' on ${brainDir}`
+        + ` — ${st.waiters.size} waiter(s) queued behind it.`
+        + ' The operation is still running and is NOT being cancelled (PGLite is single-writer,'
+        + ' so releasing it here would mean two writers on one file).'
+        + ' If it never finishes, only a sidecar restart clears it.',
+      );
+    }, LOCK_HOLD_WARN_MS);
+    holdTimer.unref?.();
+
+    const release = () => {
+      clearTimeout(holdTimer);
+      if (st.holder === waiter) { st.holder = null; st.since = 0; }
+      // Keep the map from growing one dead entry per brain ever touched.
+      if (_lockState.get(brainDir) === st && !st.holder && st.waiters.size === 0) {
+        _lockState.delete(brainDir);
+      }
+    };
+
+    return Promise.resolve().then(fn).then(
+      (value) => { release(); return { ok: true, value }; },
+      (error) => { release(); return { ok: false, error }; },
+    );
+  });
+
+  _locks.set(brainDir, next);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      // Already running? The wait is over — the budget bounds the QUEUE, never
+      // the operation, so a legitimately long op is untouched.
+      //
+      // `waiter.acquired` is REDUNDANT with the clearTimeout in `disarm` below,
+      // deliberately: the two cover each other, and a mutation test proves it
+      // (removing either alone leaves the suite green; removing both makes the
+      // budget start timing the WORK, which fails). Don't tidy it away.
+      if (waiter.acquired || settled) return;
+      settled = true;
+      waiter.abandoned = true;
+      st.waiters.delete(waiter);
+      const busy = lockSnapshot(brainDir);
+      const err = new Error(
+        `gbrain: gave up after ${acquireTimeoutMs}ms WAITING FOR A TURN on brain ${brainDir}`
+        + ` — this request never started and touched nothing.`
+        + (busy.held
+          ? ` The brain is busy with '${busy.holder}' (holding for ${busy.heldMs}ms).`
+          : ' The brain lock was contended.')
+        + ` This is a QUEUE timeout, not an operation timeout.`
+        + ` Raise LOCK_ACQUIRE_TIMEOUT_MS (currently ${LOCK_ACQUIRE_TIMEOUT_MS}ms) to wait longer.`,
+      );
+      err.code = 'BRAIN_LOCK_ACQUIRE_TIMEOUT';
+      err.brainDir = brainDir;
+      // eslint-disable-next-line no-console
+      console.warn(`[gbrain] ${err.message}`);
+      reject(err);
+    }, acquireTimeoutMs);
+    timer.unref?.();
+    // Disarm the moment the turn is granted — assigned synchronously, before
+    // any microtask can run `next`'s body.
+    waiter.disarm = () => clearTimeout(timer);
+
+    next.then((r) => {
+      if (settled) return;          // abandoned: already rejected above
+      settled = true;
+      clearTimeout(timer);
+      if (r === _ABANDONED) return; // unreachable (settled would be true)
+      if (r.ok) resolve(r.value); else reject(r.error);
+    });
+  });
 }
 
 // ── gbrain subprocess ───────────────────────────────────────────────────────
@@ -366,6 +572,14 @@ export async function sweepIdleBrains(now = Date.now()) {
       if (!(await pathExists(brainDir))) { await stopServe(brainDir); return { action: 'skipped', reason: 'gone' }; }
       const res = await reclaim(brainDir, { olderThanHours, mode: 'light', label: 'auto-reclaim' });
       return { action: 'reclaimed', purgedCount: res.purgedCount, vacuumMode: res.vacuumMode, reclaimedBytes: res.reclaimedBytes };
+    }, {
+      label: 'auto-reclaim',
+      // Maintenance has no user waiting on it: stand down FAST rather than
+      // queue behind a long ingest (or a wedged holder). Before the acquire
+      // budget existed this loop could park on one wedged brain forever, and
+      // because `_sweeping` guards re-entry that stalled the sweep for EVERY
+      // other brain too — one wedged tenant froze all housekeeping.
+      acquireTimeoutMs: Math.min(LOCK_ACQUIRE_TIMEOUT_MS, 10_000),
     }).catch((e) => ({ action: 'failed', reason: String((e && e.message) || e).slice(0, 200) }));
     // `reclaim` already released the serve (the vacuum needs the lock it holds);
     // this settles the skip/fail paths, and is a resolved no-op otherwise.
@@ -618,7 +832,7 @@ export async function drop(kbId) {
     // eslint-disable-next-line no-console
     console.log(`[gbrain] drop ${existed ? 'removed' : 'no-op (absent)'}: ${brainDir}`);
     return { dropped: existed };
-  });
+  }, { label: 'drop' });
 }
 
 /**
@@ -688,7 +902,11 @@ export async function compact(kbId, { olderThanHours = 72, vacuum = 'light', hal
   }
   const brainDir = brainDirFor(kbId);
   if (!(await pathExists(brainDir))) return { exists: false, reclaimedBytes: 0 };
-  return withBrainLock(brainDir, () => reclaim(brainDir, { olderThanHours, mode, halfvec, label: 'compact' }));
+  return withBrainLock(
+    brainDir,
+    () => reclaim(brainDir, { olderThanHours, mode, halfvec, label: 'compact' }),
+    { label: 'compact' },
+  );
 }
 
 /**
@@ -1058,7 +1276,7 @@ export async function ingest(kbId, docs) {
     // — the old contract gave no way to tell vector from lexical, which is how a
     // whole corpus got indexed the wrong way without a single warning.
     return { upserted, deleted, chunks, ...(await embeddingState(brainDir)) };
-  });
+  }, { label: 'ingest' });
 }
 
 /** POST /query → { results: [{ sourceId, chunk, score }] } */
@@ -1085,7 +1303,7 @@ export async function query(kbId, queryText, topK) {
       score: typeof hit.score === 'number' ? hit.score : 0,
     }));
     return { results, ...(await embeddingState(brainDir)) };
-  });
+  }, { label: 'query' });
 }
 
 /** POST /delete → { deleted } */
@@ -1106,7 +1324,7 @@ export async function del(kbId, sourceIds) {
     // something hard-purges it — this is the write that most needs the sweep.
     markDirty(brainDir, deleted);
     return { deleted };
-  });
+  }, { label: 'delete' });
 }
 
 /**
@@ -1128,15 +1346,25 @@ export async function del(kbId, sourceIds) {
  * not chunks and not soft-deleted pages. It is **null** when the map exists but
  * can't be read: mid-write bytes must surface as "unknown", never as a confident
  * 0 that tells the user their populated KB is empty.
+ *
+ * `lock` is here BECAUSE this route is lock-free. Being the one op that never
+ * queues made it the one op that kept answering while every other op on the
+ * same brain was wedged behind a stuck holder — a healthy-looking size for a
+ * dead KB, which is exactly why that state went unnoticed for a day. Same
+ * reasoning as `mode`/`stale` on /query: report what the caller cannot infer.
+ * `{ held, holder, heldMs, queued, longestWaitMs, stuck }`; `stuck` means the
+ * holder has been running longer than LOCK_HOLD_WARN_MS.
  */
 export async function stat(kbId) {
   const brainDir = brainDirFor(kbId);
-  if (!(await pathExists(brainDir))) return { exists: false, sizeBytes: 0, docs: 0 };
+  const lock = lockSnapshot(brainDir);
+  if (!(await pathExists(brainDir))) return { exists: false, sizeBytes: 0, docs: 0, lock };
   const m = await readMap(brainDir);
   return {
     exists: true,
     sizeBytes: await dirSizeBytes(brainDir),
     docs: m.ok ? Object.keys(m.map).length : null,
+    lock,
   };
 }
 
@@ -1183,6 +1411,12 @@ export async function health() {
 
 export const _internal = {
   brainDirFor, slugForSourceId, embeddingsEnabled, parseGbrainJson,
+  // The lock, exported so its contract is testable without a real gbrain
+  // binary, a real store, or a five-minute wait: `withBrainLock` takes an
+  // explicit per-call `acquireTimeoutMs`, and `lockSnapshot`/`lockReport` take
+  // `now` by ARGUMENT — the same technique sweepIdleBrains uses for idleness.
+  withBrainLock, lockSnapshot, lockReport,
+  LOCK_ACQUIRE_TIMEOUT_MS, LOCK_HOLD_WARN_MS,
   // The idle threshold the sweep measures against — exported so a test can drive
   // a brain past it by ARGUMENT (sweepIdleBrains(now + SERVE_IDLE_MS + 1)) rather
   // than by mutating internal state or waiting five real minutes.

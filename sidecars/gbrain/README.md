@@ -179,6 +179,32 @@ moved). Full method and numbers: `narrowNewBrainToHalfvec` in `brain.js`.
 **Auth:** if `SIDECAR_AUTH_TOKEN` is set, POST routes require
 `Authorization: Bearer <that token>` (else `401`).
 
+## The per-brain lock
+
+PGLite is single-writer per data dir, so every op on one brain is serialized;
+different brains run fully in parallel (one shared process, isolated tenants).
+
+**The wait is bounded, the work is never cancelled.** A caller that is not given
+its turn within `LOCK_ACQUIRE_TIMEOUT_MS` abandons its place in the queue and
+fails with a `BRAIN_LOCK_ACQUIRE_TIMEOUT` error that says it *never started* —
+distinct wording from the per-operation timeouts, so a log reader can tell "I
+never got a turn" from "my turn ran long". An abandoned turn is **skipped**, not
+deferred: its `fn` is never invoked, which is what keeps a queue timeout from
+becoming a second writer on the file.
+
+The **holder** gets no deadline, only a watchdog, because its work is running in
+another process (a `gbrain serve` child, a spawned CLI, PGLite's own worker) and
+this process cannot prove that process has released the file. Releasing the
+chain on a timer would hand the next caller a lock the previous one still
+physically holds. A holder past `LOCK_HOLD_WARN_MS` is therefore reported, not
+killed: one warn line, `stuck:true` in `POST /stat`'s `lock` field, and a count
+in `GET /health`'s `stuckBrains`. Clearing a genuinely wedged holder means
+restarting the sidecar — the only actor that can guarantee the fds are gone.
+
+`POST /stat` is the read that carries this, because it is the one route that does
+NOT take the lock — which used to make it the one route that kept answering
+cheerfully while every other op on the brain was wedged.
+
 ## Environment
 
 | Var | Default | Purpose |
@@ -189,6 +215,8 @@ moved). Full method and numbers: `narrowNewBrainToHalfvec` in `brain.js`.
 | `GBRAIN_OP_TIMEOUT_MS` | `120000` | Per-operation subprocess timeout |
 | `GBRAIN_SERVE_IDLE_MS` | `300000` | How long a brain must be untouched before it is reclaimed + released |
 | `GBRAIN_SERVE_STOP_TIMEOUT_MS` | `5000` | Grace period before a `gbrain serve` that won't stop is SIGKILLed |
+| `LOCK_ACQUIRE_TIMEOUT_MS` | `120000` | How long a request will WAIT for a turn on a brain's single-writer lock before giving up. Bounds the QUEUE only — an operation that has already started is never cut short |
+| `LOCK_HOLD_WARN_MS` | `300000` | A lock held longer than this logs one warn naming the brain, the op and the queue depth, and counts toward `GET /health`'s `stuckBrains` |
 | `AUTO_RECLAIM` | *(on)* | `0`/`false`/`off` ⇒ disable the automatic idle reclaim entirely (idle reaping continues) |
 | `GBRAIN_NEW_BRAIN_HALFVEC` | *(on)* | `0` ⇒ new vector-capable brains keep the wide `vector(N)` column instead of being born `halfvec(N)` |
 | `AUTO_RECLAIM_WINDOW_HOURS` | `72` | Recovery window the automatic pass hard-purges past — GBrain's own default |
