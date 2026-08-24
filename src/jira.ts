@@ -426,8 +426,33 @@ export function jiraApiCall(cred: any, path: string, opts: any = {}) {
  * cover. Keep this the single auth chokepoint; don't re-implement credential
  * resolution at call sites.
  *
+ * ── `opts.signal`: OPTIONAL, and it is what turns a caller's WAIT into a real
+ * ABORT ────────────────────────────────────────────────────────────────────
+ * Node's global fetch has NO default timeout, and A HANG IS NOT A THROW, so an
+ * Atlassian connection that is accepted and never answered parks whoever called
+ * this forever. Callers that care already bound the WAIT from outside —
+ * workflow-templates' `_shared/tracker.js jiraCall` races this promise against
+ * a `BOARD_API_TIMEOUT_MS` deadline — but a race can only stop waiting; it
+ * cannot close the socket, because the socket lives in here. Accepting a
+ * `signal` is the missing half: the same deadline that ends the wait now also
+ * ends the REQUEST.
+ *
+ * It is deliberately OPT-IN and inert by default. Every caller today passes
+ * nothing, and `signal: undefined` is exactly what `fetch` already receives
+ * when the option is absent — so the no-signal path is byte-for-byte today's
+ * behaviour, on cloud and everywhere else. There is NO default timeout here on
+ * purpose: this is a shared library whose callers know their own budget (a
+ * board tick's is 15s, an interactive MCP tool call's is not), and inventing one
+ * for them is how a legitimately slow bulk JQL query starts failing in
+ * production for a reason nobody asked for.
+ *
+ * The signal covers the BODY read too — undici ties the response stream to the
+ * request's signal — so a response whose headers arrive and whose body then
+ * stalls is aborted on the same clock, which is the half a naive passthrough
+ * would miss.
+ *
  * @param {string} path  Jira REST path, e.g. `/rest/api/3/issue/PROJ-1`
- * @param {{ method?: string, body?: any, headers?: object }} [opts]
+ * @param {{ method?: string, body?: any, headers?: object, signal?: AbortSignal }} [opts]
  * @returns {Promise<any>} parsed JSON response body
  */
 export async function jiraFetch(path, opts: any = {}) {
@@ -438,12 +463,29 @@ export async function jiraFetch(path, opts: any = {}) {
       method: opts.method || 'GET',
       headers,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
+      // Absent ⇒ `undefined` ⇒ identical to not passing the option at all.
+      signal: opts.signal,
+    });
+    // ⚠️ AN ABORTED BODY READ IS NOT AN EMPTY BODY. Both reads below have
+    // always swallowed their failure — which was harmless while nothing could
+    // abort them, and is a FALSE SUCCESS the moment a signal can: `text()`
+    // rejecting mid-stream would become `''`, and `''` is the legitimate
+    // 204-No-Content answer this helper returns as `{}`. A caller's own
+    // deadline firing during a label edit or a transition would then read back
+    // as "the write succeeded", and the tracker would record a change Jira
+    // never made. So an abort is rethrown and everything else keeps its
+    // existing, deliberately forgiving behaviour. Inert without a signal
+    // (`opts.signal?.aborted` is `undefined`), so every caller today is
+    // byte-for-byte unchanged.
+    const readBody = () => res.text().catch((err) => {
+      if (opts.signal?.aborted) throw err;
+      return '';
     });
     if (!res.ok) {
-      const err = await res.text().catch(() => '');
+      const err = await readBody();
       throw new Error(`Jira API ${res.status}: ${err.slice(0, 300)}`);
     }
-    const raw = await res.text().catch(() => '');
+    const raw = await readBody();
     if (!raw || !raw.trim()) return {};
     try {
       return JSON.parse(raw);
@@ -455,6 +497,18 @@ export async function jiraFetch(path, opts: any = {}) {
   try {
     return await makeRequest();
   } catch (error) {
+    // ⚠️ THE RETRY IS THE REASON THE PASSTHROUGH NEEDS A GUARD. `makeRequest`
+    // is called a SECOND time on a transient auth error, and that second call
+    // re-uses `opts.signal` — so once the caller's deadline has fired, a retry
+    // is a request that can only abort again, and the only thing it can add is
+    // another `resolveJiraCredential()` round trip AFTER the caller has already
+    // stopped waiting. An aborted signal means "nobody is listening any more",
+    // which is not a transient condition to recover from. Checked on the SIGNAL
+    // rather than on the message, because the message heuristic below is prose-
+    // matching: an abort reason a caller supplies itself
+    // (`controller.abort(new Error('token refresh cancelled'))`) contains
+    // "token" and would otherwise be retried into the void.
+    if (opts.signal?.aborted) throw error;
     // Token endpoint / cache can intermittently return malformed auth payloads.
     // Clear and retry once to recover from transient auth state.
     const msg = String(error?.message || error || '').toLowerCase();
