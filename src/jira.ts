@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 import { fetchWithDeadline, isTimeoutError } from './lib/http-deadline.js';
+import { markupToAdf, plainTextToAdf, adfToMarkup } from './lib/markup.js';
 
 const _require = createRequire(import.meta.url);
 
@@ -10,64 +11,30 @@ function resolveJiraBin() {
   try { return _require.resolve('@zibby/mcp-jira/index.js'); } catch { return null; }
 }
 
-const BLOCK_TYPES = new Set([
-  'paragraph', 'heading', 'bulletList', 'orderedList', 'listItem',
-  'blockquote', 'codeBlock', 'rule', 'table', 'tableRow', 'tableCell',
-  'tableHeader', 'mediaSingle', 'panel',
-]);
-
-function applyMarks(text, marks) {
-  if (!marks || !marks.length) return text;
-  let out = text;
-  for (const m of marks) {
-    if (m.type === 'strong') out = `**${out}**`;
-    else if (m.type === 'em') out = `_${out}_`;
-    else if (m.type === 'code') out = `\`${out}\``;
-    else if (m.type === 'strike') out = `~~${out}~~`;
-    else if (m.type === 'link' && m.attrs?.href) out = `[${out}](${m.attrs.href})`;
-  }
-  return out;
+/**
+ * Bodies are written and read through ONE grammar (`lib/markup.ts`): Markdown
+ * in → ADF out, ADF in → Markdown out. `adfToMarkup` replaced the local
+ * flattener that lived here so the copilot and the board templates hand the
+ * model IDENTICAL text for identical content.
+ *
+ * `richBody` renders Markdown to ADF; `writeBody` posts it and, if Jira
+ * REJECTS the rich document (4xx), retries ONCE with the plain
+ * one-paragraph-per-line shape every write used before — a render the API
+ * refuses must never lose a comment or a ticket.
+ */
+function richBody(text) {
+  return markupToAdf(text);
 }
 
-function adfToPlainText(nodes, depth = 0) {
-  if (!Array.isArray(nodes)) return '';
-  const parts = [];
-  for (const node of nodes) {
-    if (node.type === 'text') {
-      parts.push(applyMarks(node.text || '', node.marks));
-      continue;
-    }
-    if (node.type === 'hardBreak') {
-      parts.push('\n');
-      continue;
-    }
-    if (node.type === 'rule') {
-      parts.push('\n---\n');
-      continue;
-    }
-    const inner = node.content ? adfToPlainText(node.content, depth + 1) : '';
-    if (node.type === 'listItem') {
-      parts.push(inner);
-    } else if (node.type === 'bulletList') {
-      const items = (node.content || []).map(li =>
-        `- ${adfToPlainText(li.content || [], depth + 1).trim()}`
-      );
-      parts.push(`\n${items.join('\n')}\n`);
-    } else if (node.type === 'orderedList') {
-      const items = (node.content || []).map((li, i) =>
-        `${i + 1}. ${adfToPlainText(li.content || [], depth + 1).trim()}`
-      );
-      parts.push(`\n${items.join('\n')}\n`);
-    } else if (node.type === 'heading') {
-      const level = node.attrs?.level || 2;
-      parts.push(`\n\n${'#'.repeat(level)} ${inner.trim()}\n\n`);
-    } else if (BLOCK_TYPES.has(node.type)) {
-      parts.push(`\n\n${inner}\n`);
-    } else {
-      parts.push(inner);
-    }
+async function writeBody(send, text) {
+  try {
+    return await send(richBody(text));
+  } catch (err: any) {
+    const status = Number(err?.status);
+    if (!(status >= 400 && status < 500)) throw err;
+    console.warn(`[jira] rich body rejected (${status}) — retrying as plain text: ${String(err?.message || err).slice(0, 200)}`);
+    return await send(plainTextToAdf(text));
   }
-  return parts.join('').replace(/\n{3,}/g, '\n\n');
 }
 
 function normalizeStatusLabel(value) {
@@ -506,7 +473,9 @@ export async function jiraFetch(path, opts: any = {}) {
     });
     if (!res.ok) {
       const err = await readBody();
-      throw new Error(`Jira API ${res.status}: ${err.slice(0, 300)}`);
+      const failure: any = new Error(`Jira API ${res.status}: ${err.slice(0, 300)}`);
+      failure.status = res.status;
+      throw failure;
     }
     const raw = await readBody();
     if (!raw || !raw.trim()) return {};
@@ -699,7 +668,7 @@ When user asks to move/transition ticket status:
             key: data.key,
             project: data.fields?.project?.key,
             summary: data.fields?.summary,
-            description: data.fields?.description,
+            description: data.fields?.description ? adfToMarkup(data.fields.description) : data.fields?.description ?? null,
             status: data.fields?.status?.name,
             assignee: data.fields?.assignee?.displayName || 'Unassigned',
             priority: data.fields?.priority?.name,
@@ -740,13 +709,12 @@ When user asks to move/transition ticket status:
               ? { id: issueTypeSelection.resolved.id }
               : { name: issueType || 'Task' },
           };
-          if (description) {
-            fields.description = { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: description }] }] };
-          }
           if (priority) fields.priority = { name: priority };
           if (labels?.length) fields.labels = labels;
           if (assigneeId) fields.assignee = { id: assigneeId };
-          const data = await jiraFetch('/rest/api/3/issue', { method: 'POST', body: { fields } });
+          const data = description
+            ? await writeBody((doc) => jiraFetch('/rest/api/3/issue', { method: 'POST', body: { fields: { ...fields, description: doc } } }), description)
+            : await jiraFetch('/rest/api/3/issue', { method: 'POST', body: { fields } });
           const response: any = { ok: true, key: data.key, id: data.id, self: data.self };
           if (issueTypeSelection?.resolved) {
             response.issueType = issueTypeSelection.resolved.name;
@@ -822,10 +790,7 @@ When user asks to move/transition ticket status:
           const max = maxResults || 50;
           const data = await jiraFetch(`/rest/api/3/issue/${issueKey}/comment?maxResults=${max}&orderBy=-created`);
           const comments = (data.comments || []).map(c => {
-            let body = '';
-            if (c.body?.content) {
-              body = adfToPlainText(c.body.content);
-            }
+            const body = c.body?.content ? adfToMarkup(c.body) : '';
             return {
               id: c.id,
               author: c.author?.displayName || 'Unknown',
@@ -839,18 +804,23 @@ When user asks to move/transition ticket status:
         case 'jira_add_comment': {
           const { issueKey, body: text } = args;
           if (!issueKey || !text) return JSON.stringify({ error: 'issueKey and body are required' });
-          await jiraFetch(`/rest/api/3/issue/${issueKey}/comment`, {
+          await writeBody((doc) => jiraFetch(`/rest/api/3/issue/${issueKey}/comment`, {
             method: 'POST',
-            body: {
-              body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] },
-            },
-          });
+            body: { body: doc },
+          }), text);
           return JSON.stringify({ ok: true, issueKey });
         }
         case 'jira_edit_issue': {
           const { issueKey, fields } = args;
           if (!issueKey || !fields) return JSON.stringify({ error: 'issueKey and fields are required' });
-          await jiraFetch(`/rest/api/3/issue/${issueKey}`, { method: 'PUT', body: { fields } });
+          // A STRING description is Markdown — rendered here, so a caller never
+          // has to hand-build ADF. An object is passed through as given.
+          if (typeof fields.description === 'string') {
+            const { description, ...rest } = fields;
+            await writeBody((doc) => jiraFetch(`/rest/api/3/issue/${issueKey}`, { method: 'PUT', body: { fields: { ...rest, description: doc } } }), description);
+          } else {
+            await jiraFetch(`/rest/api/3/issue/${issueKey}`, { method: 'PUT', body: { fields } });
+          }
           return JSON.stringify({ ok: true, issueKey });
         }
         case 'jira_transition_issue': {
@@ -994,7 +964,7 @@ When user asks to move/transition ticket status:
           projectKey: { type: 'string', description: 'Project key, e.g. PROJ' },
           summary: { type: 'string', description: 'Issue title/summary' },
           issueType: { type: 'string', description: 'Issue type (default: Task). Common: Task, Bug, Story, Epic' },
-          description: { type: 'string', description: 'Issue description (plain text)' },
+          description: { type: 'string', description: 'Issue description. Markdown is rendered (headings, **bold**, `code`, lists, - [ ] tasks, links, tables, > quotes, > [!NOTE]/[!TIP]/[!WARNING]/[!CAUTION] panels).' },
           priority: { type: 'string', description: 'Priority name, e.g. High, Medium, Low' },
           labels: { type: 'array', items: { type: 'string' }, description: 'Array of label strings' },
           assigneeId: { type: 'string', description: 'Atlassian account ID to assign to' },
@@ -1082,14 +1052,14 @@ When user asks to move/transition ticket status:
         type: 'object',
         properties: {
           issueKey: { type: 'string', description: 'Issue key, e.g. PROJ-123' },
-          body: { type: 'string', description: 'Comment text (plain text)' },
+          body: { type: 'string', description: 'Comment text. Markdown is rendered: headings, **bold**, `code`, lists, - [ ] tasks, links, tables, > quotes, > [!NOTE]/[!TIP]/[!WARNING]/[!CAUTION] panels.' },
         },
         required: ['issueKey', 'body'],
       },
     },
     {
       name: 'jira_edit_issue',
-      description: 'Update fields on a Jira issue (summary, story points, labels, priority)',
+      description: 'Update fields on a Jira issue (summary, description, story points, labels, priority). A string `description` is Markdown and is rendered.',
       input_schema: {
         type: 'object',
         properties: {

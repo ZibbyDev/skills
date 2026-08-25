@@ -197,7 +197,7 @@ describe('creating and reading tasks', () => {
 
   it('renders UI-authored HTML descriptions as readable text', () => {
     expect(vkPlainText('<p>Fix the <b>login</b> bug</p><p>ASAP&amp;done</p>'))
-      .toBe('Fix the login bug\n\nASAP&done');
+      .toBe('Fix the **login** bug\nASAP&done');
   });
 
   it('normalizes a task to the numeric id, not the per-project #identifier', async () => {

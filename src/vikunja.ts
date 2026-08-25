@@ -43,6 +43,7 @@
  */
 
 import { existsSync } from 'fs';
+import { markupToHtml, htmlToMarkup } from './lib/markup.js';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
@@ -141,23 +142,20 @@ async function vkFetch(method: string, path: string, opts: { query?: any; body?:
   try { return JSON.parse(text); } catch { return text; }
 }
 
-/** Vikunja stores UI-edited descriptions as HTML. Render them readable. */
+/**
+ * Vikunja stores descriptions and comments as Tiptap HTML. Both directions go
+ * through ONE grammar (`lib/markup.ts`): Markdown the model writes → HTML the
+ * board renders; HTML the board holds → Markdown the model reads. Same module
+ * the Jira skill uses, so a body reads the same off either tracker.
+ */
 export function vkPlainText(html: any): string {
   if (typeof html !== 'string' || !html) return '';
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    // A paragraph break is a BLANK line — collapsing it to a single newline
-    // runs separate thoughts together and makes a long ticket body unreadable.
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return htmlToMarkup(html);
+}
+
+/** Markdown → the HTML Vikunja's editor renders. */
+export function vkRichHtml(markdown: any): string {
+  return markupToHtml(markdown);
 }
 
 /** Vikunja priority is 0-5; accept the words a human (or a model) would use. */
@@ -341,7 +339,7 @@ You can operate the user's Vikunja board directly. Tools:
           const created = await vkFetch('PUT', `/projects/${encodeURIComponent(String(a.projectId))}/tasks`, {
             body: {
               title: a.title,
-              ...(a.description ? { description: a.description } : {}),
+              ...(a.description ? { description: vkRichHtml(a.description) } : {}),
               ...(priority !== null ? { priority } : {}),
               ...(a.dueDate ? { due_date: a.dueDate } : {}),
             },
@@ -375,7 +373,7 @@ You can operate the user's Vikunja board directly. Tools:
             body: {
               ...current,
               ...(a.title !== undefined ? { title: a.title } : {}),
-              ...(a.description !== undefined ? { description: a.description } : {}),
+              ...(a.description !== undefined ? { description: vkRichHtml(a.description) } : {}),
               ...(priority !== null ? { priority } : {}),
               ...(a.done !== undefined ? { done: !!a.done } : {}),
               ...(a.dueDate !== undefined ? { due_date: a.dueDate } : {}),
@@ -423,7 +421,7 @@ You can operate the user's Vikunja board directly. Tools:
 
         case 'vikunja_add_comment': {
           const made = await vkFetch('PUT', `/tasks/${encodeURIComponent(String(a.taskId))}/comments`, {
-            body: { comment: a.comment },
+            body: { comment: vkRichHtml(a.comment) },
           });
           return JSON.stringify({ ok: true, commentId: made?.id ?? null });
         }
@@ -502,7 +500,7 @@ You can operate the user's Vikunja board directly. Tools:
         properties: {
           projectId: { type: 'string', description: 'Project id' },
           title: { type: 'string', description: 'Task title' },
-          description: { type: 'string', description: 'Task body' },
+          description: { type: 'string', description: 'Task body. Markdown is rendered (headings, **bold**, `code`, lists, - [ ] tasks, links, tables, > quotes).' },
           priority: { type: 'string', description: 'A number 0-5 or a word: low, medium, high, urgent, now' },
           labels: { type: 'array', items: { type: 'string' }, description: 'Label titles; created if missing' },
           dueDate: { type: 'string', description: 'RFC3339 timestamp' },
@@ -571,7 +569,7 @@ You can operate the user's Vikunja board directly. Tools:
         type: 'object',
         properties: {
           taskId: { type: 'string', description: 'Numeric task id' },
-          comment: { type: 'string', description: 'Comment body' },
+          comment: { type: 'string', description: 'Comment body. Markdown is rendered (headings, **bold**, `code`, lists, - [ ] tasks, links, tables, > quotes).' },
         },
         required: ['taskId', 'comment'],
       },
