@@ -40,6 +40,7 @@ import { fileURLToPath } from 'url';
 import { basename, dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
 import { LARK_APP_ENV_KEYS, resolveLarkApp } from './larkApp.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary (bin/mcp-skill.mjs), derived
@@ -86,11 +87,11 @@ async function getTenantAccessToken() {
   if (tokenCache && tokenCache.appId === appId && tokenCache.expiresAt > Date.now()) {
     return { token: tokenCache.token, host };
   }
-  const res = await fetch(`${host}/open-apis/auth/v3/tenant_access_token/internal`, {
+  const res = await fetchWithDeadline(`${host}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  });
+  }, { kind: 'api', what: 'Lark tenant_access_token' });
   const data = await res.json();
   if (data.code !== 0) {
     throw new Error(`Lark tenant_access_token failed: ${data.msg || data.code}`);
@@ -115,7 +116,7 @@ async function larkDocsApi(method, path, body?: any) {
     },
   };
   if (method !== 'GET' && body !== undefined) init.body = JSON.stringify(body);
-  const res = await fetch(`${host}${path}`, init);
+  const res = await fetchWithDeadline(`${host}${path}`, init, { kind: 'api', what: `Lark Docx ${method} ${path}` });
   const data = await res.json();
   if (data.code !== 0) {
     throw new Error(`Lark Docx API ${path} error: ${data.msg || data.code}`);
@@ -322,11 +323,11 @@ async function larkUploadDocxImage({ fileName, parentNode, bytes }: any) {
   form.set('parent_node', parentNode);
   form.set('size', String(bytes.length));
   form.set('file', new Blob([bytes]), fileName);
-  const res = await fetch(`${host}/open-apis/drive/v1/medias/upload_all`, {
+  const res = await fetchWithDeadline(`${host}/open-apis/drive/v1/medias/upload_all`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: form,
-  });
+  }, { kind: 'transfer', what: 'Lark Docx image upload' });
   const data = await res.json();
   if (data.code !== 0) {
     throw new Error(`Lark media upload_all error: ${data.msg || data.code}`);

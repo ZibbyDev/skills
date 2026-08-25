@@ -49,6 +49,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -117,14 +118,14 @@ async function kvMemoryFetch(op, payload) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). KV memory is only available inside a Zibby run.');
   }
   const url = `${getAccountApiUrl()}/credits/review-memory`;
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${session}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ op, ...payload }),
-  });
+  }, { kind: 'api', what: `kv-memory ${op}` });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`KV memory ${op} failed (${res.status}): ${body.slice(0, 300)}`);

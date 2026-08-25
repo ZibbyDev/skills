@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the path to the bundled MCP server binary. Override via
@@ -44,7 +45,7 @@ async function slackApi(method, params: any = {}) {
     body = JSON.stringify(params);
   }
 
-  const res = await fetch(url, { method: isGet ? 'GET' : 'POST', headers, body });
+  const res = await fetchWithDeadline(url, { method: isGet ? 'GET' : 'POST', headers, body }, { kind: 'api', what: `Slack ${method}` });
   const data = await res.json();
   if (!data.ok) throw new Error(`Slack API error: ${data.error}`);
   return data;

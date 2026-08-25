@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Figma skill — design context + dev-handoff over the Figma REST API.
@@ -42,11 +43,11 @@ async function figmaFetch(path, opts: any = {}) {
     Accept: 'application/json',
     ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
   };
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: opts.method || 'GET',
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  }, { kind: 'api', what: `Figma ${opts.method || 'GET'} ${path}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`Figma API ${res.status}: ${err.slice(0, 300)}`);

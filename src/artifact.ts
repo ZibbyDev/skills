@@ -95,6 +95,7 @@ import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checkRenderedReport } from './reportCheck.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -416,11 +417,11 @@ async function artifactWriteFetch(payload) {
   // '/credits/artifacts', not '/artifacts': on cloud the main API sits at its
   // 500-resource cap, so these routes live on the credits RestApi (same
   // placement as review-memory below); self-host mounts the same alias.
-  const res = await fetch(`${getAccountApiUrl()}/credits/artifacts`, {
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/credits/artifacts`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  });
+  }, { kind: 'api', what: 'artifact publish' });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     let parsed: any = null;
@@ -478,10 +479,10 @@ async function artifactReadFetch(id) {
   if (!session) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). Artifacts are only available inside a Zibby run.');
   }
-  const res = await fetch(`${getAccountApiUrl()}/credits/artifacts/${encodeURIComponent(id)}`, {
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/credits/artifacts/${encodeURIComponent(id)}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${session}` },
-  });
+  }, { kind: 'api', what: `artifact read ${id}` });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`artifact get failed (${res.status}): ${body.slice(0, 300)}`);
@@ -502,11 +503,11 @@ async function artifactShareFetch(id, action, payload = {}) {
   if (!session) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). Artifacts are only available inside a Zibby run.');
   }
-  const res = await fetch(`${getAccountApiUrl()}/credits/artifacts/${encodeURIComponent(id)}/${action}`, {
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/credits/artifacts/${encodeURIComponent(id)}/${action}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  });
+  }, { kind: 'api', what: `artifact ${action} ${id}` });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     let parsed: any = null;
@@ -670,11 +671,11 @@ async function verifyStoredSource(id, sent) {
 async function indexStore(id, record) {
   const session = getSessionToken();
   if (!session) return; // no run credential → nothing to index against
-  const res = await fetch(`${getAccountApiUrl()}/credits/review-memory`, {
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/credits/review-memory`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ op: 'store', scope: indexScope(id), content: JSON.stringify(record) }),
-  });
+  }, { kind: 'api', what: 'artifact index store' });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`artifact index write failed (${res.status}): ${body.slice(0, 200)}`);
@@ -685,11 +686,11 @@ async function indexStore(id, record) {
 async function indexRecall(id) {
   const session = getSessionToken();
   if (!session) return null;
-  const res = await fetch(`${getAccountApiUrl()}/credits/review-memory`, {
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/credits/review-memory`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ op: 'recall', scope: indexScope(id) }),
-  });
+  }, { kind: 'api', what: 'artifact index recall' });
   if (!res.ok) return null;
   const data = await res.json().catch(() => null);
   if (!data?.found || !data?.memory?.content) return null;

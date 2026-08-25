@@ -64,6 +64,7 @@ import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
 import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -270,11 +271,11 @@ export async function glFetch(path, opts: any = {}) {
     ...gitlabAuthHeaders(),
     ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
   };
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: opts.method || 'GET',
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  }, { kind: 'api', what: `GitLab ${opts.method || 'GET'} ${path}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     // NAME THE HOST. A bare `GitLab API 401: {"message":"401 Unauthorized"}` is

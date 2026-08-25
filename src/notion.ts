@@ -28,6 +28,7 @@ import { fileURLToPath } from 'url';
 import { basename, dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary (bin/mcp-skill.mjs), derived
@@ -114,7 +115,7 @@ export async function notionApi(path, opts: any = {}) {
     if (typeof token !== 'string' || !token) {
       throw new Error(`Invalid notion token type: ${typeof token}`);
     }
-    const res = await fetch(`${NOTION_BASE}${path}`, {
+    const res = await fetchWithDeadline(`${NOTION_BASE}${path}`, {
       method: opts.method || 'GET',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -124,7 +125,7 @@ export async function notionApi(path, opts: any = {}) {
         ...opts.headers,
       },
       body: opts.formData ? opts.formData : (opts.body ? JSON.stringify(opts.body) : undefined),
-    });
+    }, { kind: opts.formData ? 'transfer' : 'api', what: `Notion ${opts.method || 'GET'} ${path}` });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
       throw new Error(`Notion API ${res.status}: ${err.slice(0, 300)}`);

@@ -53,6 +53,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -180,11 +181,11 @@ async function ensureStoreFetch(payload) {
   if (!session) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). Stores are only available inside a Zibby run.');
   }
-  const res = await fetch(`${getAccountApiUrl()}/datasets/stores/ensure`, {
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/datasets/stores/ensure`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${session}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  });
+  }, { kind: 'api', what: 'dataset store ensure' });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`ensure_store failed (${res.status}): ${body.slice(0, 300)}`);
@@ -198,14 +199,14 @@ async function storeFetch(storeId, action, payload) {
     throw new Error('No backend credential (PROJECT_API_TOKEN). Dataset store is only available inside a Zibby run.');
   }
   const url = `${getAccountApiUrl()}/datasets/stores/${encodeURIComponent(storeId)}/${action}`;
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${session}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
-  });
+  }, { kind: (action === 'query' || action === 'sql') ? 'job' : 'api', what: `dataset store ${action}` });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Store ${action} failed (${res.status}): ${body.slice(0, 300)}`);
@@ -240,11 +241,11 @@ const LARGE_FILE_THRESHOLD = Math.floor(3.5 * 1024 * 1024); // 3.5 MiB
 async function putViaPresign(storeId, path, bytes, contentType) {
   const meta: any = await storeFetch(storeId, 'put-url', { path, contentType });
   if (!meta?.url) throw new Error('put-url did not return an upload URL');
-  const res = await fetch(meta.url, {
+  const res = await fetchWithDeadline(meta.url, {
     method: meta.method || 'PUT',
     headers: meta.headers || { 'Content-Type': contentType },
     body: bytes,
-  });
+  }, { kind: 'transfer', what: `dataset store presigned upload of ${path}` });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     throw new Error(`direct upload failed (${res.status}): ${t.slice(0, 200)}`);
@@ -266,7 +267,7 @@ async function putViaPresign(storeId, path, bytes, contentType) {
 async function getViaPresign(storeId, path) {
   const meta: any = await storeFetch(storeId, 'get-url', { path });
   if (!meta?.url) throw new Error('get-url did not return a download URL');
-  const res = await fetch(meta.url, { method: meta.method || 'GET' });
+  const res = await fetchWithDeadline(meta.url, { method: meta.method || 'GET' }, { kind: 'transfer', what: `dataset store presigned download of ${path}` });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     throw new Error(`direct download failed (${res.status}): ${t.slice(0, 200)}`);

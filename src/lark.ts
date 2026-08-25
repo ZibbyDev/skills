@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the path to the bundled MCP server binary. Override via
@@ -32,11 +33,11 @@ async function getTenantAccessToken() {
     return { token: tokenCache.token, host };
   }
 
-  const res = await fetch(`${host}/open-apis/auth/v3/tenant_access_token/internal`, {
+  const res = await fetchWithDeadline(`${host}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  });
+  }, { kind: 'api', what: 'Lark tenant_access_token' });
   const data = await res.json();
   if (data.code !== 0) {
     throw new Error(`Lark tenant_access_token failed: ${data.msg || data.code}`);
@@ -60,7 +61,7 @@ async function larkApi(method, path, params: any = {}) {
     },
   };
   if (method !== 'GET') init.body = JSON.stringify(params);
-  const res = await fetch(url, init);
+  const res = await fetchWithDeadline(url, init, { kind: 'api', what: `Lark ${method} ${path}` });
   const data = await res.json();
   if (data.code !== 0) {
     throw new Error(`Lark API ${path} error: ${data.msg || data.code}`);

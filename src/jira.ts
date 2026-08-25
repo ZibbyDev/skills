@@ -1,6 +1,7 @@
 import { createRequire } from 'module';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline, isTimeoutError } from './lib/http-deadline.js';
 
 const _require = createRequire(import.meta.url);
 
@@ -437,19 +438,29 @@ export function jiraApiCall(cred: any, path: string, opts: any = {}) {
  * `signal` is the missing half: the same deadline that ends the wait now also
  * ends the REQUEST.
  *
- * It is deliberately OPT-IN and inert by default. Every caller today passes
- * nothing, and `signal: undefined` is exactly what `fetch` already receives
- * when the option is absent — so the no-signal path is byte-for-byte today's
- * behaviour, on cloud and everywhere else. There is NO default timeout here on
- * purpose: this is a shared library whose callers know their own budget (a
- * board tick's is 15s, an interactive MCP tool call's is not), and inventing one
- * for them is how a legitimately slow bulk JQL query starts failing in
- * production for a reason nobody asked for.
- *
  * The signal covers the BODY read too — undici ties the response stream to the
  * request's signal — so a response whose headers arrive and whose body then
  * stalls is aborted on the same clock, which is the half a naive passthrough
  * would miss.
+ *
+ * ── AND NOW A DEFAULT UNDER IT (#1124) ─────────────────────────────────────
+ * The passthrough shipped OPT-IN and inert, with no default timeout, on this
+ * reasoning: "a shared library whose callers know their own budget … inventing
+ * one for them is how a legitimately slow bulk JQL query starts failing in
+ * production for a reason nobody asked for."
+ *
+ * That reasoning held while there was nowhere to put a budget that was not a
+ * number invented in this file. It does not hold now: `lib/http-deadline.ts`
+ * declares budgets BY WHAT IS MOVING, once, for every skill — and the slow bulk
+ * JQL query is not a counter-example to bounding, it is one of the KINDS. A
+ * `/search` is the far end COMPUTING, so it draws the `job` budget (5 min);
+ * everything else here is a row read and draws `api` (30s). The knobs raise
+ * either one without touching this file.
+ *
+ * What survived unchanged is the important half: EVERY CALLER TODAY PASSES
+ * NOTHING, and a caller that does pass a signal still gets THEIR abort — their
+ * reason, their error — because `fetchWithDeadline` COMPOSES the two rather
+ * than replacing one with the other.
  *
  * @param {string} path  Jira REST path, e.g. `/rest/api/3/issue/PROJ-1`
  * @param {{ method?: string, body?: any, headers?: object, signal?: AbortSignal }} [opts]
@@ -459,12 +470,17 @@ export async function jiraFetch(path, opts: any = {}) {
   const makeRequest = async () => {
     const cred = await resolveJiraCredential();
     const { url, headers } = jiraApiCall(cred, path, opts);
-    const res = await fetch(url, {
+    const res = await fetchWithDeadline(url, {
       method: opts.method || 'GET',
       headers,
       body: opts.body ? JSON.stringify(opts.body) : undefined,
-      // Absent ⇒ `undefined` ⇒ identical to not passing the option at all.
+      // Absent ⇒ `undefined` ⇒ the deadline below is the only signal.
       signal: opts.signal,
+    }, {
+      // A JQL search is the far end COMPUTING over an issue corpus; every other
+      // path here is a row read. See the budget note in lib/http-deadline.ts.
+      kind: /\/search\b/.test(String(path)) ? 'job' : 'api',
+      what: `Jira ${opts.method || 'GET'} ${path}`,
     });
     // ⚠️ AN ABORTED BODY READ IS NOT AN EMPTY BODY. Both reads below have
     // always swallowed their failure — which was harmless while nothing could
@@ -474,11 +490,18 @@ export async function jiraFetch(path, opts: any = {}) {
     // deadline firing during a label edit or a transition would then read back
     // as "the write succeeded", and the tracker would record a change Jira
     // never made. So an abort is rethrown and everything else keeps its
-    // existing, deliberately forgiving behaviour. Inert without a signal
-    // (`opts.signal?.aborted` is `undefined`), so every caller today is
-    // byte-for-byte unchanged.
+    // existing, deliberately forgiving behaviour.
+    //
+    // ⚠️ THE GUARD USED TO ASK `opts.signal?.aborted`, AND THAT STOPPED BEING
+    // ENOUGH THE MOMENT THIS CALL GOT A DEFAULT DEADLINE. With no caller
+    // signal, `opts.signal?.aborted` is `undefined` — so OUR OWN deadline
+    // firing mid-body-read would have been swallowed into `''`, which is
+    // exactly how this helper spells 204 No Content: a timed-out `transition`
+    // would have read back as "the write succeeded". The question the guard
+    // has to ask is about the ERROR ("did we stop waiting?"), never about
+    // which clock happened to fire, so it now asks that instead.
     const readBody = () => res.text().catch((err) => {
-      if (opts.signal?.aborted) throw err;
+      if (isTimeoutError(err) || opts.signal?.aborted) throw err;
       return '';
     });
     if (!res.ok) {

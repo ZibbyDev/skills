@@ -27,6 +27,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -89,11 +90,11 @@ async function odFetch(apiPath, opts: any = {}) {
     Accept: 'application/json',
     ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
   };
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: opts.method || 'GET',
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  }, { kind: 'api', what: `OpenDesign ${opts.method || 'GET'} ${apiPath}` });
   return parseOdResponse(res, 'OpenDesign');
 }
 
@@ -208,10 +209,10 @@ You may have access to the user's OpenDesign workspace (the Zibby-managed design
           // URL from the credential (so we know which instance to hit) but do
           // NOT send the Bearer header, per the OpenDesign contract.
           const { baseUrl } = await resolveOpenDesign();
-          const res = await fetch(`${baseUrl}/api/health`, {
+          const res = await fetchWithDeadline(`${baseUrl}/api/health`, {
             method: 'GET',
             headers: { Accept: 'application/json' },
-          });
+          }, { kind: 'api', what: 'OpenDesign GET /api/health' });
           const data = await parseOdResponse(res, 'OpenDesign');
           return JSON.stringify({ ok: true, health: data });
         }

@@ -27,6 +27,7 @@
 import { dirname, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /** Generic skill MCP-server binary — derived from import.meta.url so it works in
  *  src/ (dev), dist/ (bundled), and node_modules/@zibby/skills/ (published). */
@@ -145,19 +146,19 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
       if (!workflowType) return JSON.stringify({ ok: false, error: 'No workflowType given and WORKFLOW_TYPE is unset — nothing to trigger.' });
 
       const url = `${getApiBase()}/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowType)}/trigger`;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 20000);
-      let resp;
-      try {
-        resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-          body: JSON.stringify({ input: (args.input && typeof args.input === 'object') ? args.input : {} }),
-          signal: controller.signal,
-        });
-      } finally {
-        clearTimeout(timer);
-      }
+      // Was a hand-rolled AbortController + a literal 20000 — correct, but the
+      // shape #1124 exists to remove: a budget spelled once per call site is a
+      // budget nobody can find, tune or keep in step with its siblings. One
+      // declaration, and NOT a looser one: 'api' is 30s, which is the number
+      // @zibby/agent-workflow's `SUBGRAPH_TRIGGER_TIMEOUT_MS` already chose for
+      // this exact request, for the reason that decides it — the call goes
+      // through API Gateway, whose own 29s integration timeout means a request
+      // unanswered at 30s was coming back a 504 rather than an executionId.
+      const resp = await fetchWithDeadline(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ input: (args.input && typeof args.input === 'object') ? args.input : {} }),
+      }, { kind: 'api', what: `trigger agent ${workflowType}` });
       const text = await resp.text().catch(() => '');
       let body; try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
       if (!resp.ok) {

@@ -30,6 +30,7 @@
 
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Normalized record shape — one entry per (provider × day × dimension)
@@ -158,7 +159,7 @@ export async function fetchOpenAICosts({ startMs, endMs, groupBy = ['project_id'
     ].filter(Boolean).join('&');
     const url = `https://api.openai.com/v1/organization/costs?${params}`;
 
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetchWithDeadline(url, { headers: { Authorization: `Bearer ${token}` } }, { kind: 'api', what: 'OpenAI organization/costs' });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`OpenAI costs API ${res.status}: ${body.slice(0, 200)}`);
@@ -195,7 +196,7 @@ export async function fetchOpenAICosts({ startMs, endMs, groupBy = ['project_id'
 export async function fetchOpenAIProjects() {
   const token = await getProviderToken('openai_billing');
   const url = 'https://api.openai.com/v1/organization/projects?limit=100';
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const res = await fetchWithDeadline(url, { headers: { Authorization: `Bearer ${token}` } }, { kind: 'api', what: 'OpenAI organization/projects' });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`OpenAI projects API ${res.status}: ${body.slice(0, 200)}`);
@@ -246,9 +247,9 @@ export async function fetchAnthropicCosts({ startMs, endMs, groupBy = ['workspac
     ].filter(Boolean).join('&');
     const url = `https://api.anthropic.com/v1/organizations/cost_report?${params}`;
 
-    const res = await fetch(url, {
+    const res = await fetchWithDeadline(url, {
       headers: { 'x-api-key': token, 'anthropic-version': '2023-06-01' },
-    });
+    }, { kind: 'api', what: 'Anthropic cost_report' });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`Anthropic cost_report ${res.status}: ${body.slice(0, 200)}`);
@@ -286,9 +287,9 @@ export async function fetchAnthropicCosts({ startMs, endMs, groupBy = ['workspac
 export async function fetchAnthropicWorkspaces() {
   const token = await getProviderToken('anthropic_billing');
   const url = 'https://api.anthropic.com/v1/organizations/workspaces?limit=100';
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     headers: { 'x-api-key': token, 'anthropic-version': '2023-06-01' },
-  });
+  }, { kind: 'api', what: 'Anthropic workspaces' });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Anthropic workspaces ${res.status}: ${body.slice(0, 200)}`);
@@ -327,7 +328,7 @@ export async function fetchCursorSpend({ startMs, endMs }: any) {
   const endDate = isoDay(endMs);
   const url = `https://api.cursor.com/teams/daily-usage-data?startDate=${startDate}&endDate=${endDate}`;
 
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const res = await fetchWithDeadline(url, { headers: { Authorization: `Bearer ${token}` } }, { kind: 'api', what: 'Cursor daily-usage-data' });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Cursor daily-usage ${res.status}: ${body.slice(0, 200)}`);

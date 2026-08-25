@@ -38,6 +38,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { serializeReviewRecord, parseReviewMemory } from './reviewRecord.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 // ── auth + base URL — inlined, byte-identical to kvMemory.js (self-contained) ──
 function getSessionToken() {
@@ -74,14 +75,14 @@ async function reviewMemoryFetch(op, payload) {
   const session = getSessionToken();
   if (!session) return { __noToken: true };
   const url = `${getAccountApiUrl()}/credits/review-memory`;
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${session}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ op, ...payload }),
-  });
+  }, { kind: 'api', what: `review-memory ${op}` });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`review-memory ${op} failed (${res.status}): ${body.slice(0, 300)}`);

@@ -5,6 +5,7 @@ import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
 import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -35,11 +36,11 @@ export async function ghFetch(path, opts: any = {}) {
     'User-Agent': 'Zibby-App',
     ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
   };
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: opts.method || 'GET',
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  }, { kind: 'api', what: `GitHub ${opts.method || 'GET'} ${path}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`GitHub API ${res.status}: ${err.slice(0, 300)}`);

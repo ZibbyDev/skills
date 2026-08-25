@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * HubSpot CRM skill — search/read/create/update CRM objects (contacts,
@@ -48,11 +49,11 @@ async function hubspotFetch(path, opts: any = {}) {
     Accept: 'application/json',
     ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
   };
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: opts.method || 'GET',
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  }, { kind: 'api', what: `HubSpot ${opts.method || 'GET'} ${path}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     const hint = (res.status === 401 || res.status === 403)

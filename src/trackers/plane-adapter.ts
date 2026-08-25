@@ -25,6 +25,8 @@
  * from the public docs without a live instance — kept from the research draft.
  */
 
+import { fetchWithDeadline } from '../lib/http-deadline.js';
+
 // ── Config / auth resolution ──────────────────────────────────────────────
 //
 // Base URL: for self-hosted Plane this is the tenant's own host + /api/v1.
@@ -76,7 +78,7 @@ export async function planeFetch(path, opts: any = {}) {
     if (s) url += (url.includes('?') ? '&' : '?') + s;
   }
 
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method: opts.method || 'GET',
     headers: {
       'X-API-Key': resolvePlaneApiKey(),
@@ -85,7 +87,7 @@ export async function planeFetch(path, opts: any = {}) {
       ...opts.headers,
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  }, { kind: 'api', what: `Plane ${opts.method || 'GET'} ${path}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`Plane API ${res.status}: ${err.slice(0, 300)}`);

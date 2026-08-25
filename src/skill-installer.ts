@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { spawn } from 'child_process';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 const catalog: any = {
   jira: {
@@ -125,10 +126,10 @@ async function getAllIntegrationStatuses() {
   if (!token) return { checked: false, statuses: null, reason: 'no-session-token' };
 
   try {
-    const res = await fetch(`${getApiUrl()}/integrations/status`, {
+    const res = await fetchWithDeadline(`${getApiUrl()}/integrations/status`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${token}` },
-    });
+    }, { kind: 'api', what: 'Zibby GET /integrations/status' });
     if (!res.ok) return { checked: false, statuses: null, reason: `status-${res.status}` };
     const data = await res.json();
     return { checked: true, statuses: data || {}, reason: null };

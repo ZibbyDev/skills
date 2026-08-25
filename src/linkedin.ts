@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * LinkedIn skill — TWO capabilities over TWO distinct OAuth providers:
@@ -186,7 +187,7 @@ export async function linkedinApi(path, opts: any = {}, provider = 'linkedin_bus
       throw new Error('LinkedIn is not connected: no access token available. Connect LinkedIn in Integrations.');
     }
     const url = path.startsWith('https://') ? path : `${LINKEDIN_BASE}${path}`;
-    const res = await fetch(url, {
+    const res = await fetchWithDeadline(url, {
       method: opts.method || 'GET',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -197,7 +198,7 @@ export async function linkedinApi(path, opts: any = {}, provider = 'linkedin_bus
         ...opts.headers,
       },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
+    }, { kind: 'api', what: `LinkedIn ${opts.method || 'GET'} ${path}` });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
       throw new Error(`LinkedIn API ${res.status}: ${err.slice(0, 300)}`);
@@ -290,14 +291,14 @@ export async function uploadImage(provider, ownerUrn, imagePath, mimeType?: any)
   // 2. read bytes + resolve the SAME provider token, then single-request PUT.
   const bytes = readFileSync(imagePath);
   const token = await resolveProviderToken(provider);
-  const res = await fetch(uploadUrl, {
+  const res = await fetchWithDeadline(uploadUrl, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': mimeType || mimeForPath(imagePath),
     },
     body: bytes,
-  });
+  }, { kind: 'transfer', what: 'LinkedIn image upload' });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`LinkedIn image upload ${res.status}: ${err.slice(0, 300)}`);

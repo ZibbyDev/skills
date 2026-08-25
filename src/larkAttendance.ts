@@ -84,6 +84,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
 import { LARK_APP_ENV_KEYS, resolveLarkApp } from './larkApp.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary (bin/mcp-skill.mjs), derived
@@ -131,12 +132,12 @@ async function getTenantAccessToken() {
   if (tokenCache && tokenCache.appId === appId && tokenCache.expiresAt > Date.now()) {
     return { token: tokenCache.token, host };
   }
-  const res = await fetch(`${host}/open-apis/auth/v3/tenant_access_token/internal`, {
+  const res = await fetchWithDeadline(`${host}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     // NEVER log this body — it carries the app secret.
     body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  });
+  }, { kind: 'api', what: 'Lark tenant_access_token' });
   const data: any = await res.json();
   if (data.code !== 0) {
     // data.msg is Lark's own message and never echoes the secret back.
@@ -185,7 +186,7 @@ async function larkApi(method: string, path: string, body?: any) {
     },
   };
   if (method !== 'GET' && body !== undefined) init.body = JSON.stringify(body);
-  const res = await fetch(`${host}${path}`, init);
+  const res = await fetchWithDeadline(`${host}${path}`, init, { kind: 'api', what: `Lark Attendance ${method} ${path}` });
   const data: any = await res.json();
   if (data.code !== 0) throw new Error(larkErrorMessage(path, data.code, data.msg));
   return data.data || {};

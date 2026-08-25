@@ -33,6 +33,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary (bin/mcp-skill.mjs), derived
@@ -105,14 +106,14 @@ async function resolveDiscordAuth() {
  */
 async function discordApi(method, path, { token, body }: any = {}) {
   const auth = token.startsWith('Bot ') ? token : `Bot ${token}`;
-  const res = await fetch(`${DISCORD_API_BASE}${path}`, {
+  const res = await fetchWithDeadline(`${DISCORD_API_BASE}${path}`, {
     method,
     headers: {
       Authorization: auth,
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
+  }, { kind: 'api', what: `Discord ${method} ${path}` });
   const data = await res.json().catch(() => null);
   if (!res.ok) {
     const msg = data && (data.message || data.error) ? (data.message || data.error) : `HTTP ${res.status}`;

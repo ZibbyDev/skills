@@ -16,16 +16,32 @@
  *   1. a signal, when passed, reaches `fetch` — otherwise the whole thing is
  *      decorative;
  *   2. an abort really does reject the call, in the caller's budget;
- *   3. NOTHING CHANGES when no signal is passed — every caller in the tree
- *      today passes nothing, `signal: undefined` is identical to omitting the
- *      option, and there is deliberately NO default timeout invented here (a
- *      shared library does not know its caller's budget, and guessing one is
- *      how a legitimately slow bulk JQL starts failing in production);
+ *   3. an UNSIGNALLED call is bounded anyway, by the shared default;
  *   4. the retry must not fire under an aborted signal — `jiraFetch` calls
  *      `makeRequest` a SECOND time on a transient auth error, re-using the same
  *      spent signal, and the retry heuristic is PROSE-MATCHING ("token", "401")
  *      so a caller's own abort reason can trip it;
  *   5. the retry is otherwise untouched.
+ *
+ * ⚠️ CLAUSE 3 IS THE ONE THAT CHANGED, and this file is where the old promise
+ * was written down, so this is where the change is accounted for. The
+ * passthrough shipped (be41a28) with clause 3 reading "NOTHING CHANGES when no
+ * signal is passed … there is deliberately NO default timeout invented here (a
+ * shared library does not know its caller's budget, and guessing one is how a
+ * legitimately slow bulk JQL starts failing in production)".
+ *
+ * #1124 closed that hole, and the reasoning that held it open is what changed:
+ * there is now a place to put a budget that is not a number invented in
+ * `jira.ts` — `lib/http-deadline.ts` declares budgets BY WHAT IS MOVING, once,
+ * for every skill in the package. The slow bulk JQL is not a counter-example to
+ * bounding; it is one of the KINDS ('job', 5 minutes, because a `/search` is
+ * the far end COMPUTING). What did NOT change is the half that mattered: a
+ * caller that passes a signal still gets THEIR abort, with their reason —
+ * `fetchWithDeadline` COMPOSES the two signals rather than replacing one.
+ *
+ * The visible consequence, pinned below: `fetch` no longer receives the
+ * caller's signal OBJECT, it receives a composed one that aborts when EITHER
+ * fires. Identity was never the contract — "an abort really does abort" is.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -40,10 +56,14 @@ vi.mock('@zibby/core/backend-client.js', () => ({
 const { jiraFetch } = await import('../jira.js');
 
 const JIRA_ENV = ['JIRA_API_TOKEN', 'JIRA_EMAIL', 'JIRA_BASE_URL', 'ATLASSIAN_INSTANCE_URL'];
+// Budgets are clamped to a 1s floor, so a test can shrink one to fail in a
+// second rather than parking the suite for the production default.
+const BUDGET_ENV = ['SKILL_API_TIMEOUT_MS', 'SKILL_JOB_TIMEOUT_MS', 'SKILL_TRANSFER_TIMEOUT_MS'];
 const ORIG: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   for (const k of JIRA_ENV) { ORIG[k] = process.env[k]; delete process.env[k]; }
+  for (const k of BUDGET_ENV) { ORIG[k] = process.env[k]; delete process.env[k]; }
   resolveIntegrationToken.mockReset();
   clearTokenCache.mockReset();
   resolveIntegrationToken.mockResolvedValue({ token: 'oauth_tok', cloudId: 'cloud-123' });
@@ -51,6 +71,9 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const k of JIRA_ENV) {
+    if (ORIG[k] === undefined) delete process.env[k]; else process.env[k] = ORIG[k]!;
+  }
+  for (const k of BUDGET_ENV) {
     if (ORIG[k] === undefined) delete process.env[k]; else process.env[k] = ORIG[k]!;
   }
   vi.unstubAllGlobals();
@@ -72,7 +95,7 @@ function neverAnswers(opts: any) {
 }
 
 describe('the signal reaches fetch and really aborts', () => {
-  it('forwards the caller’s signal to fetch', async () => {
+  it('forwards the caller’s abort to fetch — composed with the default deadline', async () => {
     const seen: any[] = [];
     vi.stubGlobal('fetch', vi.fn(async (_url: any, opts: any = {}) => {
       seen.push(opts.signal);
@@ -83,7 +106,13 @@ describe('the signal reaches fetch and really aborts', () => {
     await jiraFetch('/rest/api/3/project', { signal: ac.signal });
 
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toBe(ac.signal); // the SAME signal object, not a copy
+    // NOT the same object any more — the request rides a signal that aborts on
+    // EITHER clock. Identity was never the contract; this is:
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[0].aborted).toBe(false);
+    ac.abort(new Error('caller gave up'));
+    expect(seen[0].aborted).toBe(true);
+    expect(String((seen[0].reason as any)?.message)).toBe('caller gave up');
   });
 
   it('a request that never answers rejects on the caller’s deadline', async () => {
@@ -134,8 +163,8 @@ describe('the signal reaches fetch and really aborts', () => {
   });
 });
 
-describe('NO signal ⇒ byte-for-byte today’s behaviour (every existing caller)', () => {
-  it('passes signal: undefined, which is identical to omitting the option', async () => {
+describe('NO signal ⇒ the shared default deadline (every existing caller)', () => {
+  it('leaves the request itself unchanged — same URL, same auth, plus a deadline', async () => {
     const seen: any[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: any, opts: any = {}) => {
       seen.push({ url: String(url), opts });
@@ -144,24 +173,55 @@ describe('NO signal ⇒ byte-for-byte today’s behaviour (every existing caller
 
     await expect(jiraFetch('/rest/api/3/issue/KAN-1')).resolves.toEqual({ key: 'KAN-1' });
 
-    expect(seen[0].opts.signal).toBeUndefined();
-    expect('signal' in seen[0].opts).toBe(true); // present-but-undefined ≡ absent, to fetch
-    // And the request itself is unchanged.
     expect(seen[0].url).toBe('https://api.atlassian.com/ex/jira/cloud-123/rest/api/3/issue/KAN-1');
     expect(seen[0].opts.headers.Authorization).toBe('Bearer oauth_tok');
+    // The ONE difference from before #1124: it can no longer hang.
+    expect(seen[0].opts.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it('invents NO default timeout — an unsignalled call is bounded by nobody but its caller', async () => {
-    // Deliberate: a shared library does not know its caller's budget. The board
-    // tick's is 15s; an interactive MCP tool call's is not. Inventing one here
-    // would silently start failing legitimately slow bulk queries.
-    const seen: any[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (_url: any, opts: any = {}) => {
-      seen.push(opts.signal);
-      return { ok: true, status: 200, text: async () => '{}' } as any;
-    }));
-    await jiraFetch('/rest/api/3/project');
-    expect(seen[0]).toBeUndefined();
+  it('an unsignalled Jira that never answers now FAILS instead of parking the run', async () => {
+    // This is the whole point. Every caller in the tree passes nothing, so
+    // before #1124 this call had no bound at all and a stalled Atlassian
+    // connection parked the tool call — and the run behind it — until the
+    // container watchdog fired.
+    process.env.SKILL_API_TIMEOUT_MS = '1000'; // the clamp floor, so the test is fast
+    vi.stubGlobal('fetch', vi.fn((_url: any, opts: any) => neverAnswers(opts)));
+
+    const t0 = Date.now();
+    await expect(jiraFetch('/rest/api/3/project')).rejects.toThrow(
+      /Jira GET \/rest\/api\/3\/project TIMED OUT after 1000ms against api\.atlassian\.com \(SKILL_API_TIMEOUT_MS\)/,
+    );
+    expect(Date.now() - t0).toBeLessThan(3000);
+  });
+
+  it('a JQL search draws the LONGER budget — the far end is computing, not reading a row', async () => {
+    // The objection that kept jiraFetch unbounded ("a legitimately slow bulk
+    // JQL query") is answered by picking the right KIND, not by having none.
+    process.env.SKILL_JOB_TIMEOUT_MS = '1000';
+    vi.stubGlobal('fetch', vi.fn((_url: any, opts: any) => neverAnswers(opts)));
+    await expect(jiraFetch('/rest/api/3/search/jql', { method: 'POST', body: { jql: 'project = KAN' } }))
+      .rejects.toThrow(/TIMED OUT after 1000ms against api\.atlassian\.com \(SKILL_JOB_TIMEOUT_MS\)/);
+  });
+
+  it('an unsignalled body read that stalls is NOT reported as a successful no-content write', async () => {
+    /**
+     * THE OTHER HALF OF THE SAME DEFECT, and the reason the guard inside
+     * `jiraFetch` had to stop asking `opts.signal?.aborted`. With no caller
+     * signal that question is `undefined`, so OUR deadline firing mid-body-read
+     * would have been swallowed into `''` — which is exactly how this helper
+     * spells 204 No Content, the answer a successful `transition` returns. A
+     * timed-out write would have read back as "the write succeeded".
+     */
+    process.env.SKILL_API_TIMEOUT_MS = '1000';
+    vi.stubGlobal('fetch', vi.fn(async (_url: any, opts: any) => ({
+      ok: true, status: 204, text: () => neverAnswers(opts),
+    } as any)));
+
+    const result = await jiraFetch('/rest/api/3/issue/KAN-1/transitions', {
+      method: 'POST', body: { transition: { id: '31' } },
+    }).catch((e) => e);
+
+    expect(result).toBeInstanceOf(Error);   // NOT `{}`
   });
 });
 
@@ -181,7 +241,12 @@ describe('the retry and the signal', () => {
     await expect(jiraFetch('/rest/api/3/project', { signal: ac.signal }))
       .rejects.toThrow('token refresh cancelled');
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // ZERO, not one. `fetchWithDeadline` refuses a spent caller signal BEFORE
+    // it opens a socket, so the guard now bites one layer earlier than when
+    // this test was written (it used to assert 1 — the first attempt went out
+    // and only the RETRY was suppressed). Both satisfy the clause that matters:
+    // once nobody is listening, we do not go back to Atlassian.
+    expect(fetchMock).toHaveBeenCalledTimes(0);
     expect(clearTokenCache).not.toHaveBeenCalled();
   });
 
@@ -197,9 +262,14 @@ describe('the retry and the signal', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(clearTokenCache).toHaveBeenCalledWith('jira');
-    // The retry carries the SAME still-live signal — the caller's budget spans
-    // the whole call, retry included.
-    expect(fetchMock.mock.calls[1][1].signal).toBe(ac.signal);
+    // The retry rides its own FRESH deadline (a second attempt deserves a
+    // second budget) that still aborts on the caller's clock.
+    const retrySignal = fetchMock.mock.calls[1][1].signal;
+    expect(retrySignal).toBeInstanceOf(AbortSignal);
+    expect(retrySignal).not.toBe(fetchMock.mock.calls[0][1].signal);
+    expect(retrySignal.aborted).toBe(false);
+    ac.abort(new Error('caller gave up'));
+    expect(retrySignal.aborted).toBe(true);
   });
 
   it('the unsignalled retry path is untouched', async () => {

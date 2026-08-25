@@ -21,6 +21,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the path to the bundled MCP server binary. Caller may
@@ -100,7 +101,7 @@ export async function sentryFetch(path, opts: any = {}) {
   if (opts.body != null) {
     init.body = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
   }
-  const res = await fetch(url, init);
+  const res = await fetchWithDeadline(url, init, { kind: 'api', what: `Sentry ${opts.method || 'GET'} ${path}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`Sentry API ${res.status}: ${err.slice(0, 300)}`);
@@ -150,9 +151,10 @@ export async function resolveSentryIssueId(issueRef) {
   if (!ref) throw new Error('resolveSentryIssueId: issueRef is required');
   if (/^\d+$/.test(ref)) return ref; // already numeric — no lookup needed
   const { token, organizationSlug, baseUrl } = await resolveIntegrationToken('sentry');
-  const res = await fetch(
+  const res = await fetchWithDeadline(
     `${sentryBaseUrl(baseUrl)}/api/0/organizations/${sentryOrg(organizationSlug)}/shortids/${encodeURIComponent(ref)}/`,
     { headers: { Authorization: `Bearer ${token}` } },
+    { kind: 'api', what: 'Sentry GET shortids' },
   );
   if (!res.ok) {
     const err = await res.text().catch(() => '');
@@ -174,9 +176,9 @@ export async function sentryGetIssue(issueId) {
   if (!issueId) throw new Error('sentryGetIssue: issueId is required');
   const numericId = await resolveSentryIssueId(issueId);
   const { token, baseUrl } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/`, {
+  const res = await fetchWithDeadline(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, { kind: 'api', what: `Sentry GET issue ${numericId}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`Sentry API ${res.status}: ${err.slice(0, 300)}`);
@@ -219,11 +221,11 @@ export async function sentryUpdateIssue(issueId, update: any = {}) {
   }
   const numericId = await resolveSentryIssueId(issueId); // accept numeric id OR shortId
   const { token, baseUrl } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/`, {
+  const res = await fetchWithDeadline(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, { kind: 'api', what: `Sentry PUT issue ${numericId}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     if (res.status === 403) {
@@ -252,11 +254,11 @@ export async function sentryAddComment(issueId, text) {
   if (!text || !String(text).trim()) throw new Error('sentryAddComment: text is required');
   const numericId = await resolveSentryIssueId(issueId); // accept numeric id OR shortId
   const { token, baseUrl } = await resolveIntegrationToken('sentry');
-  const res = await fetch(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/comments/`, {
+  const res = await fetchWithDeadline(`${sentryBaseUrl(baseUrl)}/api/0/issues/${numericId}/comments/`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: String(text) }),
-  });
+  }, { kind: 'api', what: `Sentry POST issue ${numericId} comment` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     if (res.status === 403) {

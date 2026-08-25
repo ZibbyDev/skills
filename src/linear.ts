@@ -37,6 +37,7 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -81,14 +82,14 @@ function resolveLinearAuth() {
  * @returns {Promise<any>} the GraphQL `data` payload
  */
 export async function linearFetch(query, variables: any = {}) {
-  const res = await fetch(LINEAR_GRAPHQL_URL, {
+  const res = await fetchWithDeadline(LINEAR_GRAPHQL_URL, {
     method: 'POST',
     headers: {
       'Authorization': resolveLinearAuth(),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ query, variables }),
-  });
+  }, { kind: 'api', what: 'Linear GraphQL' });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     throw new Error(`Linear API ${res.status}: ${err.slice(0, 300)}`);

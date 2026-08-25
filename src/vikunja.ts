@@ -47,6 +47,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { INTEGRATIONS } from './integrations.js';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 function resolveSkillBin(): string | null {
   if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
@@ -122,14 +123,14 @@ async function vkFetch(method: string, path: string, opts: { query?: any; body?:
     const s = qs.toString();
     if (s) url += `?${s}`;
   }
-  const res = await fetch(url, {
+  const res = await fetchWithDeadline(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
     },
     ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
-  });
+  }, { kind: 'api', what: `Vikunja ${method} ${path}` });
   const text = await res.text();
   if (!res.ok) {
     // The URL carries no credential (the token rides in a header), so quoting

@@ -31,6 +31,7 @@ import { fileURLToPath } from 'url';
 import { basename, dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
+import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary (bin/mcp-skill.mjs), derived
@@ -188,7 +189,7 @@ export async function googleApi(url, opts: any = {}) {
     // call. `opts.rawBody` + `opts.contentType` carry a non-JSON body (the
     // Drive multipart/related upload) through the SAME chokepoint + retry.
     const token = await resolveGoogleBearer();
-    const res = await fetch(url, {
+    const res = await fetchWithDeadline(url, {
       method: opts.method || 'GET',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -199,7 +200,7 @@ export async function googleApi(url, opts: any = {}) {
         ...opts.headers,
       },
       body: opts.rawBody ? opts.rawBody : (opts.body ? JSON.stringify(opts.body) : undefined),
-    });
+    }, { kind: opts.rawBody ? 'transfer' : 'api', what: `Google ${opts.method || 'GET'} ${String(url).split('?')[0]}` });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
       throw new Error(`Google API ${res.status}: ${err.slice(0, 300)}`);
