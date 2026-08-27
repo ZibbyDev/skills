@@ -667,6 +667,11 @@ async function embeddingState(brainDir) {
   return { mode: have ? 'vector' : 'lexical', stale: want !== have };
 }
 
+/** Has this brain been initialised on disk? The same fact `ensureBrain` keys on. */
+async function brainExists(brainDir) {
+  return _initialized.has(brainDir) || pathExists(join(brainDir, '.gbrain', 'config.json'));
+}
+
 /** Create + init the kbId's GBrain brain once (idempotent). */
 async function ensureBrain(brainDir) {
   if (_initialized.has(brainDir)) return;
@@ -1283,6 +1288,15 @@ export async function ingest(kbId, docs) {
 export async function query(kbId, queryText, topK) {
   const brainDir = brainDirFor(kbId);
   return withBrainLock(brainDir, async () => {
+    // A READ NEVER PROVISIONS. A brain that was never written has nothing to
+    // retrieve, so answer empty at once instead of paying `gbrain init --pglite`
+    // (tens of seconds cold) inside the caller's retrieval budget — MAGNUM's
+    // first tick after deploy timed out its 10s KB window exactly here, on a
+    // brain its own `ingest` created seconds later. Creation stays with the
+    // writers (ingest/delete).
+    if (!(await brainExists(brainDir))) {
+      return { results: [], mode: embeddingsEnabled() ? 'vector' : 'lexical', stale: false };
+    }
     await ensureBrain(brainDir);
     const map = await loadMap(brainDir);
     // FLOOR THE FETCH DEPTH. GBrain's `limit` is not "top-N of one ranking" —
