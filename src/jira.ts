@@ -348,16 +348,26 @@ export async function resolveJiraCredential() {
   }
 
   const data: any = await resolveIntegrationToken('jira');
-  if (data?.cloudId) {
+  // WHICH SHAPE — from what the resolver SAYS, falling back to what it carries.
+  // `authType` is the answer given by the side that read the integration row;
+  // `cloudId` is the same fact inferred from a side effect, and is what this
+  // read before the resolver said anything (a backend predating that still
+  // answers the old way, so the inference stays as the fallback, not as a
+  // second opinion).
+  const isOauth = data?.authType ? data.authType !== 'token' : !!data?.cloudId;
+  if (isOauth) {
     return { authType: 'oauth', accessToken: data.token, cloudId: data.cloudId };
   }
-  // No cloudId ⇒ an API-token connection. `/jira/token` gives us the token and
-  // the instance; the email is the one field it does not carry.
+  // An API-token connection: HTTP Basic, `email:apiToken`. The resolver carries
+  // the email for this shape (integration-tokens.js resolveJira) — it did NOT
+  // until 2026-08-30, and the env trio was the only thing that made this branch
+  // usable, so a caller without it (the Copilot's MCP child) failed on every
+  // call with "no account email".
   return {
     authType: 'token',
     apiToken: data?.token,
     email: envEmail || data?.email || '',
-    baseUrl: envBase || data?.instanceUrl || data?.baseUrl || process.env.ATLASSIAN_INSTANCE_URL || '',
+    baseUrl: envBase || data?.baseUrl || data?.instanceUrl || process.env.ATLASSIAN_INSTANCE_URL || '',
   };
 }
 

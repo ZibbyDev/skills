@@ -43,7 +43,13 @@ export async function ghFetch(path, opts: any = {}) {
   }, { kind: 'api', what: `GitHub ${opts.method || 'GET'} ${path}` });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
-    throw new Error(`GitHub API ${res.status}: ${err.slice(0, 300)}`);
+    // The STATUS travels on the error object, not only inside its sentence. A
+    // caller that has to branch on "was this a permission answer" was otherwise
+    // left regex-ing the message — diagnosing from prose, which drifts the first
+    // time the wording changes (see github_list_repos' installation fallback).
+    const e: any = new Error(`GitHub API ${res.status}: ${err.slice(0, 300)}`);
+    e.status = res.status;
+    throw e;
   }
   if (opts.raw) return res.text();
   return res.json();
@@ -765,21 +771,70 @@ When user just wants to "look at" or "read" files (not clone):
               || (m.description && m.description.toLowerCase().includes(q));
           };
 
-          // If no owner specified, use GitHub App installation repositories endpoint
+          // ── NO OWNER: "everything this credential can see" ───────────────
+          // TWO ENDPOINTS, AND THE TOKEN DECIDES WHICH — not the arguments.
+          // A GitHub App installation token can ONLY list through
+          // /installation/repositories; a user token (OAuth or PAT) can only
+          // list through /user/repos, and GitHub answers each one's wrong
+          // endpoint with a 403 that says so: "You must authenticate with an
+          // installation access token in order to list repositories for an
+          // installation."
+          //
+          // This branch used to call the installation endpoint unconditionally,
+          // so on a user-token connection `github_list_repos` was a guaranteed
+          // 403 — the model could search all of GitHub but could not name a
+          // single one of the user's own repos. The argument it branched on
+          // (`owner`) says nothing about which kind of credential arrived.
+          //
+          // The discriminator is GitHub's own answer. We ask the installation
+          // endpoint first (unchanged for App installs, no extra request for
+          // them) and read a 401/403 as "this is not an installation token",
+          // then list the way a user token must. Anything else — a 404, a 5xx,
+          // a network error — is a real failure and still propagates.
           if (!owner) {
             let page = 1;
             let hasMore = true;
-            
+            let userTokenFallback = false;
+
             while (hasMore && allRepos.length < maxResults) {
               const url = `/installation/repositories?per_page=${perPage}&page=${page}`;
-              const data = await ghFetch(url);
+              let data;
+              try {
+                data = await ghFetch(url);
+              } catch (e: any) {
+                if ((e?.status === 401 || e?.status === 403) && page === 1) {
+                  userTokenFallback = true;
+                  break;
+                }
+                throw e;
+              }
               const repos = data.repositories || [];
-              
+
               if (repos.length === 0) break;
-              
+
               allRepos = allRepos.concat(repos);
               hasMore = repos.length === perPage;
               page++;
+            }
+
+            if (userTokenFallback) {
+              // `affiliation` is what makes this the user's WHOLE accessible set
+              // rather than only what they personally own — the closest match to
+              // what an installation token returns.
+              page = 1;
+              hasMore = true;
+              while (hasMore && allRepos.length < maxResults) {
+                const data = await ghFetch(
+                  `/user/repos?per_page=${perPage}&page=${page}`
+                  + `&affiliation=owner,collaborator,organization_member`
+                  + `&sort=${sort || 'updated'}&direction=${direction || 'desc'}`,
+                );
+                const repos = Array.isArray(data) ? data : [];
+                if (repos.length === 0) break;
+                allRepos = allRepos.concat(repos);
+                hasMore = repos.length === perPage;
+                page++;
+              }
             }
             
             const matched = allRepos.map(mapRepo).filter(matchesQuery);

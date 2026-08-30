@@ -37,6 +37,8 @@ vi.mock('@zibby/core/backend-client.js', () => ({
 
 const { jiraFetch, jiraApiCall, resolveJiraCredential } = await import('../jira.js');
 
+const B64_SELFHOST = 'Basic ' + Buffer.from('leo.c@zibby.dev:ATATT_api_token').toString('base64');
+
 const JIRA_ENV = ['JIRA_API_TOKEN', 'JIRA_EMAIL', 'JIRA_BASE_URL', 'ATLASSIAN_INSTANCE_URL'];
 const ORIG: Record<string, string | undefined> = {};
 
@@ -192,6 +194,55 @@ describe('resolveJiraCredential picks the shape from what the credential carries
     resolveIntegrationToken.mockResolvedValue({ token: 't', instanceUrl: 'https://i.example' });
     await expect(resolveJiraCredential()).resolves.toMatchObject({
       authType: 'token', apiToken: 't', baseUrl: 'https://i.example',
+    });
+  });
+
+  // ── The resolver now carries the WHOLE token credential (2026-08-30) ─────
+  // Until this date `/integrations/token/jira` answered a token connection with
+  // {token, instanceUrl} and NOTHING ELSE, so the email — the Basic-auth
+  // USERNAME, half the credential — had to come from JIRA_EMAIL in the env. Any
+  // caller without that env died on "Jira token connection has no account
+  // email", which is exactly what the Copilot's MCP child did on every call
+  // while the dashboard showed the account address it was missing.
+  //
+  // TWO PLACES THAT MUST AGREE (CLAUDE.md): the emitter is
+  // backend/src/handlers/integration-tokens.js `resolveJira`, the reader is
+  // here. The payloads below are that response's shape — change one side and
+  // these go red naming the field.
+  it('authType:token + email + baseUrl from the resolver — NO env needed', async () => {
+    resolveIntegrationToken.mockResolvedValue({
+      provider: 'jira', authType: 'token', token: 'ATATT_api_token',
+      email: 'leo.c@zibby.dev', baseUrl: 'https://zibby.atlassian.net',
+      instanceUrl: 'https://zibby.atlassian.net',
+    });
+    const seen = captureRequest();
+
+    await jiraFetch('/rest/api/3/project');
+
+    expect(seen[0].url).toBe('https://zibby.atlassian.net/rest/api/3/project');
+    expect(seen[0].headers.Authorization).toBe(B64_SELFHOST);
+  });
+
+  it('a DECLARED authType wins over guessing from cloudId', async () => {
+    // A token row that also happens to carry a cloudId must NOT be read as
+    // OAuth: the row said what it is, and inference is only the fallback.
+    resolveIntegrationToken.mockResolvedValue({
+      authType: 'token', token: 'ATATT_api_token', cloudId: 'stale-cloud-id',
+      email: 'leo.c@zibby.dev', baseUrl: 'https://zibby.atlassian.net',
+    });
+    await expect(resolveJiraCredential()).resolves.toMatchObject({
+      authType: 'token', email: 'leo.c@zibby.dev', baseUrl: 'https://zibby.atlassian.net',
+    });
+  });
+
+  it('an OLD backend (no authType, no email) still resolves by inference', async () => {
+    // The pre-2026-08-30 payload, verbatim. It stays readable — the inference is
+    // a fallback, not a second opinion — it simply needs JIRA_EMAIL as before.
+    resolveIntegrationToken.mockResolvedValue({
+      token: 'ATATT_api_token', instanceUrl: 'https://zibby.atlassian.net',
+    });
+    await expect(resolveJiraCredential()).resolves.toMatchObject({
+      authType: 'token', apiToken: 'ATATT_api_token', email: '',
     });
   });
 
