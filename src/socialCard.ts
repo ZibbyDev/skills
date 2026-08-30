@@ -401,9 +401,8 @@ post image. No browser, no external service — the data never leaves the machin
       args: [bin, '../dist/socialCard.js', 'socialCardSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt instead of deferring behind the
-      // SDK's ToolSearch (same as chartRender.js / github.js).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

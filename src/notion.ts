@@ -541,9 +541,8 @@ Do not block the task if Notion is unavailable — these tools return { ok:false
       args: [bin, '../dist/notion.js', 'notionSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt instead of deferring behind the
-      // SDK's ToolSearch (see github.js / sentry.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

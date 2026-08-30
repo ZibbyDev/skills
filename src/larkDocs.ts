@@ -443,9 +443,8 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
       args: [bin, '../dist/larkDocs.js', 'larkDocsSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt instead of deferring behind the
-      // SDK's ToolSearch (see notion.js / googleDocs.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

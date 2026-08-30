@@ -915,9 +915,8 @@ records this automatically; you don't store it yourself.)`,
       args: [bin, '../dist/artifact.js', 'artifactSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt instead of deferring behind the SDK's
-      // ToolSearch (same as kvMemory.js) — the Copilot loads this as a CORE skill.
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

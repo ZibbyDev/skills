@@ -1263,8 +1263,8 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
       args: [bin, '../dist/gitlab.js', 'gitlabSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt (see sentry.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

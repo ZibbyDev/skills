@@ -108,10 +108,8 @@ You have access to the user's Slack workspace. Use these tools:
       command: 'node',
       args: [bin],
       env,
-      // Same `alwaysLoad: true` as larkSkill / sentrySkill. Forces
-      // MCP tools into the initial prompt; without it they sit
-      // behind ToolSearch where the LLM keyword search misses them.
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

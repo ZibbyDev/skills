@@ -54,7 +54,9 @@ describe('linkedinSkill structure', () => {
     expect(spec).not.toBeNull();
     expect(spec.command).toBe('node');
     expect(spec.args).toEqual(expect.arrayContaining(['../dist/linkedin.js', 'linkedinSkill']));
-    expect(spec.alwaysLoad).toBe(true);
+    // Deferred behind ToolSearch, deliberately — no skill forces its tools into
+    // the prompt any more (MCP_TOOL_LOADING.md).
+    expect(spec.alwaysLoad).toBeUndefined();
     expect(linkedinSkill.allowedTools).toEqual(['mcp__linkedin__*']);
   });
 });

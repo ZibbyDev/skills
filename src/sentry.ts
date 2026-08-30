@@ -327,16 +327,8 @@ You have access to the user's Sentry. Use these tools:
       command: 'node',
       args: [bin],
       env,
-      // Force tools into the system prompt instead of deferring them
-      // behind ToolSearch (Claude Agent SDK default). Without this,
-      // the LLM's `ToolSearch({"query":"sentry"})` returns nothing for
-      // MCP-served tools even when the server is connected — we
-      // verified this against Fargate logs. As a side effect this
-      // blocks startup until the server completes its initial MCP
-      // handshake (capped at the SDK's 5s connect timeout), so any
-      // bridge spawn failure surfaces immediately instead of silently
-      // leaving the LLM tool-less.
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

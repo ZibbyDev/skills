@@ -102,7 +102,8 @@ notify. Post brief milestones so they know it's alive:
       args: [bin, '../dist/chatProgress.js', 'chatProgressSkill'],
       env,
       description: this.description,
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

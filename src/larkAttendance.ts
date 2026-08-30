@@ -386,9 +386,8 @@ These tools return { ok:false, error } on failure — read the error, it names t
       args: [bin, '../dist/larkAttendance.js', 'larkAttendanceSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt instead of deferring behind the
-      // SDK's ToolSearch (see larkDocs.ts / notion.ts resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

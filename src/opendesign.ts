@@ -196,8 +196,8 @@ You may have access to the user's OpenDesign workspace (the Zibby-managed design
       args: [bin, '../dist/opendesign.js', 'opendesignSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt (see figma.js / linear.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

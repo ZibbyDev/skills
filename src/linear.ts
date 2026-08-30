@@ -246,8 +246,8 @@ You have direct access to the user's Linear workspace (GraphQL API). Tools:
       args: [bin, '../dist/linear.js', 'linearSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt (see sentry.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

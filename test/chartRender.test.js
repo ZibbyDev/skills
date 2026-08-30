@@ -86,7 +86,9 @@ describe('resolve() spawns the generic MCP bin (NOT command:null)', () => {
     expect(r.command).toBe('node');
     expect(r.args).toEqual([expect.stringContaining('mcp-skill.mjs'), '../dist/chartRender.js', 'chartRenderSkill']);
     expect(r.type).toBe('stdio');
-    expect(r.alwaysLoad).toBe(true);
+    // Deferred behind ToolSearch, deliberately — no skill forces its tools into
+    // the prompt any more (MCP_TOOL_LOADING.md).
+    expect(r.alwaysLoad).toBeUndefined();
     expect(r.env.ZIBBY_NODE_SESSION_PATH).toBe(join('/tmp/sess', 'render'));
     expect(r.env.ZIBBY_SESSION_PATH).toBe('/tmp/sess');
   });

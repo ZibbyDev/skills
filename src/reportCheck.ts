@@ -1148,9 +1148,8 @@ never saw your chart and a clean verdict means nothing.`,
       args: [bin, '../dist/reportCheck.js', 'reportCheckSkill'],
       env: {},
       description: this.description,
-      // Force the tool into the system prompt rather than deferring it behind
-      // the SDK's ToolSearch — a pre-flight the model never sees is no gate.
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

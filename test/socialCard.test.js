@@ -46,7 +46,9 @@ describe('socialCardSkill structure', () => {
     expect(spec).not.toBeNull();
     expect(spec.command).toBe('node');
     expect(spec.args).toEqual(expect.arrayContaining(['../dist/socialCard.js', 'socialCardSkill']));
-    expect(spec.alwaysLoad).toBe(true);
+    // Deferred behind ToolSearch, deliberately — no skill forces its tools into
+    // the prompt any more (MCP_TOOL_LOADING.md).
+    expect(spec.alwaysLoad).toBeUndefined();
   });
 
   it('resolve() forwards the session output-dir env to the MCP child', () => {

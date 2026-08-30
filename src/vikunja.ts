@@ -275,7 +275,8 @@ You can operate the user's Vikunja board directly. Tools:
       args: [bin, '../dist/vikunja.js', 'vikunjaSkill'],
       env,
       description: this.description,
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

@@ -61,7 +61,9 @@ describe('resolve() spawns the generic MCP bin (NOT command:null)', () => {
     expect(r.command).toBe('node');
     expect(r.args).toEqual([expect.stringContaining('mcp-skill.mjs'), '../dist/kvMemory.js', 'kvMemorySkill']);
     expect(r.type).toBe('stdio');
-    expect(r.alwaysLoad).toBe(true);
+    // Deferred behind ToolSearch, deliberately — no skill forces its tools into
+    // the prompt any more (MCP_TOOL_LOADING.md).
+    expect(r.alwaysLoad).toBeUndefined();
     expect(r.env.PROJECT_API_TOKEN).toBe('zby_testprojecttoken');
     expect(r.env.ZIBBY_ACCOUNT_API_URL).toBe('https://api-test.zibby.app');
     expect(r.env.WORKFLOW_TYPE).toBe('github-ai-scout');

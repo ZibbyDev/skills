@@ -182,8 +182,8 @@ You can post to the user's Discord server as their bot. Tools:
       args: [bin, '../dist/discord.js', 'discordSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt (see sentry.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

@@ -56,7 +56,9 @@ describe('googleDocsSkill structure', () => {
     expect(spec).not.toBeNull();
     expect(spec.command).toBe('node');
     expect(spec.args).toEqual(expect.arrayContaining(['../dist/googleDocs.js', 'googleDocsSkill']));
-    expect(spec.alwaysLoad).toBe(true);
+    // Deferred behind ToolSearch, deliberately — no skill forces its tools into
+    // the prompt any more (MCP_TOOL_LOADING.md).
+    expect(spec.alwaysLoad).toBeUndefined();
     expect(googleDocsSkill.allowedTools).toEqual(['mcp__gdocs__*']);
   });
 

@@ -56,7 +56,9 @@ describe('notionSkill structure', () => {
     expect(spec).not.toBeNull();
     expect(spec.command).toBe('node');
     expect(spec.args).toEqual(expect.arrayContaining(['../dist/notion.js', 'notionSkill']));
-    expect(spec.alwaysLoad).toBe(true);
+    // Deferred behind ToolSearch, deliberately — no skill forces its tools into
+    // the prompt any more (MCP_TOOL_LOADING.md).
+    expect(spec.alwaysLoad).toBeUndefined();
     // and the skill advertises its mcp__notion__* tool prefix
     expect(notionSkill.allowedTools).toEqual(['mcp__notion__*']);
   });

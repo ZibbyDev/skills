@@ -223,8 +223,8 @@ You have access to the user's Figma files via the Figma REST API. Every tool tha
       args: [bin, '../dist/figma.js', 'figmaSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt (see sentry.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

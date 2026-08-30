@@ -372,8 +372,8 @@ Notes:
       args: [bin, '../dist/linkedin.js', 'linkedinSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt (see notion.js / figma.js resolve()).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

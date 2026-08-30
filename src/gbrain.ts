@@ -218,9 +218,8 @@ Tools:
       args: [bin, '../dist/gbrain.js', 'gbrainSkill'],
       env,
       description: this.description,
-      // Force tools into the system prompt rather than deferring behind the
-      // SDK's ToolSearch (same as kvMemory / datasetStore).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

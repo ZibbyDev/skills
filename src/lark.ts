@@ -151,10 +151,8 @@ When responding to an incoming event, prefer lark_reply with the source message_
       command: 'node',
       args: [bin],
       env,
-      // Same `alwaysLoad: true` as sentrySkill — see comment there.
-      // Forces MCP tools into the initial prompt; otherwise they sit
-      // behind ToolSearch where the LLM keyword search misses them.
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

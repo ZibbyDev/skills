@@ -154,9 +154,8 @@ empty, call index_status, and only re-index (index_repository) if needed.`,
       args: [],
       env,
       description: this.description,
-      // Force the tools into the system prompt rather than deferring them
-      // behind the SDK's ToolSearch — same rationale as kvMemory/github.
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 

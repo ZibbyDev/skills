@@ -607,9 +607,8 @@ suggestions. Don't hand-lint what the tool already covers, and don't re-run it.`
       args: [bin, '../dist/code-scan.js', 'codeScanSkill'],
       env: {},
       description: this.description,
-      // Force tools into the system prompt instead of deferring behind the SDK's
-      // ToolSearch (same as chartRender.js / kvMemory.js).
-      alwaysLoad: true,
+      // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
+      // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
   },
 
