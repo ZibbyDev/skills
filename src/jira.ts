@@ -1,14 +1,45 @@
-import { createRequire } from 'module';
+import { existsSync } from 'fs';
+import { dirname, resolve as resolvePath } from 'path';
+import { fileURLToPath } from 'url';
 import { resolveIntegrationToken, clearTokenCache } from '@zibby/core/backend-client.js';
 import { INTEGRATIONS } from './integrations.js';
 import { fetchWithDeadline, isTimeoutError } from './lib/http-deadline.js';
 import { markupToAdf, plainTextToAdf, adfToMarkup } from './lib/markup.js';
 
-const _require = createRequire(import.meta.url);
-
-function resolveJiraBin() {
-  if (process.env.MCP_JIRA_PATH) return process.env.MCP_JIRA_PATH;
-  try { return _require.resolve('@zibby/mcp-jira/index.js'); } catch { return null; }
+/**
+ * THE GENERIC SKILL MCP BINARY — the same one github/gitlab/linear spawn.
+ *
+ * WHAT THIS REPLACED, AND THE BUG IT CLOSES (2026-08-30)
+ * ─────────────────────────────────────────────────────
+ * `resolve()` used to spawn `@zibby/mcp-jira` — A PACKAGE THAT DOES NOT EXIST.
+ * It is not in this monorepo (packages/mcps holds browser, cli and memory) and
+ * it has never been published; `require.resolve` therefore always threw and
+ * `resolve()` always returned `null`. A null resolve is not an error anywhere:
+ * the strategy simply registers no MCP server for the skill, so a turn that
+ * selected `jira` — connected integration, skill in the set, everything the
+ * logs report as healthy — reached the model with ZERO `jira_*` tools.
+ *
+ * WHAT THAT LOOKED LIKE. The Copilot could still call the control-plane's
+ * `zibby_*` readers (which list Jira PROJECTS), so it truthfully reported "I
+ * have the project list but no ticket search, issue read or comments" while
+ * Settings said Jira: Connected. `ToolSearch("jira …")` found nothing, because
+ * there was nothing to find. Every OTHER Jira consumer worked, which is why
+ * this survived so long: templates and the `assistant` strategy dispatch
+ * `handleToolCall` IN-PROCESS and never go near `resolve()`. Only MCP-served
+ * strategies (the Claude SDK — i.e. the Copilot) depend on this function.
+ *
+ * The fix is the one github.ts already made for the identical failure: serve
+ * this module's own `tools[]` through bin/mcp-skill.mjs, which dispatches each
+ * call straight into `handleToolCall`. One tool surface, no second
+ * implementation to drift. Resolved by PATH rather than
+ * `require.resolve('@zibby/skills/bin/...')` — the dist/package.json self-ref
+ * trap that made an MCP server silently never spawn.
+ */
+function resolveSkillBin() {
+  if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidate = resolvePath(here, '..', 'bin', 'mcp-skill.mjs');
+  return existsSync(candidate) ? candidate : null;
 }
 
 /**
@@ -576,8 +607,12 @@ When user asks to move/transition ticket status:
 6. IMPORTANT: When target is clear, complete transition + verification in SAME turn. Do NOT stop after listing options.`,
 
   resolve() {
-    const bin = resolveJiraBin();
-    if (!bin) return null;
+    // NEVER `return null` on a missing bin — that is exactly the silent
+    // disappearance described above. `{ command: null }` is the shape the
+    // other skills use: the server is registered and its absence is visible,
+    // rather than the skill evaporating with nothing in the log.
+    const bin = resolveSkillBin();
+    if (!bin) return { command: null, args: [], env: {}, description: this.description };
     const env: any = {};
     for (const key of this.envKeys) {
       if (process.env[key]) env[key] = process.env[key];
@@ -592,7 +627,31 @@ When user asks to move/transition ticket status:
     for (const key of ['JIRA_API_TOKEN', 'JIRA_EMAIL', 'JIRA_BASE_URL']) {
       if (process.env[key]) env[key] = process.env[key];
     }
-    return { command: 'node', args: [bin], env, description: this.description };
+    return {
+      type: 'stdio',
+      command: 'node',
+      // Resolved RELATIVE TO bin/ at runtime, so `../dist/jira.js` lands on
+      // node_modules/@zibby/skills/dist/jira.js in a published install.
+      args: [bin, '../dist/jira.js', 'jiraSkill'],
+      env,
+      description: this.description,
+      // NO `alwaysLoad`. 14 tool schemas in every system prompt, on every turn,
+      // whether or not the turn mentions Jira, is a cost paid for nothing — and
+      // it does not scale: the answer to "what if a skill had 1000 tools" has to
+      // be deferral, not a bigger prompt (@zibby/skills-internal's 86-tool
+      // control-plane declares alwaysLoad:false for exactly this reason, with a
+      // tripwire pinning it). The SDK's default is what we want: "tools are
+      // deferred when tool search is enabled", and ToolSearch loads a server's
+      // schemas on the turn that needs them.
+      //
+      // The older sibling skills (github, gitlab, sentry, lark, …) set
+      // alwaysLoad:true on the belief that ToolSearch cannot see MCP-served
+      // tools. That belief is worth re-testing rather than copying: the symptom
+      // it was inferred from is the SAME one this commit fixes — a server that
+      // never connected returns nothing to ToolSearch, and looks exactly like a
+      // ToolSearch that cannot see it. alwaysLoad also blocks startup until the
+      // server's handshake completes (5s cap), so it is not free either way.
+    };
   },
 
   async handleToolCall(name, args) {
