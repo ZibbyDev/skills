@@ -53,9 +53,10 @@ describe('larkDocsSkill structure', () => {
     expect(larkDocsSkill.requiresIntegration).toEqual(['lark_docs', 'lark']);
   });
 
-  it('exposes the docx + comment + image + wiki tools', () => {
+  it('exposes the docx + comment + image + wiki + Base tools', () => {
     const names = larkDocsSkill.tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      'larkbitable_list_tables', 'larkbitable_read_records',
       'larkdoc_add_comment', 'larkdoc_append', 'larkdoc_create',
       'larkdoc_get', 'larkdoc_insert_image', 'larkdoc_list_comments',
       'larkdoc_reply_comment', 'larkwiki_list_spaces',
@@ -87,6 +88,19 @@ describe('parseLarkDocRef', () => {
   });
   it('accepts a bare token as docx', () => {
     expect(parseLarkDocRef('DocABC123xyz456')).toEqual({ type: 'docx', token: 'DocABC123xyz456' });
+  });
+  it('extracts a Base app token plus table/view from a /base/ URL', () => {
+    expect(parseLarkDocRef('https://acme.larksuite.com/base/BasApp111?table=tblAAA1&view=vewBBB2'))
+      .toEqual({ type: 'base', token: 'BasApp111', tableId: 'tblAAA1', viewId: 'vewBBB2' });
+  });
+  it('carries table/view off a /wiki/ URL that fronts a Base', () => {
+    expect(parseLarkDocRef('https://acme.larksuite.com/wiki/WikTok1?renamingWikiNode=true&table=tblAAA1&view=vewBBB2'))
+      .toEqual({ type: 'wiki', token: 'WikTok1', tableId: 'tblAAA1', viewId: 'vewBBB2' });
+  });
+  it('ignores query params that are not real table/view ids', () => {
+    // A stray `table=` must never be mistaken for a Lark table id.
+    expect(parseLarkDocRef('https://acme.larksuite.com/base/BasApp111?table=1&view=grid'))
+      .toEqual({ type: 'base', token: 'BasApp111' });
   });
   it('returns null for junk', () => {
     expect(parseLarkDocRef('not a url')).toBeNull();
@@ -179,6 +193,181 @@ describe('larkdoc_get', () => {
     const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_get', {}));
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/valid Lark doc/);
+  });
+
+  it('points a Base-backed wiki link at the Base tools instead of dead-ending', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ node: { obj_type: 'bitable', obj_token: 'BasApp111' } }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkdoc_get', {
+      documentId: 'https://acme.larksuite.com/wiki/WikTok1?table=tblAAA1',
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/larkbitable_read_records/);
+    // TRIPWIRE — product-owner/lib/docs.js and prd-review/lib/docs.js both fall
+    // back to the Base reader by matching THIS substring in THIS error (a plain
+    // /wiki/ link fronting a Base carries nothing in the URL to give it away).
+    // Reword the refusal and both fallbacks die silently; update them together.
+    expect(res.error, 'both workflow-template doc readers match /obj_type=bitable/ on this error')
+      .toMatch(/obj_type=bitable/);
+  });
+});
+
+// ───────────────────────── larkbitable_list_tables ─────────────────────────
+
+describe('larkbitable_list_tables', () => {
+  it('resolves a wiki node fronting a Base and lists its tables', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ node: { obj_type: 'bitable', obj_token: 'BasApp111' } })) // get_node
+      .mockResolvedValueOnce(dataReply({ items: [{ table_id: 'tblAAA1', name: '发版' }], has_more: false })) // tables
+      .mockResolvedValueOnce(dataReply({ app: { name: '迭代管理' } })); // app meta
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_list_tables', {
+      baseId: 'https://acme.larksuite.com/wiki/WikTok1?table=tblAAA1&view=vewBBB2',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.appToken).toBe('BasApp111');
+    expect(res.name).toBe('迭代管理');
+    expect(res.tables).toEqual([{ tableId: 'tblAAA1', name: '发版' }]);
+    // The link already pinned a table/view — echo them so the caller can reuse.
+    expect(res.linkedTableId).toBe('tblAAA1');
+    expect(res.linkedViewId).toBe('vewBBB2');
+  });
+
+  it('fail-softs when the wiki node is a document, not a Base', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ node: { obj_type: 'docx', obj_token: 'DocReal' } }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_list_tables', {
+      baseId: 'https://acme.larksuite.com/wiki/WikTok1',
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/larkdoc_get/);
+  });
+});
+
+// ───────────────────────── larkbitable_read_records ─────────────────────────
+
+describe('larkbitable_read_records', () => {
+  it('reads a table via the URL coordinates and flattens every cell to text', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({
+        items: [
+          { field_name: '需求', type: 1 },
+          { field_name: '负责人', type: 11 },
+          { field_name: '上线日期', type: 5 },
+        ],
+        has_more: false,
+      })) // fields
+      .mockResolvedValueOnce(dataReply({
+        items: [{
+          record_id: 'recOne',
+          fields: {
+            // Lark's real shapes: text runs, person array, epoch-ms date.
+            '需求': [{ type: 'text', text: 'LUC-82545 VIP多模版规则扩展' }],
+            '负责人': [{ id: 'ou_1', name: '张三' }, { id: 'ou_2', name: '李四' }],
+            '上线日期': 1756944000000,
+          },
+        }],
+        has_more: false,
+        total: 1,
+      })) // records/search
+      .mockResolvedValueOnce(dataReply({ app: { name: '迭代管理' } })); // app meta (best-effort)
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {
+      baseId: 'https://acme.larksuite.com/base/BasApp111?table=tblAAA1&view=vewBBB2',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.name).toBe('迭代管理');
+    expect(res.tableId).toBe('tblAAA1');
+    expect(res.viewId).toBe('vewBBB2');
+    expect(res.total).toBe(1);
+    expect(res.records).toEqual([{
+      recordId: 'recOne',
+      fields: {
+        '需求': 'LUC-82545 VIP多模版规则扩展',
+        '负责人': '张三, 李四',
+        '上线日期': new Date(1756944000000).toISOString(),
+      },
+    }]);
+    // The view from the link must reach Lark, or the caller silently gets the
+    // whole table instead of the view they linked.
+    const searchCall = globalThis.fetch.mock.calls.find((c) => String(c[0]).includes('/records/search'));
+    expect(searchCall, 'no records/search call was made').toBeTruthy();
+    expect(JSON.parse(searchCall[1].body)).toEqual({ view_id: 'vewBBB2' });
+  });
+
+  it('falls back to the only table when the link pins none', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ items: [{ table_id: 'tblOnly', name: 'T' }], has_more: false })) // tables
+      .mockResolvedValueOnce(dataReply({ items: [{ field_name: 'A', type: 1 }], has_more: false })) // fields
+      .mockResolvedValueOnce(dataReply({ items: [], has_more: false, total: 0 })); // records
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {
+      baseId: 'BasApp111xyz',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.tableId).toBe('tblOnly');
+  });
+
+  it('refuses to guess when the Base has several tables, naming them', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({
+        items: [{ table_id: 'tblA', name: '发版' }, { table_id: 'tblB', name: '需求' }],
+        has_more: false,
+      }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {
+      baseId: 'BasApp111xyz',
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/tableId is required/);
+    expect(res.error).toMatch(/tblA/);
+    expect(res.error).toMatch(/tblB/);
+  });
+
+  it('caps maxRecords and reports the resume token', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({ items: [{ field_name: 'A', type: 1 }], has_more: false })) // fields
+      .mockResolvedValueOnce(dataReply({
+        items: [
+          { record_id: 'r1', fields: { A: 'one' } },
+          { record_id: 'r2', fields: { A: 'two' } },
+        ],
+        has_more: true,
+        page_token: 'pg2',
+        total: 60,
+      }));
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {
+      baseId: 'https://acme.larksuite.com/base/BasApp111?table=tblAAA1',
+      maxRecords: 1,
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.count).toBe(1);
+    expect(res.hasMore).toBe(true);
+    expect(res.nextPageToken).toBe('pg2');
+  });
+
+  it('fail-softs on a missing Base scope', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(errReply('Forbidden: bitable:app:readonly'));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {
+      baseId: 'https://acme.larksuite.com/base/BasApp111?table=tblAAA1',
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/bitable:app:readonly/);
+  });
+
+  it('requires a Base id/url', async () => {
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {}));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/valid Lark Base/);
   });
 });
 

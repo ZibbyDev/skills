@@ -29,6 +29,15 @@
  *        (block == document_id == the doc root) → append blocks at the end
  *   GET  /open-apis/wiki/v2/spaces/get_node?token={t}          → { node:{obj_token,obj_type} }
  *
+ * Bitable v1 API (Base / 多维表格 — requires bitable:app:readonly):
+ *   GET  /open-apis/bitable/v1/apps/{app}                       → { app:{name,...} }
+ *   GET  /open-apis/bitable/v1/apps/{app}/tables?page_size=100  → { items:[{table_id,name}] }
+ *   GET  /open-apis/bitable/v1/apps/{app}/tables/{t}/fields     → { items:[{field_name,type}] }
+ *   POST /open-apis/bitable/v1/apps/{app}/tables/{t}/records/search?page_size=500
+ *        body { view_id?, field_names? } → { items:[{record_id,fields}], has_more, page_token, total }
+ *   A Base is NOT a docx: a /wiki/ node fronting one resolves to obj_type
+ *   'bitable', which the docx path rejects by design (see resolveDocumentId).
+ *
  * Wiki v2 API (write support — requires wiki:node:create / wiki:space:read):
  *   GET  /open-apis/wiki/v2/spaces?page_size=50[&page_token]   → { items:[{space_id,name}], has_more, page_token }
  *   POST /open-apis/wiki/v2/spaces/{space_id}/nodes            → { node:{node_token,obj_token,obj_type} }
@@ -62,6 +71,21 @@ const MAX_BLOCK_CHILDREN = 50;
 // tenant can't loop forever. 20 pages = up to 1000 spaces, plenty.
 const WIKI_SPACES_PAGE_SIZE = 50;
 const MAX_WIKI_SPACE_PAGES = 20;
+// Base (bitable) reads. Lark's records/search caps page_size at 500; we ask for
+// the max so a normal table is one round-trip. maxRecords defaults small enough
+// to be safe in a prompt and is capped so a 100k-row table can't be pulled whole.
+const BITABLE_PAGE_SIZE = 500;
+const DEFAULT_BITABLE_RECORDS = 200;
+const MAX_BITABLE_RECORDS = 1000;
+const BITABLE_TABLES_PAGE_SIZE = 100;
+const MAX_BITABLE_PAGES = 20;
+// Independent of MAX_TEXT_CHARS: a table is wide as well as long, so the row
+// budget is measured in serialized characters, not rows.
+const MAX_BITABLE_CHARS = 30000;
+// Field types whose value is an epoch-ms number: DateTime, Created time,
+// Modified time. Rendered as ISO so the model never sees a bare 1756944000000.
+const BITABLE_DATE_FIELD_TYPES = new Set([5, 1001, 1002]);
+
 // Cap on uploaded image size. Lark's drive upload_all hard cap is 20MB
 // (validation max 20971520 bytes); we stay at 10MB so a report chart can
 // never bump the platform limit.
@@ -149,20 +173,45 @@ export function wikiWebUrl(host, nodeToken) {
 }
 
 /**
+ * Pull the Base coordinates out of a Lark URL's query string. A Base link
+ * carries its table and view THERE (…/base/<app>?table=tbl…&view=vew…), so a
+ * link without them names the whole Base rather than one table. Only the id
+ * shapes Lark actually mints are accepted, so an unrelated `table=` param can
+ * never be mistaken for a table id. Returns {} when absent — callers SPREAD
+ * this, so the keys are missing rather than present-and-undefined.
+ */
+function parseBitableQuery(input) {
+  const q = input.indexOf('?');
+  if (q < 0) return {};
+  const query = input.slice(q + 1).split('#')[0];
+  const params = new URLSearchParams(query);
+  const out: any = {};
+  const table = params.get('table');
+  const view = params.get('view');
+  if (table && /^tbl[A-Za-z0-9]+$/.test(table)) out.tableId = table;
+  if (view && /^vew[A-Za-z0-9]+$/.test(view)) out.viewId = view;
+  return out;
+}
+
+/**
  * Parse a Lark/Feishu doc reference (raw token OR URL) into { type, token }.
  *   - .../docx/<token>  → { type:'docx', token }
- *   - .../wiki/<token>  → { type:'wiki', token } (resolved to its docx obj_token)
+ *   - .../wiki/<token>  → { type:'wiki', token } (resolved to its backing object)
+ *   - .../base/<token>  → { type:'base', token } (a Base / 多维表格)
  *   - bare token        → { type:'docx', token }
- * Returns null when nothing usable can be extracted. Pure + side-effect-free.
+ * A /base/ or /wiki/ URL additionally carries { tableId?, viewId? } when its
+ * query names them. Returns null when nothing usable can be extracted.
+ * Pure + side-effect-free.
  */
 export function parseLarkDocRef(ref) {
   if (!ref || typeof ref !== 'string') return null;
   const input = ref.trim();
   if (!input) return null;
 
-  // URL form: pull the segment right after /docx/ or /wiki/ (strip query/hash).
-  const m = input.match(/\/(docx|wiki)\/([A-Za-z0-9]+)/);
-  if (m) return { type: m[1], token: m[2] };
+  // URL form: the segment right after /docx/, /wiki/ or /base/, plus the Base
+  // table/view coordinates when the query carries them.
+  const m = input.match(/\/(docx|wiki|base)\/([A-Za-z0-9]+)/);
+  if (m) return { type: m[1], token: m[2], ...parseBitableQuery(input) };
 
   // Bare token — Lark doc/obj tokens are alphanumeric, typically ~24-27 chars.
   if (/^[A-Za-z0-9]{10,}$/.test(input)) return { type: 'docx', token: input };
@@ -188,7 +237,16 @@ async function resolveDocumentId(refOrParsed) {
   );
   const node = data?.node || {};
   if (node.obj_type !== 'docx' || !node.obj_token) {
-    throw new Error(`Wiki node is not a docx document (obj_type=${node.obj_type || 'unknown'})`);
+    const objType = node.obj_type || 'unknown';
+    // A Base behind a wiki node is READABLE — just not here. Point at the tool
+    // that can read it rather than leaving the caller with a bare type name.
+    if (objType === 'bitable') {
+      throw new Error(
+        'This Lark wiki link is a Base / 多维表格 (obj_type=bitable), not a document — '
+        + 'read it with larkbitable_read_records (larkbitable_list_tables lists its tables)',
+      );
+    }
+    throw new Error(`Wiki node is not a docx document (obj_type=${objType})`);
   }
   return node.obj_token;
 }
@@ -386,6 +444,222 @@ function fileTypeArg(args) {
   return t;
 }
 
+// ── Base / 多维表格 (bitable) ───────────────────────────────────────────────
+// A Base is a SEPARATE object type from a docx — its own API family, its own
+// scope (bitable:app:readonly), and its own coordinates (app token → table →
+// view). The docx path deliberately refuses it; everything below is that
+// second path, read-only.
+
+/**
+ * Derive the human-facing Base web URL (same region logic as docWebUrl).
+ */
+export function baseWebUrl(host, appToken, tableId?, viewId?) {
+  const h = String(host || '');
+  const root = h.includes('feishu') ? 'https://feishu.cn' : 'https://www.larksuite.com';
+  const qs = new URLSearchParams();
+  if (tableId) qs.set('table', tableId);
+  if (viewId) qs.set('view', viewId);
+  const query = qs.toString();
+  return `${root}/base/${appToken}${query ? `?${query}` : ''}`;
+}
+
+/**
+ * Resolve a parsed ref to Base coordinates { appToken, tableId, viewId }.
+ * A /base/ link (and a bare token, which parseLarkDocRef types as 'docx'
+ * because it cannot know better) already names the Base app. A /wiki/ link
+ * names a NODE FRONTING the Base, so it is resolved through get_node — the
+ * mirror of resolveDocumentId, which resolves the same node shape to a docx.
+ * tableId/viewId are null rather than absent so one field keeps one type.
+ */
+async function resolveBitableRef(refOrParsed) {
+  const parsed = typeof refOrParsed === 'string' ? parseLarkDocRef(refOrParsed) : refOrParsed;
+  if (!parsed) throw new Error('A valid Lark Base id or URL is required');
+  const coords = { tableId: parsed.tableId || null, viewId: parsed.viewId || null };
+
+  if (parsed.type !== 'wiki') return { appToken: parsed.token, ...coords };
+
+  const { data } = await larkDocsApi(
+    'GET',
+    `/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(parsed.token)}`,
+  );
+  const node = data?.node || {};
+  if (node.obj_type !== 'bitable' || !node.obj_token) {
+    // The symmetric counterpart of resolveDocumentId's bitable branch.
+    if (node.obj_type === 'docx') {
+      throw new Error(
+        'This Lark wiki link is a document (obj_type=docx), not a Base / 多维表格 — read it with larkdoc_get',
+      );
+    }
+    throw new Error(`Wiki node is not a Base / 多维表格 (obj_type=${node.obj_type || 'unknown'})`);
+  }
+  return { appToken: node.obj_token, ...coords };
+}
+
+/**
+ * Flatten ONE Base cell to plain text. Bitable values are richly shaped —
+ * text runs [{type,text}], people [{id,name,en_name,email}], links
+ * {text,link}, attachments [{name,url}], locations {full_address}, formula
+ * {value} — and a model reading a table wants the words, not the envelope.
+ * ALWAYS returns a string: one field, one type, so a consumer never has to
+ * branch on whether a cell came back as a number, an array, or an object.
+ */
+function bitableCellText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return value.map(bitableCellText).filter((part) => part !== '').join(', ');
+  }
+  if (typeof value === 'object') {
+    const o: any = value;
+    // Most specific first — a person carries `name`, a link carries both
+    // `text` and `link` (the text is what a reader wants).
+    if (typeof o.text === 'string' && o.text) return o.text;
+    if (typeof o.name === 'string' && o.name) return o.name;
+    if (typeof o.en_name === 'string' && o.en_name) return o.en_name;
+    if (typeof o.full_address === 'string' && o.full_address) return o.full_address;
+    if (typeof o.link === 'string' && o.link) return o.link;
+    if (o.value !== undefined) return bitableCellText(o.value);
+    return JSON.stringify(o);
+  }
+  return String(value);
+}
+
+/**
+ * Cell text with the field's declared type applied. Only date-shaped fields
+ * need it: Lark returns them as epoch milliseconds, which is unreadable (and
+ * un-reasonable-about) as a bare number. Everything else flattens generically.
+ */
+function bitableFieldText(value, fieldType) {
+  if (BITABLE_DATE_FIELD_TYPES.has(Number(fieldType))) {
+    const ms = Number(Array.isArray(value) ? value[0] : value);
+    if (Number.isFinite(ms) && ms > 0) return new Date(ms).toISOString();
+  }
+  return bitableCellText(value);
+}
+
+/** List every table in a Base (paginated). Returns [{ tableId, name }]. */
+async function listBitableTables(appToken) {
+  const tables = [];
+  let pageToken = null;
+  for (let page = 0; page < MAX_BITABLE_PAGES; page++) {
+    const qs = new URLSearchParams({ page_size: String(BITABLE_TABLES_PAGE_SIZE) });
+    if (pageToken) qs.set('page_token', pageToken);
+    const { data } = await larkDocsApi(
+      'GET',
+      `/open-apis/bitable/v1/apps/${encodeURIComponent(appToken)}/tables?${qs.toString()}`,
+    );
+    for (const t of (Array.isArray(data?.items) ? data.items : [])) {
+      tables.push({ tableId: String(t?.table_id || ''), name: String(t?.name || '') });
+    }
+    if (!data?.has_more || !data?.page_token) break;
+    pageToken = data.page_token;
+  }
+  return tables;
+}
+
+/** List a table's columns (paginated). Returns [{ name, type }]. */
+async function listBitableFields(appToken, tableId) {
+  const fields = [];
+  let pageToken = null;
+  for (let page = 0; page < MAX_BITABLE_PAGES; page++) {
+    const qs = new URLSearchParams({ page_size: String(BITABLE_TABLES_PAGE_SIZE) });
+    if (pageToken) qs.set('page_token', pageToken);
+    const { data } = await larkDocsApi(
+      'GET',
+      `/open-apis/bitable/v1/apps/${encodeURIComponent(appToken)}/tables/${encodeURIComponent(tableId)}/fields?${qs.toString()}`,
+    );
+    for (const f of (Array.isArray(data?.items) ? data.items : [])) {
+      fields.push({ name: String(f?.field_name || ''), type: Number(f?.type) || 0 });
+    }
+    if (!data?.has_more || !data?.page_token) break;
+    pageToken = data.page_token;
+  }
+  return fields;
+}
+
+/**
+ * Settle which table to read. The table id is taken, in order, from the
+ * caller's argument, then the Base URL's `table=` query, then — only when the
+ * Base holds exactly ONE table — that table. An ambiguous Base is an ERROR
+ * that NAMES the candidates, never a silent pick of the first one.
+ */
+async function pickBitableTable({ appToken, tableId }) {
+  if (tableId) return tableId;
+  const tables = await listBitableTables(appToken);
+  if (tables.length === 1) return tables[0].tableId;
+  if (!tables.length) throw new Error('This Lark Base has no tables');
+  const listed = tables.map((t) => `${t.name} (${t.tableId})`).join('; ');
+  throw new Error(`tableId is required — this Base has ${tables.length} tables: ${listed}`);
+}
+
+/**
+ * Read records via bitable records/search, paging until maxRecords, the
+ * character budget, or the end of the table. Returns the rows already
+ * flattened, plus whether the read stopped early and where to resume.
+ */
+async function readBitableRecords({ appToken, tableId, viewId, fieldNames, maxRecords, pageToken }) {
+  const columns = await listBitableFields(appToken, tableId);
+  const typeByName = new Map(columns.map((c) => [c.name, c.type]));
+
+  const records = [];
+  let chars = 0;
+  let cursor = pageToken || null;
+  let hasMore = false;
+  let total = 0;
+  let truncated = false;
+
+  for (let page = 0; page < MAX_BITABLE_PAGES; page++) {
+    const qs = new URLSearchParams({ page_size: String(Math.min(BITABLE_PAGE_SIZE, maxRecords)) });
+    if (cursor) qs.set('page_token', cursor);
+    const { data } = await larkDocsApi(
+      'POST',
+      `/open-apis/bitable/v1/apps/${encodeURIComponent(appToken)}/tables/${encodeURIComponent(tableId)}/records/search?${qs.toString()}`,
+      {
+        ...(viewId ? { view_id: viewId } : {}),
+        ...(fieldNames?.length ? { field_names: fieldNames } : {}),
+      },
+    );
+    total = Number(data?.total) || total;
+    hasMore = Boolean(data?.has_more);
+    cursor = data?.page_token || null;
+
+    for (const item of (Array.isArray(data?.items) ? data.items : [])) {
+      const fields = {};
+      for (const [name, value] of Object.entries(item?.fields || {})) {
+        fields[name] = bitableFieldText(value, typeByName.get(name));
+      }
+      const row = { recordId: String(item?.record_id || ''), fields };
+      // Budget in serialized characters — a table is wide as well as long, so
+      // a row count alone can't keep the payload inside the prompt.
+      const size = JSON.stringify(row).length;
+      if (records.length && chars + size > MAX_BITABLE_CHARS) {
+        truncated = true;
+        break;
+      }
+      chars += size;
+      records.push(row);
+      if (records.length >= maxRecords) break;
+    }
+
+    if (truncated || records.length >= maxRecords || !hasMore || !cursor) break;
+  }
+
+  // `hasMore` describes the TABLE (Lark's own flag); `truncated` describes OUR
+  // read stopping on the character budget. Deliberately NOT `records.length <
+  // total`: `total` counts the whole table while a filtered VIEW returns fewer
+  // rows, so that comparison would claim more pages exist with no cursor to
+  // fetch them — a caller that trusts it loops forever.
+  return {
+    columns,
+    records,
+    total,
+    hasMore: (hasMore || truncated) && Boolean(cursor),
+    nextPageToken: cursor || '',
+    truncated,
+  };
+}
+
 export const larkDocsSkill: any = {
   id: 'lark-docs',
   // Backend-calling: the MCP child talks to Zibby's own backend — the
@@ -401,7 +675,7 @@ export const larkDocsSkill: any = {
   // (agent-workflow strategy-registry + core strategies), so an account with
   // only the docs app connected keeps the prompt fragment it used to lose.
   requiresIntegration: [INTEGRATIONS.LARK_DOCS, INTEGRATIONS.LARK],
-  description: 'Lark / Feishu Docs — read, create, append, and insert images into Lark documents (docx).',
+  description: 'Lark / Feishu Docs — read, create, append, and insert images into Lark documents (docx), and read Lark Bases (多维表格 / bitable).',
   // resolveLarkApp() reads the injected LARK_DOCS_*/LARK_* app creds and,
   // failing that, calls OUR OWN backend for them (Lark mints a tenant token
   // from app_id+secret — no single-bearer self-host fast path exists). envKeys
@@ -416,7 +690,8 @@ export const larkDocsSkill: any = {
   envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', ...LARK_DOCS_APP_ENV_KEYS],
 
   promptFragment: `## Lark Docs
-You can read, create, and append Lark/Feishu documents (docx), and read/post/reply to their comments. This runs on the connected Lark Docs app (the chat app is used when no separate docs app is connected). Each \`larkdoc_*\` / \`larkwiki_*\` tool documents its own params and return shape in its tool description — they are not restated here.
+You can read, create, and append Lark/Feishu documents (docx), read/post/reply to their comments, and READ Lark Bases (多维表格 / bitable). This runs on the connected Lark Docs app (the chat app is used when no separate docs app is connected). Each \`larkdoc_*\` / \`larkwiki_*\` / \`larkbitable_*\` tool documents its own params and return shape in its tool description — they are not restated here.
+A Lark link is not always a document: a \`/base/…\` link, or a \`/wiki/…\` link carrying \`?table=tbl…\`, is a Base — read it with \`larkbitable_read_records\`, NOT \`larkdoc_get\` (which refuses it, since a Base has no document body). Base reads need the \`bitable:app:readonly\` scope on the connected app.
 These tools return { ok:false, error } on failure — treat an unavailable Lark connection as "cannot read/deliver to Lark Docs" and continue rather than blocking the task.`,
 
   /**
@@ -633,6 +908,100 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           return JSON.stringify({ ok: true, count: spaces.length, spaces });
         }
 
+        case 'larkbitable_list_tables': {
+          const ref = args?.baseId || args?.url || args?.documentId || args?.id;
+          const parsed = parseLarkDocRef(ref);
+          if (!parsed) return JSON.stringify({ ok: false, error: 'A valid Lark Base id or URL is required' });
+
+          const { appToken, tableId, viewId } = await resolveBitableRef(parsed);
+          const tables = await listBitableTables(appToken);
+
+          // Base name is best-effort — the table list is the payload.
+          let name = '';
+          let host = '';
+          try {
+            const meta = await larkDocsApi('GET', `/open-apis/bitable/v1/apps/${encodeURIComponent(appToken)}`);
+            name = meta.data?.app?.name || '';
+            host = meta.host;
+          } catch {
+            // Non-fatal — continue without the Base title.
+          }
+
+          return JSON.stringify({
+            ok: true,
+            appToken,
+            name,
+            ...(host ? { url: baseWebUrl(host, appToken, tableId, viewId) } : {}),
+            // Echo back what the LINK already pinned, so the caller can pass it
+            // straight to larkbitable_read_records instead of guessing.
+            ...(tableId ? { linkedTableId: tableId } : {}),
+            ...(viewId ? { linkedViewId: viewId } : {}),
+            count: tables.length,
+            tables,
+          });
+        }
+
+        case 'larkbitable_read_records': {
+          const ref = args?.baseId || args?.url || args?.documentId || args?.id;
+          const parsed = parseLarkDocRef(ref);
+          if (!parsed) return JSON.stringify({ ok: false, error: 'A valid Lark Base id or URL is required' });
+
+          const resolved = await resolveBitableRef(parsed);
+          const appToken = resolved.appToken;
+          // Explicit arg wins over the link's own coordinates.
+          const tableId = await pickBitableTable({
+            appToken,
+            tableId: (typeof args?.tableId === 'string' && args.tableId.trim())
+              ? args.tableId.trim()
+              : resolved.tableId,
+          });
+          const viewId = (typeof args?.viewId === 'string' && args.viewId.trim())
+            ? args.viewId.trim()
+            : resolved.viewId;
+          const fieldNames = Array.isArray(args?.fieldNames)
+            ? args.fieldNames.map((f) => String(f)).filter(Boolean)
+            : null;
+          const requested = Number(args?.maxRecords);
+          const maxRecords = Number.isFinite(requested) && requested > 0
+            ? Math.min(Math.round(requested), MAX_BITABLE_RECORDS)
+            : DEFAULT_BITABLE_RECORDS;
+          const pageToken = (typeof args?.pageToken === 'string' && args.pageToken.trim())
+            ? args.pageToken.trim()
+            : null;
+
+          const read = await readBitableRecords({
+            appToken, tableId, viewId, fieldNames, maxRecords, pageToken,
+          });
+          const { host } = await getTenantAccessToken();
+
+          // Base name is best-effort — the rows are the payload. Same shape as
+          // larkdoc_get's title read: a caller that wants to LABEL what it read
+          // shouldn't need a second tool call to get a name.
+          let name = '';
+          try {
+            const meta = await larkDocsApi('GET', `/open-apis/bitable/v1/apps/${encodeURIComponent(appToken)}`);
+            name = meta.data?.app?.name || '';
+          } catch {
+            // Non-fatal — continue without the Base title.
+          }
+
+          return JSON.stringify({
+            ok: true,
+            appToken,
+            name,
+            tableId,
+            ...(viewId ? { viewId } : {}),
+            url: baseWebUrl(host, appToken, tableId, viewId),
+            total: read.total,
+            count: read.records.length,
+            columns: read.columns,
+            records: read.records,
+            hasMore: read.hasMore,
+            ...(read.nextPageToken ? { nextPageToken: read.nextPageToken } : {}),
+            ...(read.truncated ? { truncated: true } : {}),
+          });
+        }
+
         case 'larkdoc_list_comments': {
           const ref = args?.documentId || args?.url || args?.id || args?.fileToken;
           const parsed = parseLarkDocRef(ref);
@@ -756,6 +1125,33 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           height: { type: 'number', description: 'Optional display height in pixels.' },
         },
         required: ['documentId', 'imagePath'],
+      },
+    },
+    {
+      name: 'larkbitable_list_tables',
+      description: "List the tables in a Lark/Feishu Base (多维表格 / bitable). Accepts a Base URL (a /base/… link, or a /wiki/… link whose node IS a Base) or a raw app token. Returns { ok, appToken, name, tables:[{ tableId, name }] } plus linkedTableId/linkedViewId when the URL pinned them. A Base is NOT a document — larkdoc_get cannot read one; use this and larkbitable_read_records instead.",
+      input_schema: {
+        type: 'object',
+        properties: {
+          baseId: { type: 'string', description: 'Lark Base app token OR a full Base/wiki URL (/base/… or /wiki/…).' },
+        },
+        required: ['baseId'],
+      },
+    },
+    {
+      name: 'larkbitable_read_records',
+      description: "Read the rows of one table in a Lark/Feishu Base (多维表格 / bitable) as flat text. Accepts a Base URL (/base/… or a /wiki/… link fronting a Base) or app token; the table and view are taken from the URL's table=/view= when present, and tableId may be omitted when the Base has exactly one table. Optionally restrict to viewId or fieldNames. Returns { ok, appToken, name, tableId, total, count, columns:[{name,type}], records:[{ recordId, fields:{ <column>: <text> } }], hasMore, nextPageToken }. Every cell is a STRING (dates as ISO). Defaults to 200 records; pass maxRecords (max 1000) and pageToken to page through a bigger table.",
+      input_schema: {
+        type: 'object',
+        properties: {
+          baseId: { type: 'string', description: 'Lark Base app token OR a full Base/wiki URL (/base/… or /wiki/…).' },
+          tableId: { type: 'string', description: 'Table id (tbl…). Optional when the URL carries table= or the Base has exactly one table; larkbitable_list_tables lists them.' },
+          viewId: { type: 'string', description: 'Optional view id (vew…) — restricts the read to that view\'s rows and order.' },
+          fieldNames: { type: 'array', items: { type: 'string' }, description: 'Optional column names to return. Absent = every column.' },
+          maxRecords: { type: 'number', description: 'Max records to return (default 200, hard cap 1000).' },
+          pageToken: { type: 'string', description: 'Resume token from a previous call\'s nextPageToken.' },
+        },
+        required: ['baseId'],
       },
     },
     {
