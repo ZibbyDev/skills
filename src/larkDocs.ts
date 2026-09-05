@@ -602,6 +602,26 @@ async function readBitableRecords({ appToken, tableId, viewId, fieldNames, maxRe
   const columns = await listBitableFields(appToken, tableId);
   const typeByName = new Map(columns.map((c) => [c.name, c.type]));
 
+  // Lark answers an unknown column with a bare `FieldNameNotFound` that names
+  // neither the offending column nor the valid ones, and real Bases carry
+  // names no one would guess — a leading space, a trailing " (1)". We already
+  // hold the column list, so check here and say exactly what is wrong. The
+  // match is on the EXACT name; a near-miss is reported as a candidate rather
+  // than silently corrected, because two columns can differ by a space alone.
+  if (fieldNames?.length) {
+    const unknown = fieldNames.filter((name) => !typeByName.has(name));
+    if (unknown.length) {
+      const candidates = unknown.flatMap((name) => columns
+        .filter((c) => c.name.trim() === String(name).trim())
+        .map((c) => JSON.stringify(c.name)));
+      throw new Error(
+        `unknown column(s): ${unknown.map((n) => JSON.stringify(n)).join(', ')}`
+        + (candidates.length ? ` — did you mean ${candidates.join(', ')}? (names can carry spaces)` : '')
+        + `. This table's columns: ${columns.map((c) => JSON.stringify(c.name)).join(', ')}`,
+      );
+    }
+  }
+
   const records = [];
   let chars = 0;
   let cursor = pageToken || null;
@@ -645,18 +665,28 @@ async function readBitableRecords({ appToken, tableId, viewId, fieldNames, maxRe
     if (truncated || records.length >= maxRecords || !hasMore || !cursor) break;
   }
 
-  // `hasMore` describes the TABLE (Lark's own flag); `truncated` describes OUR
-  // read stopping on the character budget. Deliberately NOT `records.length <
-  // total`: `total` counts the whole table while a filtered VIEW returns fewer
-  // rows, so that comparison would claim more pages exist with no cursor to
-  // fetch them — a caller that trusts it loops forever.
+  // `hasMore` is "rows exist that this call did not return", from EITHER cause:
+  // Lark has another page, or OUR character budget cut this one short. The
+  // second case has no resume token — the dropped rows are inside a page we
+  // already consumed, and Lark's search pages by token, not offset — so it must
+  // be reported as advice, not a cursor. Saying `hasMore:false` there (as this
+  // did on a 62-row, 86-column table that returned 38) hands the caller a
+  // silently partial answer, which is the one outcome worth preventing.
+  // Deliberately NOT `records.length < total`: `total` can count the whole
+  // table while a filtered VIEW returns fewer, which would claim more forever.
   return {
     columns,
     records,
     total,
-    hasMore: (hasMore || truncated) && Boolean(cursor),
+    hasMore: hasMore || truncated,
     nextPageToken: cursor || '',
     truncated,
+    ...(truncated && !cursor
+      ? {
+        note: 'stopped at the character budget, and these rows have no resume token '
+          + '— re-read with fieldNames set to the few columns you need (see columns[]).',
+      }
+      : {}),
   };
 }
 
@@ -999,6 +1029,7 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
             hasMore: read.hasMore,
             ...(read.nextPageToken ? { nextPageToken: read.nextPageToken } : {}),
             ...(read.truncated ? { truncated: true } : {}),
+            ...(read.note ? { note: read.note } : {}),
           });
         }
 
@@ -1140,7 +1171,7 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
     },
     {
       name: 'larkbitable_read_records',
-      description: "Read the rows of one table in a Lark/Feishu Base (多维表格 / bitable) as flat text. Accepts a Base URL (/base/… or a /wiki/… link fronting a Base) or app token; the table and view are taken from the URL's table=/view= when present, and tableId may be omitted when the Base has exactly one table. Optionally restrict to viewId or fieldNames. Returns { ok, appToken, name, tableId, total, count, columns:[{name,type}], records:[{ recordId, fields:{ <column>: <text> } }], hasMore, nextPageToken }. Every cell is a STRING (dates as ISO). Defaults to 200 records; pass maxRecords (max 1000) and pageToken to page through a bigger table.",
+      description: "Read the rows of one table in a Lark/Feishu Base (多维表格 / bitable) as flat text. Accepts a Base URL (/base/… or a /wiki/… link fronting a Base) or app token; the table and view are taken from the URL's table=/view= when present, and tableId may be omitted when the Base has exactly one table. Optionally restrict to viewId or fieldNames. Returns { ok, appToken, name, tableId, total, count, columns:[{name,type}], records:[{ recordId, fields:{ <column>: <text> } }], hasMore, nextPageToken }. Every cell is a STRING (dates as ISO). Defaults to 200 records; pass maxRecords (max 1000) and pageToken to page through a bigger table. A WIDE table (dozens of columns) hits a character budget before the row cap: the reply then carries truncated:true, hasMore:true and a note, and the fix is fieldNames, not paging. Column names are matched EXACTLY and real ones can carry a leading space or a ' (1)' suffix — an unknown name is refused with this table's actual column list, so read columns[] (or one small call) before naming any.",
       input_schema: {
         type: 'object',
         properties: {

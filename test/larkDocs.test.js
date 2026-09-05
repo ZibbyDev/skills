@@ -364,6 +364,63 @@ describe('larkbitable_read_records', () => {
     expect(res.error).toMatch(/bitable:app:readonly/);
   });
 
+  it('says which column is unknown, and names the real ones', async () => {
+    // Lark answers a bad column with a bare FieldNameNotFound. Real Bases have
+    // names nobody guesses — this table's first column is ' 项目名称', with a
+    // LEADING SPACE — so the refusal has to carry the actual list.
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({
+        items: [{ field_name: ' 项目名称', type: 1 }, { field_name: '优先级', type: 3 }],
+        has_more: false,
+      }));
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {
+      baseId: 'https://acme.larksuite.com/base/BasApp111?table=tblAAA1',
+      fieldNames: ['项目名称', '优先级'],
+    }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/unknown column/);
+    expect(res.error).toMatch(/项目名称/);
+    // The near-miss is OFFERED, never silently substituted — two columns can
+    // differ by a space alone.
+    expect(res.error).toMatch(/did you mean/);
+    // And it never reached Lark with the bad name.
+    expect(globalThis.fetch.mock.calls.some((c) => String(c[0]).includes('/records/search'))).toBe(false);
+  });
+
+  it('never reports hasMore:false after the character budget cut the page short', async () => {
+    // The shape that made this matter: one page, no next token, and a table so
+    // WIDE that the budget stops mid-page. Saying "no more" there is a silently
+    // partial answer — measured 38 of 62 rows on a real 86-column Base.
+    const wide = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`col${i}`, 'x'.repeat(200)]),
+    );
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(tokenReply())
+      .mockResolvedValueOnce(dataReply({
+        items: Array.from({ length: 40 }, (_, i) => ({ field_name: `col${i}`, type: 1 })),
+        has_more: false,
+      }))
+      .mockResolvedValueOnce(dataReply({
+        items: Array.from({ length: 62 }, (_, i) => ({ record_id: `r${i}`, fields: wide })),
+        has_more: false,
+        total: 62,
+      }))
+      .mockResolvedValueOnce(dataReply({ app: { name: 'Wide' } }));
+
+    const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {
+      baseId: 'https://acme.larksuite.com/base/BasApp111?table=tblAAA1',
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.truncated).toBe(true);
+    expect(res.count).toBeLessThan(62);
+    expect(res.hasMore, 'truncated rows must not be reported as a complete read').toBe(true);
+    // No resume token exists for a page cut short, so the reply must say what
+    // the caller can actually do instead.
+    expect(res.nextPageToken).toBeUndefined();
+    expect(res.note).toMatch(/fieldNames/);
+  });
+
   it('requires a Base id/url', async () => {
     const res = JSON.parse(await larkDocsSkill.handleToolCall('larkbitable_read_records', {}));
     expect(res.ok).toBe(false);
