@@ -63,6 +63,21 @@ describe('larkDocsSkill structure', () => {
     ]);
   });
 
+  it('the prompt tells every agent that created ≠ modified', () => {
+    // The rule lives in the SKILL, not in one agent's prompt: every agent that
+    // can read a Base can make this mistake, and one did — it read
+    // lastModifiedTime, concluded 24 rows had been ADDED that afternoon, and
+    // built a confident story on it. All 24 predated the read by weeks; the
+    // real cause was a truncated earlier read. Deleting this sentence brings
+    // that back for every agent at once.
+    const p = larkDocsSkill.promptFragment;
+    expect(p).toMatch(/createdTime/);
+    expect(p).toMatch(/lastModifiedTime/);
+    expect(p).toMatch(/edited yesterday was not added yesterday/);
+    // …and the other half: a row you did not see before is not a new row.
+    expect(p).toMatch(/not evidence they were created/);
+  });
+
   it('resolve() spawns the generic skill MCP server', () => {
     const spec = larkDocsSkill.resolve();
     expect(spec).not.toBeNull();

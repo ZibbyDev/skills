@@ -850,6 +850,7 @@ export const larkDocsSkill: any = {
 You can read, create, and append Lark/Feishu documents (docx), read/post/reply to their comments, and READ Lark Bases (多维表格 / bitable). This runs on the connected Lark Docs app (the chat app is used when no separate docs app is connected). Each \`larkdoc_*\` / \`larkwiki_*\` / \`larkbitable_*\` tool documents its own params and return shape in its tool description — they are not restated here.
 A Lark link is not always a document: a \`/base/…\` link, or a \`/wiki/…\` link carrying \`?table=tbl…\`, is a Base — read it with \`larkbitable_read_records\`, NOT \`larkdoc_get\` (which refuses it, since a Base has no document body). Base reads need the \`bitable:app:readonly\` scope on the connected app.
 A Base question about CHANGE — what moved since yesterday, who edited a row, which rows are stale — is answered by \`larkbitable_read_records\` with \`includeRowMeta:true\` (per-row created/last-modified time and person) and a \`filter\`/\`sort\` on that timestamp, NOT by reading the whole table twice and diffing. Lark exposes no per-cell edit history to any API, so a field's PREVIOUS value cannot be fetched — say so rather than inferring it from snapshots.
+\`createdTime\` and \`lastModifiedTime\` are DIFFERENT QUESTIONS and must never stand in for one another: a row edited yesterday was not added yesterday. Rows APPEARING in a read you did not see before is not evidence they were created — a shorter earlier read (see \`truncated\`) explains it just as well. Answer "what was added" from \`createdTime\` ONLY, and if you did not ask for row metadata, say the read cannot tell rather than reasoning from row counts.
 These tools return { ok:false, error } on failure — treat an unavailable Lark connection as "cannot read/deliver to Lark Docs" and continue rather than blocking the task.`,
 
   /**
@@ -1314,7 +1315,7 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           tableId: { type: 'string', description: 'Table id (tbl…). Optional when the URL carries table= or the Base has exactly one table; larkbitable_list_tables lists them.' },
           viewId: { type: 'string', description: 'Optional view id (vew…) — restricts the read to that view\'s rows and order.' },
           fieldNames: { type: 'array', items: { type: 'string' }, description: 'Optional column names to return. Absent = every column.' },
-          includeRowMeta: { type: 'boolean', description: "Also return each row's createdTime/createdBy/lastModifiedTime/lastModifiedBy. Use for any 'what changed / who edited / when' question — without it those are absent." },
+          includeRowMeta: { type: 'boolean', description: "Also return each row's createdTime/createdBy/lastModifiedTime/lastModifiedBy. Use for any 'what changed / who edited / when' question — without it those are absent, and a row count cannot substitute for them. createdTime answers WHAT WAS ADDED; lastModifiedTime answers WHAT WAS EDITED — a row edited yesterday was not added yesterday." },
           filter: {
             type: 'object',
             description: "Server-side filter, evaluated by Lark. { conjunction:'and'|'or', conditions:[{ fieldName, operator, value }] }.",
