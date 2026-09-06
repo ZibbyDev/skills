@@ -34,7 +34,13 @@
  *   GET  /open-apis/bitable/v1/apps/{app}/tables?page_size=100  → { items:[{table_id,name}] }
  *   GET  /open-apis/bitable/v1/apps/{app}/tables/{t}/fields     → { items:[{field_name,type}] }
  *   POST /open-apis/bitable/v1/apps/{app}/tables/{t}/records/search?page_size=500
- *        body { view_id?, field_names? } → { items:[{record_id,fields}], has_more, page_token, total }
+ *        body { view_id?, field_names?, filter?, sort?, automatic_fields? }
+ *        → { items:[{record_id,fields,created_time?,created_by?,
+ *                    last_modified_time?,last_modified_by?}], has_more, page_token, total }
+ *        `filter`/`sort` are evaluated by LARK (so `total` counts the MATCHES,
+ *        not the table), and `automatic_fields` is what makes the four
+ *        who/when properties present — they are row METADATA on the item, not
+ *        cells, so they arrive whether or not the table declares such columns.
  *   A Base is NOT a docx: a /wiki/ node fronting one resolves to obj_type
  *   'bitable', which the docx path rejects by design (see resolveDocumentId).
  *
@@ -594,33 +600,150 @@ async function pickBitableTable({ appToken, tableId }) {
 }
 
 /**
+ * Lark's documented filter operators for records/search. Passing an operator
+ * Lark does not know comes back as a bare `InvalidFilter` naming neither the
+ * bad operator nor the good ones, so the check happens HERE, against this set.
+ */
+const BITABLE_FILTER_OPERATORS = new Set([
+  'is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty',
+  'isGreater', 'isGreaterEqual', 'isLess', 'isLessEqual',
+]);
+/** The two operators that take no value — everything else requires one. */
+const BITABLE_VALUELESS_OPERATORS = new Set(['isEmpty', 'isNotEmpty']);
+
+/**
+ * Refuse column names this table does not have, naming the offenders AND the
+ * real columns. Lark answers an unknown column with a bare `FieldNameNotFound`
+ * that names neither, and real Bases carry names no one would guess — a
+ * leading space, a trailing " (1)". The match is on the EXACT name; a
+ * whitespace-only near-miss is offered as a CANDIDATE rather than silently
+ * corrected, because two columns can differ by a space alone.
+ *
+ * One validator for every place a caller can name a column (fieldNames,
+ * filter conditions, sort keys) — the alternative is three checks drifting.
+ */
+function assertKnownBitableColumns(columns, names, where) {
+  const known = new Set(columns.map((c) => c.name));
+  const unknown = names.filter((name) => !known.has(name));
+  if (!unknown.length) return;
+  const candidates = unknown.flatMap((name) => columns
+    .filter((c) => c.name.trim() === String(name).trim())
+    .map((c) => JSON.stringify(c.name)));
+  throw new Error(
+    `unknown column(s) in ${where}: ${unknown.map((n) => JSON.stringify(n)).join(', ')}`
+    + (candidates.length ? ` — did you mean ${candidates.join(', ')}? (names can carry spaces)` : '')
+    + `. This table's columns: ${columns.map((c) => JSON.stringify(c.name)).join(', ')}`,
+  );
+}
+
+/**
+ * Build the records/search request body from the caller's arguments, in
+ * Lark's snake_case shape, validating every column name and operator against
+ * the columns this table actually has.
+ *
+ * Exported for tests: this is the whole surface where a caller's question
+ * ("which rows changed yesterday?") becomes something LARK evaluates instead
+ * of something the model re-derives after pulling the table.
+ */
+export function buildBitableSearchBody({ columns, viewId, fieldNames, filter, sort, includeRowMeta }) {
+  const body: any = {};
+  if (viewId) body.view_id = viewId;
+
+  if (fieldNames?.length) {
+    assertKnownBitableColumns(columns, fieldNames, 'fieldNames');
+    body.field_names = fieldNames;
+  }
+
+  if (filter) {
+    const conditions = Array.isArray(filter.conditions) ? filter.conditions : [];
+    if (!conditions.length) throw new Error('filter.conditions must be a non-empty array');
+    assertKnownBitableColumns(columns, conditions.map((c) => c?.fieldName ?? c?.field_name), 'filter');
+    body.filter = {
+      conjunction: filter.conjunction === 'or' ? 'or' : 'and',
+      conditions: conditions.map((c) => {
+        const operator = String(c?.operator || 'is');
+        if (!BITABLE_FILTER_OPERATORS.has(operator)) {
+          throw new Error(
+            `unknown filter operator ${JSON.stringify(operator)} — Lark accepts: `
+            + `${[...BITABLE_FILTER_OPERATORS].join(', ')}`,
+          );
+        }
+        const raw = c?.value;
+        // Lark takes the value as an ARRAY OF STRINGS even for one number, and
+        // the valueless operators must carry no `value` key at all.
+        const value = raw === undefined || raw === null
+          ? []
+          : (Array.isArray(raw) ? raw : [raw]).map((v) => String(v));
+        if (!BITABLE_VALUELESS_OPERATORS.has(operator) && !value.length) {
+          throw new Error(`filter operator ${JSON.stringify(operator)} requires a value`);
+        }
+        return {
+          field_name: String(c?.fieldName ?? c?.field_name),
+          operator,
+          ...(BITABLE_VALUELESS_OPERATORS.has(operator) ? {} : { value }),
+        };
+      }),
+    };
+  }
+
+  if (sort?.length) {
+    assertKnownBitableColumns(columns, sort.map((s) => s?.fieldName ?? s?.field_name), 'sort');
+    body.sort = sort.map((s) => ({
+      field_name: String(s?.fieldName ?? s?.field_name),
+      desc: Boolean(s?.desc),
+    }));
+  }
+
+  // Without this flag Lark omits the four who/when properties entirely — the
+  // reason "who changed this row yesterday" was previously unanswerable and
+  // had to be guessed from daily snapshots of the whole table.
+  if (includeRowMeta) body.automatic_fields = true;
+
+  return body;
+}
+
+/**
+ * Flatten one record's row METADATA — created/last-modified, who and when.
+ * These are properties of the ITEM, not cells, so they exist for every row
+ * whether or not the table declares "Created time"-style columns.
+ *
+ * Lark stamps these record-level times in SECONDS while a date CELL is
+ * MILLISECONDS. Normalising on magnitude rather than trusting one unit keeps
+ * a unit change from silently rendering every row as 1970 (or year 55000).
+ *
+ * Exported for tests.
+ */
+export function bitableRowMeta(item) {
+  const meta: any = {};
+  const stamp = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    return new Date(n < 1e11 ? n * 1000 : n).toISOString();
+  };
+  const createdTime = stamp(item?.created_time);
+  const modifiedTime = stamp(item?.last_modified_time);
+  const createdBy = bitableCellText(item?.created_by);
+  const modifiedBy = bitableCellText(item?.last_modified_by);
+  if (createdTime) meta.createdTime = createdTime;
+  if (createdBy) meta.createdBy = createdBy;
+  if (modifiedTime) meta.lastModifiedTime = modifiedTime;
+  if (modifiedBy) meta.lastModifiedBy = modifiedBy;
+  return meta;
+}
+
+/**
  * Read records via bitable records/search, paging until maxRecords, the
  * character budget, or the end of the table. Returns the rows already
  * flattened, plus whether the read stopped early and where to resume.
  */
-async function readBitableRecords({ appToken, tableId, viewId, fieldNames, maxRecords, pageToken }) {
+async function readBitableRecords({
+  appToken, tableId, viewId, fieldNames, filter, sort, includeRowMeta, maxRecords, pageToken,
+}) {
   const columns = await listBitableFields(appToken, tableId);
   const typeByName = new Map(columns.map((c) => [c.name, c.type]));
-
-  // Lark answers an unknown column with a bare `FieldNameNotFound` that names
-  // neither the offending column nor the valid ones, and real Bases carry
-  // names no one would guess — a leading space, a trailing " (1)". We already
-  // hold the column list, so check here and say exactly what is wrong. The
-  // match is on the EXACT name; a near-miss is reported as a candidate rather
-  // than silently corrected, because two columns can differ by a space alone.
-  if (fieldNames?.length) {
-    const unknown = fieldNames.filter((name) => !typeByName.has(name));
-    if (unknown.length) {
-      const candidates = unknown.flatMap((name) => columns
-        .filter((c) => c.name.trim() === String(name).trim())
-        .map((c) => JSON.stringify(c.name)));
-      throw new Error(
-        `unknown column(s): ${unknown.map((n) => JSON.stringify(n)).join(', ')}`
-        + (candidates.length ? ` — did you mean ${candidates.join(', ')}? (names can carry spaces)` : '')
-        + `. This table's columns: ${columns.map((c) => JSON.stringify(c.name)).join(', ')}`,
-      );
-    }
-  }
+  // Every column name and operator the caller supplied is checked against THIS
+  // table before the first request goes out (see buildBitableSearchBody).
+  const searchBody = buildBitableSearchBody({ columns, viewId, fieldNames, filter, sort, includeRowMeta });
 
   const records = [];
   let chars = 0;
@@ -635,10 +758,7 @@ async function readBitableRecords({ appToken, tableId, viewId, fieldNames, maxRe
     const { data } = await larkDocsApi(
       'POST',
       `/open-apis/bitable/v1/apps/${encodeURIComponent(appToken)}/tables/${encodeURIComponent(tableId)}/records/search?${qs.toString()}`,
-      {
-        ...(viewId ? { view_id: viewId } : {}),
-        ...(fieldNames?.length ? { field_names: fieldNames } : {}),
-      },
+      searchBody,
     );
     total = Number(data?.total) || total;
     hasMore = Boolean(data?.has_more);
@@ -649,7 +769,14 @@ async function readBitableRecords({ appToken, tableId, viewId, fieldNames, maxRe
       for (const [name, value] of Object.entries(item?.fields || {})) {
         fields[name] = bitableFieldText(value, typeByName.get(name));
       }
-      const row = { recordId: String(item?.record_id || ''), fields };
+      const row = {
+        recordId: String(item?.record_id || ''),
+        // Row metadata rides ALONGSIDE the cells, never merged into `fields` —
+        // a table may also declare its own "Created time" COLUMN, and a
+        // reader must be able to tell the two apart.
+        ...(includeRowMeta ? bitableRowMeta(item) : {}),
+        fields,
+      };
       // Budget in serialized characters — a table is wide as well as long, so
       // a row count alone can't keep the payload inside the prompt.
       const size = JSON.stringify(row).length;
@@ -722,6 +849,7 @@ export const larkDocsSkill: any = {
   promptFragment: `## Lark Docs
 You can read, create, and append Lark/Feishu documents (docx), read/post/reply to their comments, and READ Lark Bases (多维表格 / bitable). This runs on the connected Lark Docs app (the chat app is used when no separate docs app is connected). Each \`larkdoc_*\` / \`larkwiki_*\` / \`larkbitable_*\` tool documents its own params and return shape in its tool description — they are not restated here.
 A Lark link is not always a document: a \`/base/…\` link, or a \`/wiki/…\` link carrying \`?table=tbl…\`, is a Base — read it with \`larkbitable_read_records\`, NOT \`larkdoc_get\` (which refuses it, since a Base has no document body). Base reads need the \`bitable:app:readonly\` scope on the connected app.
+A Base question about CHANGE — what moved since yesterday, who edited a row, which rows are stale — is answered by \`larkbitable_read_records\` with \`includeRowMeta:true\` (per-row created/last-modified time and person) and a \`filter\`/\`sort\` on that timestamp, NOT by reading the whole table twice and diffing. Lark exposes no per-cell edit history to any API, so a field's PREVIOUS value cannot be fetched — say so rather than inferring it from snapshots.
 These tools return { ok:false, error } on failure — treat an unavailable Lark connection as "cannot read/deliver to Lark Docs" and continue rather than blocking the task.`,
 
   /**
@@ -998,9 +1126,12 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           const pageToken = (typeof args?.pageToken === 'string' && args.pageToken.trim())
             ? args.pageToken.trim()
             : null;
+          const filter = (args?.filter && typeof args.filter === 'object') ? args.filter : null;
+          const sort = Array.isArray(args?.sort) && args.sort.length ? args.sort : null;
+          const includeRowMeta = Boolean(args?.includeRowMeta);
 
           const read = await readBitableRecords({
-            appToken, tableId, viewId, fieldNames, maxRecords, pageToken,
+            appToken, tableId, viewId, fieldNames, filter, sort, includeRowMeta, maxRecords, pageToken,
           });
           const { host } = await getTenantAccessToken();
 
@@ -1022,7 +1153,11 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
             tableId,
             ...(viewId ? { viewId } : {}),
             url: baseWebUrl(host, appToken, tableId, viewId),
+            // With a filter, `total` is what LARK matched — not the table's
+            // row count. `filtered` says which of the two a caller is reading,
+            // so a match count is never mistaken for a table size.
             total: read.total,
+            ...(filter ? { filtered: true } : {}),
             count: read.records.length,
             columns: read.columns,
             records: read.records,
@@ -1171,7 +1306,7 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
     },
     {
       name: 'larkbitable_read_records',
-      description: "Read the rows of one table in a Lark/Feishu Base (多维表格 / bitable) as flat text. Accepts a Base URL (/base/… or a /wiki/… link fronting a Base) or app token; the table and view are taken from the URL's table=/view= when present, and tableId may be omitted when the Base has exactly one table. Optionally restrict to viewId or fieldNames. Returns { ok, appToken, name, tableId, total, count, columns:[{name,type}], records:[{ recordId, fields:{ <column>: <text> } }], hasMore, nextPageToken }. Every cell is a STRING (dates as ISO). Defaults to 200 records; pass maxRecords (max 1000) and pageToken to page through a bigger table. A WIDE table (dozens of columns) hits a character budget before the row cap: the reply then carries truncated:true, hasMore:true and a note, and the fix is fieldNames, not paging. Column names are matched EXACTLY and real ones can carry a leading space or a ' (1)' suffix — an unknown name is refused with this table's actual column list, so read columns[] (or one small call) before naming any.",
+      description: "Read the rows of one table in a Lark/Feishu Base (多维表格 / bitable) as flat text. Accepts a Base URL (/base/… or a /wiki/… link fronting a Base) or app token; the table and view are taken from the URL's table=/view= when present, and tableId may be omitted when the Base has exactly one table. Optionally restrict to viewId or fieldNames. Returns { ok, appToken, name, tableId, total, count, columns:[{name,type}], records:[{ recordId, fields:{ <column>: <text> } }], hasMore, nextPageToken }. Every cell is a STRING (dates as ISO). Defaults to 200 records; pass maxRecords (max 1000) and pageToken to page through a bigger table. A WIDE table (dozens of columns) hits a character budget before the row cap: the reply then carries truncated:true, hasMore:true and a note, and the fix is fieldNames, not paging. Column names are matched EXACTLY and real ones can carry a leading space or a ' (1)' suffix — an unknown name is refused with this table's actual column list, so read columns[] (or one small call) before naming any. TO ANSWER 'what changed, when, by whom': pass includeRowMeta:true and each record also carries createdTime/createdBy/lastModifiedTime/lastModifiedBy (ISO + display name) — row METADATA that exists even when the table declares no such column. This is the ONLY way to see a row's edit time; Lark exposes NO per-cell edit history to any API, so a field's previous VALUE is unavailable (only the Base's own web UI record history has it). Filter and sort SERVER-SIDE rather than pulling the table and counting: filter = { conjunction:'and'|'or', conditions:[{ fieldName, operator, value }] } with operator one of is/isNot/contains/doesNotContain/isEmpty/isNotEmpty/isGreater/isGreaterEqual/isLess/isLessEqual, and sort = [{ fieldName, desc }]. With a filter the reply carries filtered:true and `total` is the MATCH count, so one call with maxRecords:1 answers 'how many rows are X'. Date/datetime columns compare against value ['ExactDate','<epoch ms>'] (Lark also accepts 'Today', 'Yesterday', 'CurrentWeek'); everything else takes plain strings.",
       input_schema: {
         type: 'object',
         properties: {
@@ -1179,6 +1314,39 @@ These tools return { ok:false, error } on failure — treat an unavailable Lark 
           tableId: { type: 'string', description: 'Table id (tbl…). Optional when the URL carries table= or the Base has exactly one table; larkbitable_list_tables lists them.' },
           viewId: { type: 'string', description: 'Optional view id (vew…) — restricts the read to that view\'s rows and order.' },
           fieldNames: { type: 'array', items: { type: 'string' }, description: 'Optional column names to return. Absent = every column.' },
+          includeRowMeta: { type: 'boolean', description: "Also return each row's createdTime/createdBy/lastModifiedTime/lastModifiedBy. Use for any 'what changed / who edited / when' question — without it those are absent." },
+          filter: {
+            type: 'object',
+            description: "Server-side filter, evaluated by Lark. { conjunction:'and'|'or', conditions:[{ fieldName, operator, value }] }.",
+            properties: {
+              conjunction: { type: 'string', description: "'and' (default) or 'or'." },
+              conditions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    fieldName: { type: 'string', description: "Exact column name (see columns[])." },
+                    operator: { type: 'string', description: 'is | isNot | contains | doesNotContain | isEmpty | isNotEmpty | isGreater | isGreaterEqual | isLess | isLessEqual.' },
+                    value: { description: "String, number, or array of them. Omit for isEmpty/isNotEmpty. Date columns take ['ExactDate','<epoch ms>'] or 'Today'/'Yesterday'/'CurrentWeek'." },
+                  },
+                  required: ['fieldName', 'operator'],
+                },
+              },
+            },
+            required: ['conditions'],
+          },
+          sort: {
+            type: 'array',
+            description: 'Server-side sort, e.g. [{ fieldName: "最后更新时间", desc: true }].',
+            items: {
+              type: 'object',
+              properties: {
+                fieldName: { type: 'string', description: 'Exact column name.' },
+                desc: { type: 'boolean', description: 'Descending when true.' },
+              },
+              required: ['fieldName'],
+            },
+          },
           maxRecords: { type: 'number', description: 'Max records to return (default 200, hard cap 1000).' },
           pageToken: { type: 'string', description: 'Resume token from a previous call\'s nextPageToken.' },
         },
