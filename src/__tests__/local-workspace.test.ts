@@ -4,13 +4,13 @@ import { withBackendSessionEnv } from '../backendSession.js';
 import { SKILL_IDS } from '@zibby/skill-ids';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
-test('chat opening passes a plain file through without inventing a Git branch', async () => {
+test.each(['/fixtures/notes.txt', '~/Notes/fixture.txt'])('chat opening passes %s unchanged without inventing a Git branch', async (path) => {
   vi.stubEnv('ZIBBY_ACCOUNT_API_URL', 'http://control-plane'); vi.stubEnv('PROJECT_API_TOKEN', 'private-test-token');
   const fetch = vi.fn(async () => ({ ok: true, json: async () => ({ workspace: { kind: 'live', sourceType: 'file' } }) }));
   vi.stubGlobal('fetch', fetch);
-  const result = JSON.parse(await localWorkspaceSkill.handleToolCall('open_workspace', { path: '/fixtures/notes.txt' }));
+  const result = JSON.parse(await localWorkspaceSkill.handleToolCall('open_workspace', { path }));
   expect(result.workspace.kind).toBe('live');
-  expect(JSON.parse((fetch.mock.calls[0] as any)[1].body)).toEqual({ path: '/fixtures/notes.txt' });
+  expect(JSON.parse((fetch.mock.calls[0] as any)[1].body)).toEqual({ path });
   expect(localWorkspaceSkill.tools.find((t: any) => t.name === 'open_workspace').description).toContain('No Git or commit required');
 });
 test('execution manifest reuses native file tools and never calls a chat API or clones again', async () => {
