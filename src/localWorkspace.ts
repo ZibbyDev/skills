@@ -43,6 +43,7 @@ Live paths need no refresh. For checkout workspaces, call refresh_workspace only
     { name: 'open_workspace', description: 'Open a user-named local file or directory for LIVE reading, or reuse it. No Git or commit required; includes current uncommitted and ignored files. Original content is read-only.', input_schema: schema({
       path: { type: 'string', description: 'File or directory supplied by the user in authenticated dashboard chat. Accepts absolute paths and ~/ paths; pass ~/ unchanged for host-side expansion.' },
       branch: { type: 'string', description: 'Omit for live host reading. Specify only to request a committed Git checkout instead.' },
+      description: { type: 'string', maxLength: 240, description: 'Optional short purpose based on the user’s request, for the workspace list in Settings. Do not include secrets or invent facts.' },
     }, ['path']) },
     { name: 'refresh_workspace', description: 'Explicitly refresh from the source’s current committed version. Refuses modified, untracked or ignored files and local commits. Failed preparation preserves the existing workspace. Returns the replacement workspace id.', input_schema: schema({ workspaceId }, ['workspaceId']) },
     { name: 'close_workspace', description: 'Remove an unused clean workspace and release its storage reservation. Refuses to discard changes, local commits or extra files. Does not delete the original host directory.', input_schema: schema({ workspaceId }, ['workspaceId']) },
