@@ -54,6 +54,7 @@ test('ordinary declared skill, backend-session env derived through the shared wr
   expect(registered.envKeys).toEqual(expect.arrayContaining(['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL']));
   expect(localWorkspaceSkill.tools.map((tool: any) => tool.name)).toEqual([
     'list_workspaces', 'open_workspace', 'refresh_workspace', 'close_workspace', 'run_workspace_command',
+    'publish_workspace_file',
   ]);
   for (const tool of localWorkspaceSkill.tools) {
     expect(tool.input_schema.properties).not.toHaveProperty('threadKey');
@@ -77,4 +78,39 @@ test('unavailable session and raw transport failures never leak credentials', as
   vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Bearer private-test-token'); }));
   const response = await localWorkspaceSkill.handleToolCall('list_workspaces');
   expect(response).not.toContain('private-test-token'); expect(JSON.parse(response).ok).toBe(false);
+});
+
+// ── publish_workspace_file: the one call that replaces the six-step dance ────
+// The turn it deletes (2026-09-09): show a local HTML file → file:// refused →
+// an HTTP server started on the founder's own Mac → four blank pages → the file
+// read back in 16 KB base64 chunks → artifact_publish with the whole document
+// re-emitted inline. Everything below is about that never happening again.
+test('publish_workspace_file is one call: a path in, a resource name out', async () => {
+  vi.stubEnv('ZIBBY_ACCOUNT_API_URL', 'http://control-plane:3001');
+  vi.stubEnv('PROJECT_API_TOKEN', 'private-test-token');
+  const fetch = vi.fn(async () => ({ ok: true, json: async () => ({ id: 'a1', rn: 'rn:box:acct:proj:artifact:a1' }) }));
+  vi.stubGlobal('fetch', fetch);
+  const out = JSON.parse(await localWorkspaceSkill.handleToolCall('publish_workspace_file', { path: '~/Desktop/p/index.html' }));
+  expect(out.ok).toBe(true);
+  expect(out.rn).toBe('rn:box:acct:proj:artifact:a1');
+  // ONE round trip, to the publish operation, with the path passed straight
+  // through — no read, no chunking, no size judgement on this side.
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toBe('http://control-plane:3001/selfhost/workspaces/publish');
+  expect(JSON.parse((fetch.mock.calls[0] as any)[1].body)).toEqual({ path: '~/Desktop/p/index.html' });
+});
+
+test('the local-file route is stated where a model plans, not only where it fails', () => {
+  const tool = localWorkspaceSkill.tools.find((entry: any) => entry.name === 'publish_workspace_file');
+  // The description has to carry the whole recipe: what it is for, what the
+  // browser cannot do, and what to call next. A model reads this BEFORE it has
+  // spent a tool call, which is the only moment the constraint can change a plan.
+  expect(tool.description).toMatch(/browser_set_content/);
+  expect(tool.description).toMatch(/htmlRef/);
+  expect(tool.description).toMatch(/file:\/\//);
+  expect(tool.description).toMatch(/do NOT read, chunk, base64/);
+  expect(tool.input_schema.required).toEqual(['path']);
+  // And in the always-loaded prompt, so it is reachable without tool search.
+  expect(localWorkspaceSkill.promptFragment).toMatch(/publish_workspace_file/);
+  expect(localWorkspaceSkill.promptFragment).toMatch(/never start an HTTP server/);
 });
