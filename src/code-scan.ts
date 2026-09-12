@@ -35,12 +35,22 @@
  *     `semgrep` CLI, no network, no telemetry, no registry) with a VENDORED curated
  *     ruleset + a generated local targets file; see resolveSemgrepBin. It scans ALL
  *     its languages in ONE invocation via a `-targets` file. JS/TS is intentionally
- *     left to oxlint (semgrep EXCLUDES it) to avoid double-scanning.
+ *     left to oxlint (semgrep EXCLUDES it) to avoid double-scanning. Its 263 MB
+ *     engine is the one thing here that is NOT in the image: it is materialized ON
+ *     DEMAND from a sha256-pinned artifact on our own CDN the first time a scan
+ *     needs it (see resolveSemgrepBin), so image size stops tracking how many
+ *     engines the product supports.
  * ruff (Python) + staticcheck (Go) remain SCAFFOLD entries (registry + parser
  * present, clearly marked TODO) — semgrep now covers Python/Go for BREADTH; ruff/
  * staticcheck can still be wired later for DEPTH. Best-effort throughout: a missing
  * binary (spawn ENOENT), an unreadable file, or a parser hiccup NEVER throws — the
  * scanner is skipped with a note and the others still run.
+ *
+ * ONE THING IS NOT BEST-EFFORT: an engine whose DELIVERY fails (download broke,
+ * sha256 mismatch, archive won't unpack). That is not "this stack has no linter",
+ * it is "the analysis you asked for silently did not happen", so it surfaces as
+ * `unavailable` on the scanner block plus a top-level `degraded` array — never as
+ * a skip. See runScanner.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -50,7 +60,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { SKILL_META } from '@zibby/skill-ids';
 import { binPath as oxlintBinPath } from '@zibby/bin-oxlint';
-import { binPath as semgrepBinPath } from '@zibby/bin-semgrep';
+import { ensureBinPath as ensureSemgrepBin } from '@zibby/bin-semgrep';
 
 /**
  * Resolve the oxlint binary. Preference:
@@ -79,26 +89,34 @@ function resolveOxlintBin() {
 }
 
 /**
- * Resolve the Semgrep OSS engine binary (`semgrep-core`). SAME rationale as
- * resolveOxlintBin:
- *   1. SEMGREP_CORE_BIN env (explicit override / a baked binary if one exists).
- *   2. @zibby/bin-semgrep — Zibby's SELF-VENDORED, sha-pinned OSS `semgrep-core`
- *      (LGPL-2.1), a DEP of @zibby/skills. Its host-matched platform package
- *      (@zibby/bin-semgrep-<os>-<cpu>, os/cpu-gated optionalDependency) carries the
- *      engine binary + its sibling `libs/` (the binary rpaths to it). Fetched from
- *      Semgrep's OFFICIAL PyPI wheel ONCE at Zibby's publish time, sha256-verified,
- *      vendored in. So after the run container's `npm install`, semgrep-core is in
- *      node_modules with NO upstream binary trust and NO run-time fetch. binPath()
- *      returns null on an unsupported platform → fall through to PATH.
- *   3. `semgrep-core` on PATH (last resort).
+ * Resolve the Semgrep OSS engine binary (`semgrep-core`) — ON DEMAND.
+ *
+ * ⚠️ DIFFERENT FROM resolveOxlintBin, AND ASYNC ON PURPOSE. oxlint is ~18 MB and
+ * still rides into the image as a vendored npm dep. The Semgrep engine is 263 MB,
+ * and baking it meant EVERY agent carried a multi-language SAST engine most of
+ * them never invoke (design doc 2026-09-11, stage 1). It is now delivered the way
+ * an on-demand sidecar image is, one layer down: a sha256-pinned artifact fetched
+ * from OUR OWN CDN the first time a scan needs it, verified, unpacked into a
+ * local cache, and reused from then on.
+ *
+ *   1. SEMGREP_CORE_BIN env — an explicit path wins over everything, and is the
+ *      sanctioned escape hatch for an air-gapped box, a developer's local build,
+ *      or an image that deliberately pre-seeds the engine.
+ *   2. @zibby/bin-semgrep `ensureBinPath()` — cache hit, else fetch →
+ *      sha256-verify (FAIL CLOSED) → atomic unpack → path.
+ *
+ * THERE IS NO PATH FALLBACK ANY MORE, and that is the point. Returning the bare
+ * name `semgrep-core` on failure made a BROKEN DELIVERY indistinguishable from
+ * "this stack has no linter": both ended as a spawn ENOENT, which runScanner
+ * folds into the best-effort skip path. That is the silent-degradation failure
+ * the design calls out by name — a review that quietly lost its Java/Python/Go
+ * analysis and told nobody. So this THROWS a BinaryUnavailableError carrying a
+ * machine-readable `.reason`, and runScanner reports a delivery failure
+ * DISTINCTLY from a skip.
  */
-function resolveSemgrepBin() {
+async function resolveSemgrepBin() {
   if (process.env.SEMGREP_CORE_BIN) return process.env.SEMGREP_CORE_BIN;
-  try {
-    const p = semgrepBinPath();
-    if (p && existsSync(p)) return p;
-  } catch { /* not resolvable → PATH fallback */ }
-  return 'semgrep-core';
+  return ensureSemgrepBin();
 }
 
 /**
@@ -480,8 +498,9 @@ export const SCANNERS = [
   {
     // Java / Python / Go / Ruby / PHP — semgrep OSS engine (LGPL-2.1, semgrep-core).
     // Resolved from @zibby/bin-semgrep (Zibby's self-vendored, sha-pinned engine, a
-    // dep of @zibby/skills) via resolveSemgrepBin; SEMGREP_CORE_BIN overrides. No
-    // image bake. ONE invocation scans all detected languages via a generated
+    // dep of @zibby/skills) via resolveSemgrepBin, which MATERIALIZES it on demand
+    // from our own CDN; SEMGREP_CORE_BIN overrides. Genuinely no image bake now.
+    // ONE invocation scans all detected languages via a generated
     // -targets file. Spawned DIRECTLY (no Python/CLI/network/telemetry/registry) —
     // deterministic + offline by construction. JS/TS intentionally excluded (oxlint).
     id: 'semgrep',
@@ -552,11 +571,44 @@ function collectFiles(dir, exts, cap) {
  * Run ONE scanner over its selected files (relative to baseDir). Returns a
  * result block. Best-effort: a missing binary or spawn error becomes a SKIP with
  * a note — it never throws.
+ *
+ * TWO OUTCOMES THAT MUST NOT LOOK ALIKE (design doc §7)
+ * ────────────────────────────────────────────────────
+ *   `skipped`     — expected and harmless: no files in this scanner's languages,
+ *                   or this box was never going to have the tool (unsupported
+ *                   platform / a scaffold entry that was never wired up).
+ *   `unavailable` — the tool WAS expected and its DELIVERY BROKE: the download
+ *                   failed, the sha256 did not match, the archive would not
+ *                   unpack. The scan ran WEAKER than it should have, and folding
+ *                   that into `skipped` is exactly how a review silently gets
+ *                   worse with nobody noticing. It is named distinctly here, it
+ *                   carries the reason, and handleToolCall lifts it to a
+ *                   top-level `degraded` array so a reader cannot miss it.
+ *
+ * `bin()` may be async (an engine is materialized on demand), so this is async.
  */
-function runScanner(scanner, baseDir, absFiles) {
+async function runScanner(scanner, baseDir, absFiles) {
   const rel = absFiles.map((f) => relative(baseDir, f)).filter(Boolean);
   if (!rel.length) return { scanner: scanner.id, skipped: 'no matching files' };
-  const bin = scanner.bin();
+  let bin;
+  try {
+    bin = await scanner.bin();
+  } catch (e: any) {
+    // A delivery failure is LOUD; "this platform has no artifact" stays a skip.
+    if (e?.isDeliveryFailure) {
+      return {
+        scanner: scanner.id,
+        unavailable: `${scanner.id} unavailable: ${e.reason === 'download-failed' ? 'download failed' : e.reason}`,
+        reason: e.reason,
+        detail: String(e.message || e),
+        // Name the ACTUAL extensions present, not the scanner's whole language
+        // list — "2 files in .java/.py/.go/.rb/.php" invites the reader to guess
+        // which two, and the point of this field is to remove the guessing.
+        impact: `${rel.length} ${[...new Set(rel.map((f) => extname(f).toLowerCase()))].sort().join('/')} file(s) were NOT statically analysed. Treat this review as INCOMPLETE for those files and say so.`,
+      };
+    }
+    return { scanner: scanner.id, skipped: `binary not available (${e?.reason || 'unknown'}): ${String(e?.message || e)}` };
+  }
   const res = spawnSync(bin, scanner.args(rel, { baseDir }), {
     cwd: baseDir,
     encoding: 'utf-8',
@@ -593,7 +645,10 @@ Java/Python/Go/Ruby/PHP→semgrep) and runs the matching tool. Pass \`files\` (t
 a review) or \`dir\` (a directory to scan). Findings are GROUND-TRUTH CANDIDATES:
 triage them for THIS change, verify each in context (false positives exist —
 trace before asserting), fold noise, and turn the real ones into inline
-suggestions. Don't hand-lint what the tool already covers, and don't re-run it.`,
+suggestions. Don't hand-lint what the tool already covers, and don't re-run it.
+If the result has a \`degraded\` array, an engine failed to DOWNLOAD — those files
+were not scanned at all. Say so in your review; never let a delivery failure read
+as a clean bill of health.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -651,7 +706,7 @@ suggestions. Don't hand-lint what the tool already covers, and don't re-run it.`
           ? explicitAbs.filter((f) => langSet.has(extname(f).toLowerCase()))
           : collectFiles(baseDir, scanner.langs, MAX_FILES_PER_SCANNER);
 
-        const block = runScanner(scanner, baseDir, files);
+        const block: any = await runScanner(scanner, baseDir, files);
         if (Array.isArray(block.findings)) totalFindings += block.findings.length;
         scanners.push(block);
       }
@@ -661,6 +716,15 @@ suggestions. Don't hand-lint what the tool already covers, and don't re-run it.`
           ok: true, baseDir, scanners: [], totalFindings: 0,
           note: 'No known stack detected (no package.json / pyproject / go.mod …). Review by hand.',
         });
+      }
+      // Lift any DELIVERY failure to the top level. Buried in a per-scanner block
+      // it reads like one more best-effort skip; at the top, with the word
+      // "degraded" on it, it is the first thing the reader sees. A scan that
+      // could not obtain an engine it was supposed to have is NOT a clean scan.
+      const degraded = scanners.filter((s: any) => s.unavailable)
+        .map((s: any) => `${s.unavailable} — ${s.impact}`);
+      if (degraded.length) {
+        return JSON.stringify({ ok: true, baseDir, totalFindings, degraded, scanners });
       }
       return JSON.stringify({ ok: true, baseDir, totalFindings, scanners });
     } catch (e) {
@@ -675,7 +739,8 @@ suggestions. Don't hand-lint what the tool already covers, and don't re-run it.`
         + 'Auto-detects the stack (JS/TS → oxlint; Java/Python/Go/Ruby/PHP → semgrep OSS) and runs each matching tool, '
         + 'scoped to files in its languages. Pass `files` (e.g. the changed files of the PR — recommended for a review) '
         + 'OR `dir` (a directory to scan). Returns { scanners: [ { scanner, findings: [ { file, line, severity, rule, message } ] } ] }. '
-        + 'Findings are CANDIDATES — verify each in context before asserting. Best-effort: a stack whose linter is not installed is skipped with a note.',
+        + 'Findings are CANDIDATES — verify each in context before asserting. Best-effort: a stack whose linter is not installed is skipped with a note. '
+        + 'If the result carries a `degraded` array, an engine that SHOULD have run could not be delivered — those languages were not analysed at all, so say the review is incomplete for them rather than implying they came back clean.',
       input_schema: {
         type: 'object',
         properties: {
