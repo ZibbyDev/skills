@@ -301,7 +301,10 @@ async function readRunLogs(args: any) {
   if (!executionId) return { error: 'give executionId (from list_running_agents); this run has no EXECUTION_ID of its own to default to' };
   const q = logsQuery(args);
   if ('error' in q) return q;
-  const url = `${getAccountApiUrl()}/logs/${encodeURIComponent(projectId)}/${encodeURIComponent(executionId)}?${q.qs}`;
+  // Cloud serves /logs on the workflows-subdomain API and injects RUN_LOGS_API_URL;
+  // a box / dev tunnel serve it on the account API and leave it unset.
+  const base = (process.env.RUN_LOGS_API_URL || '').trim().replace(/\/$/, '') || getAccountApiUrl();
+  const url = `${base}/logs/${encodeURIComponent(projectId)}/${encodeURIComponent(executionId)}?${q.qs}`;
   const res = await fetchWithDeadline(url, { headers: authHeaders(token) }, { kind: 'api', what: 'agent-messaging GET run logs' });
   if (!res.ok) return { error: await errorTextOf(res, `reading the log of run ${executionId}`) };
   const json: any = await res.json();
@@ -507,6 +510,8 @@ it is refused, and the right way is the agent's Env tab.`,
     const env: any = {};
     for (const key of [
       'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'ZIBBY_USER_TOKEN',
+      // Where read_run_logs reads logs in the cloud (unset on a box / dev).
+      'RUN_LOGS_API_URL',
       // The run's identity — which mailbox is ours, which project, which run.
       'EXECUTION_ID', 'PROJECT_ID', 'WORKFLOW_TYPE',
     ]) {

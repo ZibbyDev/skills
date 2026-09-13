@@ -417,6 +417,15 @@ describe('read_run_logs', () => {
     expect(out.cursor).toBe('cw-next');
   });
 
+  it('uses RUN_LOGS_API_URL when the platform injects it (cloud), the account API otherwise', async () => {
+    mockDoor([['/logs/', () => ({ json: { lines: [] } })]]);
+    process.env.RUN_LOGS_API_URL = 'https://logs.example.test/';
+    try { await call('read_run_logs', { executionId: 'child-A' }); } finally { delete process.env.RUN_LOGS_API_URL; }
+    await call('read_run_logs', { executionId: 'child-A' });
+    expect(new URL(seen[0].url).origin).toBe('https://logs.example.test');
+    expect(new URL(seen[1].url).origin).toBe('http://cp.local');
+  });
+
   it('bad arguments are refused before any request', async () => {
     mockDoor([]);
     expect((await call('read_run_logs', { mode: 'search' })).error).toMatch(/query is required/);
