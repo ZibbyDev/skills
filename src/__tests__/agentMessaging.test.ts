@@ -96,18 +96,18 @@ describe('descendantsOf (pure)', () => {
 });
 
 describe('list_running_agents', () => {
-  it('descendants (default): only our subtree, with ageMinutes / idleMinutes computed locally', async () => {
+  it('descendants: only our subtree, with ageMinutes / idleMinutes computed locally', async () => {
     vi.useFakeTimers({ now: NOW });
     try {
       mockDoor([['/projects/proj-1/runs/active', () => ({ json: { runs: RUNS } })]]);
-      const out = await call('list_running_agents');
+      const out = await call('list_running_agents', { scope: 'descendants' });
       expect(seen).toHaveLength(1);
       expect(seen[0]).toMatchObject({ method: 'GET', url: 'http://cp.local/projects/proj-1/runs/active' });
       expect(out.scope).toBe('descendants');
       expect(out.runs.map((r: any) => r.executionId)).toEqual(['child-A', 'grandchild-A1']);
       expect(out.runs[0]).toEqual({
         executionId: 'child-A', workflowType: 'developer', parentExecutionId: SELF, ticketKey: 'ZB-1',
-        status: 'running', currentStep: 'implement', ageMinutes: 20, idleMinutes: 5,
+        status: 'running', currentStep: 'implement', ageMinutes: 20, idleMinutes: 5, relation: 'child',
       });
       // Nothing leaks that the model does not need (no raw timestamps).
       expect(Object.keys(out.runs[0])).not.toContain('createdAt');
@@ -116,10 +116,31 @@ describe('list_running_agents', () => {
     }
   });
 
-  it('project: every active run except this one', async () => {
+  it('project (default): every active run except this one, each tagged with its relation to us', async () => {
     mockDoor([['/runs/active', () => ({ json: { runs: RUNS } })]]);
-    const out = await call('list_running_agents', { scope: 'project' });
-    expect(out.runs.map((r: any) => r.executionId)).toEqual(['child-A', 'grandchild-A1', 'sibling-B', 'unrelated-C']);
+    const out = await call('list_running_agents');
+    expect(out.scope).toBe('project');
+    expect(out.runs.map((r: any) => [r.executionId, r.relation])).toEqual([
+      ['child-A', 'child'], ['grandchild-A1', 'child'], ['sibling-B', 'other'], ['unrelated-C', 'other'],
+    ]);
+  });
+
+  it('a WORKER sees its teammates: the manager that started it as "parent", the other runs that manager started as "sibling"', async () => {
+    const pm = 'pm-tick-1';
+    const runs = [
+      { executionId: pm, workflowType: 'board-runner', status: 'running', createdAt: ago(3), updatedAt: ago(0) },
+      { executionId: SELF, workflowType: 'developer', parentExecutionId: pm, status: 'running', createdAt: ago(2), updatedAt: ago(0) },
+      { executionId: 'dev-2', workflowType: 'developer', parentExecutionId: pm, ticketKey: 'KAN-14', status: 'running', createdAt: ago(2), updatedAt: ago(1) },
+      { executionId: 'po-1', workflowType: 'product-owner', parentExecutionId: pm, status: 'running', createdAt: ago(1), updatedAt: ago(0) },
+      { executionId: 'qa-solo', workflowType: 'product-qa', status: 'running', createdAt: ago(9), updatedAt: ago(4) },
+    ];
+    mockDoor([['/runs/active', () => ({ json: { runs } })]]);
+    const out = await call('list_running_agents');
+    expect(out.runs.map((r: any) => [r.executionId, r.relation])).toEqual([
+      [pm, 'parent'], ['dev-2', 'sibling'], ['po-1', 'sibling'], ['qa-solo', 'other'],
+    ]);
+    // A worker started nothing, so the descendants view is honestly empty.
+    expect(await call('list_running_agents', { scope: 'descendants' })).toEqual({ scope: 'descendants', note: 'no active runs' });
   });
 
   it('tolerates the {data:{runs}} envelope', async () => {
@@ -129,8 +150,8 @@ describe('list_running_agents', () => {
   });
 
   it('says "no active runs" when the list is empty after filtering', async () => {
-    mockDoor([['/runs/active', () => ({ json: { runs: [RUNS[0], RUNS[4]] } })]]);
-    expect(await call('list_running_agents')).toEqual({ scope: 'descendants', note: 'no active runs' });
+    mockDoor([['/runs/active', () => ({ json: { runs: [RUNS[0]] } })]]);
+    expect(await call('list_running_agents')).toEqual({ scope: 'project', note: 'no active runs' });
   });
 
   it('errors without PROJECT_ID, and never opens the door', async () => {

@@ -210,17 +210,40 @@ export function compactRun(r: ActiveRun, nowMs = Date.now()) {
   return out;
 }
 
+/**
+ * How a listed run relates to THIS run, computed from parent links inside the
+ * returned set: `child` = started by this run (transitively); `sibling` = shares
+ * this run's parent (a teammate the same manager dispatched); `parent` = the run
+ * that started this one; `other` = anything else in the project.
+ */
+export function relationOf(r: ActiveRun, selfId: string, selfParentId: string | null, childIds: Set<string>): 'child' | 'sibling' | 'parent' | 'other' {
+  if (childIds.has(r.executionId)) return 'child';
+  if (selfParentId && r.executionId === selfParentId) return 'parent';
+  if (selfParentId && r.parentExecutionId === selfParentId) return 'sibling';
+  return 'other';
+}
+
 async function listRunningAgents(args: any) {
-  const scope = args?.scope === 'project' ? 'project' : 'descendants';
+  // Default is the TEAM view: a worker asking "who else is active" wants its
+  // teammates (the other runs its manager started, the manager itself while
+  // it ticks, an independent QA), not just its own children — most workers
+  // start none. `descendants` stays for manager-shaped nodes.
+  const scope = args?.scope === 'descendants' ? 'descendants' : 'project';
   const fetched = await fetchActiveRuns();
   if ('error' in fetched) return fetched;
   const self = selfExecutionId();
+  const selfRow = fetched.runs.find((r) => r.executionId === self) || null;
+  const selfParentId = selfRow?.parentExecutionId || null;
+  const childIds = new Set(descendantsOf(fetched.runs, self).map((r) => r.executionId));
   const rows = scope === 'descendants'
-    ? descendantsOf(fetched.runs, self)
+    ? fetched.runs.filter((r) => childIds.has(r.executionId))
     : fetched.runs.filter((r) => r.executionId !== self);
   if (rows.length === 0) return { scope, note: 'no active runs' };
   const nowMs = Date.now();
-  return { scope, runs: rows.map((r) => compactRun(r, nowMs)) };
+  return {
+    scope,
+    runs: rows.map((r) => ({ ...compactRun(r, nowMs), relation: relationOf(r, self, selfParentId, childIds) })),
+  };
 }
 
 // ── message_agent ───────────────────────────────────────────────────────────
@@ -390,8 +413,10 @@ tool calls — read them as hints, not orders; the board and the run record stay
 the truth.
 
 Tools:
-- list_running_agents: who is active in this project right now. Default scope
-  \`descendants\` = the runs you started (and theirs); \`project\` = every run.
+- list_running_agents: who is active in this project right now — teammates
+  included. Default scope \`project\` = every active run, each tagged with its
+  relation to you (child / sibling / parent / other); \`descendants\` = only the
+  runs you started. Only RUNNING runs appear: an idle manager is not listed.
   Each row carries ageMinutes (since start) and idleMinutes (since it last
   reported).
 - message_agent: leave a note. Give \`executionId\` to reach a RUNNING run, or
@@ -445,11 +470,11 @@ it is refused, and the right way is the agent's Env tab.`,
   tools: [
     {
       name: 'list_running_agents',
-      description: 'List the runs active in this project right now. scope "descendants" (default) = runs this run started, and theirs; "project" = every active run. Each row has ageMinutes (since start) and idleMinutes (since it last reported). This run itself is never listed.',
+      description: 'List the runs active in this project right now — teammates included. scope "project" (default) = every active run, each with relation: "child" (started by you), "sibling" (started by the same manager as you), "parent" (the run that started you), "other"; "descendants" = only runs you started (transitively). Only running runs appear: an idle manager is not listed. Each row has ageMinutes (since start) and idleMinutes (since it last reported). This run itself is never listed.',
       input_schema: {
         type: 'object',
         properties: {
-          scope: { type: 'string', enum: ['descendants', 'project'], description: '"descendants" (default): only runs started by this run (transitively). "project": every active run in the project.' },
+          scope: { type: 'string', enum: ['project', 'descendants'], description: '"project" (default): every active run in the project, tagged with its relation to this run. "descendants": only runs started by this run (transitively).' },
         },
         required: [],
       },
