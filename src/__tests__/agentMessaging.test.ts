@@ -37,6 +37,7 @@ Object.assign(process.env, ENV);
 
 const {
   agentMessagingSkill, descendantsOf, compactRun, parseInboxNote, mailboxPrefix, DRAIN_MAX_PAGES,
+  logsQuery, LOG_LINES_MAX, LOG_LINE_MAX_CHARS,
 } = await import('../agentMessaging.js');
 
 const call = (name: string, args: any = {}) => agentMessagingSkill.handleToolCall(name, args).then(JSON.parse);
@@ -318,7 +319,7 @@ describe('the skill object', () => {
     }
     expect(agentMessagingSkill.serverName).toBe('agent_messaging');
     expect(agentMessagingSkill.allowedTools).toEqual(['mcp__agent_messaging__*']);
-    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'message_agent', 'check_messages']);
+    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages']);
   });
 
   it('unknown tool → {error}', async () => {
@@ -383,4 +384,56 @@ describe('contract pin: agent-inbox.js message shape', () => {
   });
 
   const parsedNull = (obj: any) => parseInboxNote({ scope: 'x', content: JSON.stringify(obj) });
+});
+
+
+describe('read_run_logs', () => {
+  const PAGE = {
+    workflowType: 'developer', status: 'running', pagingMode: 'line-tail', totalLines: 900, hasOlder: true,
+    lines: [{ timestamp: null, line: 899, message: '[developer] running tests' }, { timestamp: null, line: 900, message: 'x'.repeat(LOG_LINE_MAX_CHARS + 5) }],
+  };
+
+  it('defaults to THIS run, tail, 100 lines — on the existing logs route', async () => {
+    mockDoor([['/logs/', () => ({ json: PAGE })]]);
+    const out = await call('read_run_logs');
+    expect(seen).toHaveLength(1);
+    const u = new URL(seen[0].url);
+    expect(u.pathname).toBe(`/logs/proj-1/${SELF}`);
+    expect(Object.fromEntries(u.searchParams)).toEqual({ limit: '100', from: 'tail' });
+    expect(out.executionId).toBe(SELF);
+    expect(out.status).toBe('running');
+    expect(out.lines[0]).toEqual({ line: 899, text: '[developer] running tests' });
+    expect(out.lines[1].text).toMatch(/… \[5 more chars\]$/);
+    expect(out.hasOlder).toBe(true);
+  });
+
+  it('head / search / lines / cursor map onto the route knobs', async () => {
+    mockDoor([['/logs/', () => ({ json: { lines: [], nextToken: 'cw-next' } })]]);
+    await call('read_run_logs', { executionId: 'child-A', mode: 'head', lines: 20 });
+    const out = await call('read_run_logs', { executionId: 'child-A', mode: 'search', query: 'FAIL', lines: 9999, cursor: 'c1' });
+    expect(Object.fromEntries(new URL(seen[0].url).searchParams)).toEqual({ limit: '20', from: 'head' });
+    expect(Object.fromEntries(new URL(seen[1].url).searchParams)).toEqual({ limit: String(LOG_LINES_MAX), q: 'FAIL', nextToken: 'c1' });
+    expect(new URL(seen[1].url).pathname).toBe('/logs/proj-1/child-A');
+    expect(out.cursor).toBe('cw-next');
+  });
+
+  it('bad arguments are refused before any request', async () => {
+    mockDoor([]);
+    expect((await call('read_run_logs', { mode: 'search' })).error).toMatch(/query is required/);
+    expect((await call('read_run_logs', { mode: 'middle' })).error).toMatch(/mode must be/);
+    expect((await call('read_run_logs', { lines: 0 })).error).toMatch(/lines must be/);
+    expect(seen).toHaveLength(0);
+    expect('error' in logsQuery({ mode: 'search', query: 'q'.repeat(201) })).toBe(true);
+  });
+
+  it('a refusal from the platform comes back as {error}', async () => {
+    mockDoor([['/logs/', () => ({ ok: false, status: 403, json: { error: 'This token is not authorized for that project' } })]]);
+    const out = await call('read_run_logs', { executionId: 'other' });
+    expect(out.error).toMatch(/not authorized/);
+  });
+
+  it('is declared as a tool and mentioned in the prompt', () => {
+    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toContain('read_run_logs');
+    expect(agentMessagingSkill.promptFragment).toMatch(/read_run_logs/);
+  });
 });
