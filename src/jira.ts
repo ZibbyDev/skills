@@ -392,7 +392,13 @@ export function jiraApiCall(cred: any, path: string, opts: any = {}) {
   const c = cred || {};
   const extra = {
     Accept: 'application/json',
-    ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+    // ⛔ NO Content-Type FOR A MULTIPART `form`. undici generates the
+    // `multipart/form-data` header WITH its boundary parameter from the
+    // FormData itself; a hand-set header here would overwrite it with a
+    // boundary-less value and Jira would reject the body as unparseable. So
+    // `form` is deliberately a SEPARATE option from `body` rather than "a body
+    // that happens not to be JSON" — the two cannot be confused.
+    ...(opts.body && !opts.form ? { 'Content-Type': 'application/json' } : {}),
     ...opts.headers,
   };
   if (c.authType === 'token') {
@@ -471,7 +477,7 @@ export function jiraApiCall(cred: any, path: string, opts: any = {}) {
  * than replacing one with the other.
  *
  * @param {string} path  Jira REST path, e.g. `/rest/api/3/issue/PROJ-1`
- * @param {{ method?: string, body?: any, headers?: object, signal?: AbortSignal }} [opts]
+ * @param {{ method?: string, body?: any, form?: FormData, headers?: object, signal?: AbortSignal }} [opts]
  * @returns {Promise<any>} parsed JSON response body
  */
 export async function jiraFetch(path, opts: any = {}) {
@@ -481,7 +487,16 @@ export async function jiraFetch(path, opts: any = {}) {
     const res = await fetchWithDeadline(url, {
       method: opts.method || 'GET',
       headers,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      // `opts.form` (a FormData) is the MULTIPART path — the attachment upload
+      // (`POST /rest/api/3/issue/{key}/attachments`), and nothing else. It is
+      // passed through UNTOUCHED: stringifying a FormData yields "[object
+      // FormData]", which is exactly the silent corruption a shared `body`
+      // option would have produced. Everything else about the call — the
+      // credential resolution, the retry, the deadline, the error shape — is
+      // the JSON path's, unchanged, because this is still the ONE Jira
+      // chokepoint and a second uploader would be a second place to hold the
+      // credential.
+      body: opts.form ? opts.form : (opts.body ? JSON.stringify(opts.body) : undefined),
       // Absent ⇒ `undefined` ⇒ the deadline below is the only signal.
       signal: opts.signal,
     }, {
