@@ -27,6 +27,7 @@
 import { dirname, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
+import { EFFORT_LEVELS } from '@zibby/agent-workflow';
 import { fetchWithDeadline } from './lib/http-deadline.js';
 
 /** Generic skill MCP-server binary — derived from import.meta.url so it works in
@@ -79,6 +80,12 @@ const TRIGGER_TOOL: any = {
         type: 'object',
         description: 'The trigger payload passed to the target workflow (validated against its state schema).',
       },
+      effort: {
+        type: 'string',
+        // DERIVED from the engine's closed set — never a hand-typed list.
+        enum: [...EFFORT_LEVELS],
+        description: 'Optional: how hard the started run\'s model should think (low = quick/cheap, max = deepest). Omit for that agent\'s default.',
+      },
     },
     required: [],
   },
@@ -104,6 +111,7 @@ that run to finish.
 - To re-run THIS same agent (self-dispatch) — e.g. to hand an item to another of
   this agent's scenarios — OMIT \`workflowType\` and pass the \`input\` for that run.
 - To trigger a DIFFERENT agent in the project, pass its \`workflowType\` + \`input\`.
+- Optional \`effort\` (low…max) sets how hard that run's model thinks; omit it for the agent's default.
 Call it once per run you want to start (loop over your items and call it for each).
 It never throws — a failure comes back as { ok:false, error }; log it and move on.`,
 
@@ -144,6 +152,16 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
       if (!projectId) return JSON.stringify({ ok: false, error: 'PROJECT_ID not set — cannot resolve the target project.' });
       if (!token)     return JSON.stringify({ ok: false, error: 'PROJECT_API_TOKEN not set — cannot authenticate the trigger.' });
       if (!workflowType) return JSON.stringify({ ok: false, error: 'No workflowType given and WORKFLOW_TYPE is unset — nothing to trigger.' });
+      // Per-run effort: validated against the engine's closed set BEFORE the
+      // trigger, so a bad pick is a readable refusal, not a started run.
+      let effort: string | null = null;
+      if (args.effort !== undefined && args.effort !== null && args.effort !== '') {
+        const pick = typeof args.effort === 'string' ? args.effort.trim().toLowerCase() : '';
+        if (!EFFORT_LEVELS.includes(pick)) {
+          return JSON.stringify({ ok: false, error: `unknown effort "${String(args.effort).slice(0, 40)}" — use one of: ${EFFORT_LEVELS.join(', ')}` });
+        }
+        effort = pick;
+      }
 
       const url = `${getApiBase()}/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowType)}/trigger`;
       // Was a hand-rolled AbortController + a literal 20000 — correct, but the
@@ -157,7 +175,10 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
       const resp = await fetchWithDeadline(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ input: (args.input && typeof args.input === 'object') ? args.input : {} }),
+        body: JSON.stringify({
+          input: (args.input && typeof args.input === 'object') ? args.input : {},
+          ...(effort ? { effort } : {}),
+        }),
       }, { kind: 'api', what: `trigger agent ${workflowType}` });
       const text = await resp.text().catch(() => '');
       let body; try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
@@ -165,7 +186,7 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
         return JSON.stringify({ ok: false, error: `trigger failed (HTTP ${resp.status})`, detail: (body && (body.error || body.message)) || text.slice(0, 300) });
       }
       const executionId = body.executionId || body.execution?.id || body.id || null;
-      return JSON.stringify({ ok: true, workflowType, executionId, note: 'run started (fire-and-forget)' });
+      return JSON.stringify({ ok: true, workflowType, executionId, ...(effort ? { effort } : {}), note: 'run started (fire-and-forget)' });
     } catch (e) {
       return JSON.stringify({ ok: false, error: `trigger_agent failed: ${e?.message || String(e)}` });
     }
