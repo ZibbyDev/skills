@@ -63,9 +63,9 @@ test('one version — package.json is what gets published, the spec pins it', ()
 });
 
 test('the engine dependency is a tarball of exactly engineVersion', () => {
-  const dep = pkg.dependencies['agent-graph'];
+  const dep = pkg.dependencies['agent-graph-memory'];
   assert.match(pkg.engineVersion, /^\d+\.\d+\.\d+$/);
-  const m = /^file:vendor\/agent-graph-(\d+\.\d+\.\d+)\.tgz$/.exec(dep);
+  const m = /^file:vendor\/agent-graph-memory-(\d+\.\d+\.\d+)\.tgz$/.exec(dep);
   assert.ok(m, `agent-graph must be a file: tarball under vendor/ until it is on the npm registry (got '${dep}')`);
   assert.equal(m[1], pkg.engineVersion);
   // …and the Dockerfile's build-time assert reads the SAME field, so a bump

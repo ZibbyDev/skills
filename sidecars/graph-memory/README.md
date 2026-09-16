@@ -18,7 +18,7 @@ our open-source engine (`packages/agent-graph`) inside instead of GBrain.
 
 ```bash
 cd packages/skills/sidecars/graph-memory
-npm run vendor                 # npm pack ../../../agent-graph → vendor/agent-graph-0.1.0.tgz
+npm run vendor                 # npm pack ../../../agent-graph → vendor/agent-graph-memory-0.2.0.tgz
 docker build -t custom-sidecar-graph-memory:0.1.0 .
 docker run --rm -p 8093:8093 -v graph-memory-data:/data custom-sidecar-graph-memory:0.1.0
 curl -s localhost:8093/health

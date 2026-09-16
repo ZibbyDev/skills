@@ -39,7 +39,7 @@ RUN npm install --omit=dev --no-audit --no-fund
 # the one package.json SAYS it ships (`engineVersion`), and the server binary
 # the entrypoint execs must actually exist. A pin without an assert is a wish.
 RUN node -e ' \
-  const got = require("agent-graph/package.json").version; \
+  const got = require("agent-graph-memory/package.json").version; \
   const want = require("./package.json").engineVersion; \
   if (got !== want) throw new Error(`agent-graph ${got} installed but package.json engineVersion says ${want}`); \
   console.log(`agent-graph ${got} ok`);' \
