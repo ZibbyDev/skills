@@ -187,6 +187,7 @@ const RECALL_QUERY_SCHEMA = {
     limit: { type: 'integer', description: 'Cap on returned hits (default 50).' },
     order: { type: 'string', enum: ['cost', 'recent', 'oldest'], description: "'cost' (default) = closest first." },
     includeSeeds: { type: 'boolean', description: 'Include the seed nodes themselves as hits.' },
+    project: { type: 'string', enum: ['summary', 'full'], description: "How much of each hit to return: 'summary' (default) = id, kind, label, provenance, time and the path's relation names; 'full' = whole records including attrs." },
     validAt: { type: 'integer', description: 'WORLD-time filter (ms epoch): only edges valid at this instant.' },
     asOf: { type: 'integer', description: 'KNOWLEDGE-time filter (ms epoch): what the graph knew then.' },
     recordedBetween: { type: 'array', items: { type: ['integer', 'null'] }, description: 'KNOWLEDGE-time window [from, to] (ms epoch or null).' },
@@ -199,6 +200,7 @@ const STORE_PARAM = { type: 'string', description: 'The bound memory-graph store
 export const TOOL_OP: Readonly<Record<string, string>> = Object.freeze({
   graph_put: 'put',
   graph_link: 'link',
+  graph_get: 'get',
   graph_recall: 'recall_many',
   graph_subgraph: 'subgraph',
   graph_trace: 'trace',
@@ -228,6 +230,7 @@ If exactly one store is bound you may omit \`store\`; otherwise pass its NAME.
 Tools:
 - graph_put({ id, kind, label, attrs?, store? }): create/update a node (upsert by id, versions kept).
 - graph_link({ src, dst, rel, cost?, scope?, validFrom?, validTo?, attrs?, store? }): assert src →rel→ dst.
+- graph_get({ id | edgeId, store? }): one node or edge, latest version, no traversal — check before you put.
 - graph_recall({ queries: [{ seeds?, match?, rels?, kinds?, maxCost?, direction?, validAt?, asOf? }], store? }):
   batched traversal; each hit carries its cost and the exact path of edges.
 - graph_subgraph({ seeds?, match?, rels?, kinds?, maxCost?, store? }): the induced subgraph (nodes + all live edges) for visualisation/hand-off.
@@ -277,6 +280,12 @@ Tools:
             if (typeof args?.[k] !== 'string' || !args[k].trim()) return JSON.stringify({ error: `${k} (a non-empty string) is required` });
           }
           break;
+        case 'graph_get': {
+          const hasId = typeof args?.id === 'string' && !!args.id.trim();
+          const hasEdge = typeof args?.edgeId === 'string' && !!args.edgeId.trim();
+          if (hasId === hasEdge) return JSON.stringify({ error: 'exactly one of id (a node) or edgeId (an edge) is required' });
+          break;
+        }
         case 'graph_recall':
           if (!Array.isArray(args?.queries) || args.queries.length === 0) return JSON.stringify({ error: 'queries is required (non-empty array of recall queries)' });
           break;
@@ -331,6 +340,18 @@ Tools:
           store: STORE_PARAM,
         },
         required: ['src', 'dst', 'rel'],
+      },
+    },
+    {
+      name: 'graph_get',
+      description: 'Fetch one node (by `id`) or one edge (by `edgeId`) — latest version, no traversal. Returns null when unknown. The cheapest way to check existence or read current attrs before a graph_put.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Node id to fetch.' },
+          edgeId: { type: 'string', description: 'Edge id to fetch instead of a node.' },
+          store: STORE_PARAM,
+        },
       },
     },
     {

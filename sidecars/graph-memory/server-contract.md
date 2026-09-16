@@ -53,19 +53,29 @@ Every op body:
 
 `trusted` is decided by the CONTROL-PLANE per call site, never by the caller:
 
-| door | origin | trusted |
+| door / caller | origin | trusted |
 |---|---|---|
-| `/mcp/agent/<uuid>` graph tools (a model's editor / a fleet member via `endpoint:graph-memory/mcp`) | `agent:<owning workflowType>` | `false` |
+| `/mcp/agent/<uuid>` graph tools reached THROUGH THE BROKER by a run whose agent holds the `requires` link DIRECTLY (its own `{ ref: 'endpoint:graph-memory/mcp', as: 'memory', use: 'code' }` — the fleet manager's reconcile recording what it observed) | `run:<executionId>` | `true` |
+| `/mcp/agent/<uuid>` graph tools reached THROUGH THE BROKER by a run whose agent INHERITS the link (`inherit: 'parent'` — a fleet member writing its own judgement) | `run:<executionId>` (its own run, not the owner's name) | `false` |
+| `/mcp/agent/<uuid>` graph tools from a PAT / the endpoint's own bearer (a model's editor, a human), or any broker hop that is not a run | `agent:<owning workflowType>` | `false` |
 | `/datasets/stores/:id/<op>` from a RUN OF THE OWNING AGENT (its run-scoped token carries a signed `executionId`; the execution row is read under the caller's project and matched to the owner row by deployment uuid) | `run:<executionId>` | `true` |
 | `/datasets/stores/:id/<op>` from anyone else (another agent's run, a project/console token that names no run) | `agent:<owning workflowType>` (resolved from the store's owner row) | `false` |
+| a run whose identity does not resolve to an agent row in its project | — | refused (403 `RUN_IDENTITY_UNRESOLVED`) before anything is forwarded |
 
 The decision is ONE pure function, `writerIdentity()` in
-`backend/src/handlers/graph-memory-store.js`, fed by `datasets.js`
+`backend/src/handlers/graph-memory-store.js`, fed by both doors: `datasets.js`
 (`resolveTenant` → `executionId`, `resolveGraphWriter` → the execution row +
-the owner). So a model-facing call can only write `provenance: 'claimed'` — an
-`observed` claim from it is refused by the engine with a `403 PermissionError`
-naming the fix — while the owning agent's own runtime (the fleet manager's
-reconcile recording what it saw) may write `observed`.
+the owner) and `mcp-agent-store.js` (`dispatchGraphToolCall` → the broker's
+SIGNED caller stamp, `services/caller-agent-stamp.js` `run: { executionId,
+inherited }`, which the broker mints from the SAME identity chain that computes
+the inherited-link tool allowlist — `services/inherited-links.js
+resolveCallerLink`: run token → executionId → execution row → workflowUuid →
+that agent's `requires` entry for the entry's alias). So a model-facing call,
+and every member's write over an inherited link, can only write `provenance:
+'claimed'` — an `observed` claim from it is refused by the engine with a `403
+PermissionError` naming the fix — while the owning agent's own runtime and the
+direct link holder (the fleet manager's reconcile recording what it saw) may
+write `observed`.
 
 ## Data
 
