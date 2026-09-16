@@ -10,6 +10,7 @@
     "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
-    "agent-graph-memory": "file:vendor/agent-graph-memory-0.2.0.tgz"
+    "agent-graph-memory": "file:vendor/agent-graph-memory-0.2.0.tgz",
+    "pg": "^8.11.3"
   }
 }

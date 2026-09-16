@@ -38,13 +38,22 @@ RUN npm install --omit=dev --no-audit --no-fund
 # TWO-PLACES TRIPWIRE (CLAUDE.md): the engine version this image SHIPS must be
 # the one package.json SAYS it ships (`engineVersion`), and the server binary
 # the entrypoint execs must actually exist. A pin without an assert is a wish.
+# The engine's package.json is read by PATH, not by bare specifier: the package
+# has an `exports` map that (correctly) does not expose `./package.json`, so
+# `require("agent-graph-memory/package.json")` throws ERR_PACKAGE_PATH_NOT_EXPORTED
+# — which is not a version mismatch and must not be reported as one. Two
+# separate asserts so each failure names ITS OWN cause.
 RUN node -e ' \
-  const got = require("agent-graph-memory/package.json").version; \
+  const got = require("./node_modules/agent-graph-memory/package.json").version; \
   const want = require("./package.json").engineVersion; \
-  if (got !== want) throw new Error(`agent-graph ${got} installed but package.json engineVersion says ${want}`); \
-  console.log(`agent-graph ${got} ok`);' \
-    && test -x node_modules/.bin/agent-graph-server \
-    || (echo "agent-graph-server binary missing from the installed agent-graph — is the tarball the server build?" && exit 1)
+  if (got !== want) throw new Error(`agent-graph-memory ${got} installed but package.json engineVersion says ${want}`); \
+  console.log(`agent-graph-memory ${got} ok`);'
+RUN test -x node_modules/.bin/agent-graph-server \
+    || (echo "agent-graph-server binary missing from the installed agent-graph-memory — is the tarball the server build (package.json bin)?" && exit 1)
+# The Postgres driver loads `pg` lazily (an OPTIONAL peer of the engine, so a
+# SQLite-only install stays dependency-free); this image declares it as a real
+# dependency and asserts it resolves, or the first request would 500.
+RUN node -e 'require.resolve("pg"); console.log("pg ok")'
 
 COPY entrypoint.sh server-contract.md README.md ./
 RUN chmod +x /app/entrypoint.sh

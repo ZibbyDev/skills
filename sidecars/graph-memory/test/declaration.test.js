@@ -75,6 +75,11 @@ test('the engine dependency is a tarball of exactly engineVersion', () => {
 
 test('the entrypoint runs the server on the postgres driver and forwards the platform bearer', () => {
   assert.match(entrypoint, /agent-graph-server --driver postgres/);
+  // The engine defaults to 127.0.0.1; the control-plane dials the container over
+  // the infra network, so the server must be told to bind every interface (this
+  // was found by the first smoke: /health unreachable from outside the container).
+  assert.match(entrypoint, /^: "\$\{HOST:=0\.0\.0\.0\}"/m);
+  assert.match(entrypoint, /--host "\$HOST"/);
   assert.match(entrypoint, /--auth-token "\$SIDECAR_AUTH_TOKEN"/);
   // Postgres is never reachable off the container.
   assert.match(entrypoint, /listen_addresses=\$PG_HOST/);

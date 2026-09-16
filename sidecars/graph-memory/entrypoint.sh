@@ -20,6 +20,11 @@
 set -euo pipefail
 
 : "${PORT:=8093}"
+# The engine's own default bind is 127.0.0.1 (a local dev default). In this
+# container the CALLER is the control-plane on the infra network, so the server
+# must listen on every interface of the container — Postgres, by contrast, stays
+# on 127.0.0.1 below because nothing outside the container may reach it.
+: "${HOST:=0.0.0.0}"
 : "${PGDATA:=/data/pg}"
 PG_PORT=5432
 PG_HOST=127.0.0.1
@@ -67,9 +72,9 @@ AUTH_ARGS=()
 if [ -n "${SIDECAR_AUTH_TOKEN:-}" ]; then
   AUTH_ARGS=(--auth-token "$SIDECAR_AUTH_TOKEN")
 fi
-log "starting agent-graph-server on :$PORT (driver=postgres, auth=$([ ${#AUTH_ARGS[@]} -gt 0 ] && echo on || echo off))"
+log "starting agent-graph-server on $HOST:$PORT (driver=postgres, auth=$([ ${#AUTH_ARGS[@]} -gt 0 ] && echo on || echo off))"
 agent-graph-server --driver postgres \
   --pg "postgres://$PG_USER@$PG_HOST:$PG_PORT/$PG_DB" \
-  --port "$PORT" "${AUTH_ARGS[@]}" &
+  --host "$HOST" --port "$PORT" "${AUTH_ARGS[@]}" &
 SERVER_PID=$!
 wait "$SERVER_PID"
