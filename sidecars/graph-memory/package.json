@@ -1,0 +1,15 @@
+{
+  "name": "@zibby/sidecar-graph-memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Memory-graph sidecar — the open-source `agent-graph` engine (agent-graph-server, Postgres driver) with Postgres + pgvector embedded in the same container, behind the REST contract in server-contract.md. One shared engine per box; each store is an isolated graph addressed by a server-derived graphId.",
+  "engineVersion": "0.2.0",
+  "scripts": {
+    "vendor": "rm -f vendor/agent-graph-*.tgz && npm pack ../../../agent-graph --pack-destination vendor",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "agent-graph": "file:vendor/agent-graph-0.2.0.tgz"
+  }
+}

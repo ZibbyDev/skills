@@ -49,6 +49,7 @@ import { triggerAgentSkill } from './triggerAgent.js';
 import { localWorkspaceSkill } from './localWorkspace.js';
 import { codebaseMemorySkill } from './codebaseMemory.js';
 import { gbrainSkill } from './gbrain.js';
+import { graphMemorySkill } from './graphMemory.js';
 import { workflowBuilderSkill } from './workflow-builder.js';
 import {
   openaiBillingSkill,
@@ -104,6 +105,7 @@ reg(triggerAgentSkill);
 reg(localWorkspaceSkill);
 reg(codebaseMemorySkill);
 reg(gbrainSkill);
+reg(graphMemorySkill);
 reg(workflowBuilderSkill);
 reg(openaiBillingSkill);
 reg(anthropicBillingSkill);
@@ -120,7 +122,7 @@ reg({ ...slackSkill, id: 'slack_notify' });
 export { SKILL_IDS as SKILLS } from '@zibby/skill-ids';
 
 export { devServerPreviewRecipe } from './browser.js';
-export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, vikunjaSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, larkAttendanceSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, agentMessagingSkill, datasetStoreSkill, artifactSkill, chartRenderSkill, reportCheckSkill, codeStatsSkill, chatProgressSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
+export { browserSkill, jiraSkill, githubSkill, gitlabSkill, figmaSkill, hubspotSkill, linearSkill, vikunjaSkill, planeSkill, opendesignSkill, gitSkill, gitWriteSkill, slackSkill, larkSkill, discordSkill, notionSkill, linkedinSkill, googleDocsSkill, larkDocsSkill, larkAttendanceSkill, chatNotifySkill, sentrySkill, memorySkill, chatMemorySkill, kvMemorySkill, agentMessagingSkill, datasetStoreSkill, artifactSkill, chartRenderSkill, reportCheckSkill, codeStatsSkill, chatProgressSkill, socialCardSkill, codeScanSkill, codebaseMemorySkill, gbrainSkill, graphMemorySkill, testRunnerSkill, testRunnerSkill as runnerSkill, skillInstallerSkill, coreToolsSkill, workflowBuilderSkill };
 export {
   openaiBillingSkill,
   anthropicBillingSkill,
