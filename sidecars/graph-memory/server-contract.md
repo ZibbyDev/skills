@@ -56,11 +56,16 @@ Every op body:
 | door | origin | trusted |
 |---|---|---|
 | `/mcp/agent/<uuid>` graph tools (a model's editor / a fleet member via `endpoint:graph-memory/mcp`) | `agent:<owning workflowType>` | `false` |
-| `/datasets/stores/:id/<op>` (the `graph-memory` skill inside a run) | `agent:<owning workflowType>` (resolved from the store's owner row) | `false` |
-| a platform-originated write (none today) | the platform component | `true` |
+| `/datasets/stores/:id/<op>` from a RUN OF THE OWNING AGENT (its run-scoped token carries a signed `executionId`; the execution row is read under the caller's project and matched to the owner row by deployment uuid) | `run:<executionId>` | `true` |
+| `/datasets/stores/:id/<op>` from anyone else (another agent's run, a project/console token that names no run) | `agent:<owning workflowType>` (resolved from the store's owner row) | `false` |
 
-So a model-facing call can only write `provenance: 'claimed'` — an `observed`
-claim is refused by the engine with a `403 PermissionError` naming the fix.
+The decision is ONE pure function, `writerIdentity()` in
+`backend/src/handlers/graph-memory-store.js`, fed by `datasets.js`
+(`resolveTenant` → `executionId`, `resolveGraphWriter` → the execution row +
+the owner). So a model-facing call can only write `provenance: 'claimed'` — an
+`observed` claim from it is refused by the engine with a `403 PermissionError`
+naming the fix — while the owning agent's own runtime (the fleet manager's
+reconcile recording what it saw) may write `observed`.
 
 ## Data
 
