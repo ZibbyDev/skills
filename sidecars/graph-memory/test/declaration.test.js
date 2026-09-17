@@ -14,7 +14,9 @@
  *      under; the template spec pins the same number (its updateChannel is
  *      null, so a mismatch means every deploy installs the OLD image forever).
  *   4. engine — `engineVersion` names the agent-graph the image ships, and the
- *      `file:` dependency must point at a tarball of exactly that version.
+ *      `@zibby/agent-graph-memory` dependency must be the REGISTRY package
+ *      pinned to EXACTLY that version (no range: a `^`/`~` would let npm
+ *      resolve a newer engine than the one this image claims to ship).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -62,15 +64,20 @@ test('one version — package.json is what gets published, the spec pins it', ()
   }
 });
 
-test('the engine dependency is a tarball of exactly engineVersion', () => {
-  const dep = pkg.dependencies['agent-graph-memory'];
+test('the engine dependency is the registry package pinned to EXACTLY engineVersion', () => {
+  const dep = pkg.dependencies['@zibby/agent-graph-memory'];
   assert.match(pkg.engineVersion, /^\d+\.\d+\.\d+$/);
-  const m = /^file:vendor\/agent-graph-memory-(\d+\.\d+\.\d+)\.tgz$/.exec(dep);
-  assert.ok(m, `agent-graph must be a file: tarball under vendor/ until it is on the npm registry (got '${dep}')`);
-  assert.equal(m[1], pkg.engineVersion);
-  // …and the Dockerfile's build-time assert reads the SAME field, so a bump
-  // that forgets one of the two fails the build, not a box.
+  assert.match(dep ?? '', /^\d+\.\d+\.\d+$/,
+    `@zibby/agent-graph-memory must be an exact semver from the npm registry — no ^/~, no file:/link: (got '${dep}')`);
+  assert.equal(dep, pkg.engineVersion,
+    'dependencies["@zibby/agent-graph-memory"] and engineVersion must move together');
+  // No leftover of the pre-publish vendored-tarball path anywhere in the image.
+  assert.doesNotMatch(dockerfile, /COPY vendor\//);
+  assert.equal(pkg.scripts?.vendor, undefined, 'the vendor script is gone — the engine comes from npm');
+  // …and the Dockerfile's build-time assert reads the SAME field and the SCOPED
+  // install path, so a bump that forgets one of the two fails the build, not a box.
   assert.match(dockerfile, /require\("\.\/package\.json"\)\.engineVersion/);
+  assert.match(dockerfile, /node_modules\/@zibby\/agent-graph-memory\/package\.json/);
 });
 
 test('the entrypoint runs the server on the postgres driver and forwards the platform bearer', () => {

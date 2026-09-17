@@ -24,15 +24,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# The engine, installed from a LOCAL TARBALL of packages/agent-graph today:
-#   (cd packages/skills/sidecars/graph-memory && npm run vendor)   # npm pack → vendor/
-# `package.json` pins `agent-graph` to `file:vendor/agent-graph-<version>.tgz`.
-# TODO(npm): once `agent-graph` is published to the npm registry, change that
-# dependency to the exact registry version and drop the `vendor/` COPY — the
-# build-time assert below keeps passing either way because it checks the
-# RESOLVED version, not where it came from.
+# The engine, installed from the npm REGISTRY: `package.json` pins
+# `@zibby/agent-graph-memory` to an EXACT version (no ^/~) — the same number as
+# its `engineVersion` field, which test/declaration.test.js asserts and the
+# build-time check below re-verifies against what npm actually RESOLVED. The
+# package is public (`npm view @zibby/agent-graph-memory`), so no vendored
+# tarball and no registry credential are needed to build this image.
 COPY package.json ./
-COPY vendor/ ./vendor/
 RUN npm install --omit=dev --no-audit --no-fund
 
 # TWO-PLACES TRIPWIRE (CLAUDE.md): the engine version this image SHIPS must be
@@ -40,16 +38,16 @@ RUN npm install --omit=dev --no-audit --no-fund
 # the entrypoint execs must actually exist. A pin without an assert is a wish.
 # The engine's package.json is read by PATH, not by bare specifier: the package
 # has an `exports` map that (correctly) does not expose `./package.json`, so
-# `require("agent-graph-memory/package.json")` throws ERR_PACKAGE_PATH_NOT_EXPORTED
+# `require("@zibby/agent-graph-memory/package.json")` throws ERR_PACKAGE_PATH_NOT_EXPORTED
 # — which is not a version mismatch and must not be reported as one. Two
 # separate asserts so each failure names ITS OWN cause.
 RUN node -e ' \
-  const got = require("./node_modules/agent-graph-memory/package.json").version; \
+  const got = require("./node_modules/@zibby/agent-graph-memory/package.json").version; \
   const want = require("./package.json").engineVersion; \
-  if (got !== want) throw new Error(`agent-graph-memory ${got} installed but package.json engineVersion says ${want}`); \
-  console.log(`agent-graph-memory ${got} ok`);'
+  if (got !== want) throw new Error(`@zibby/agent-graph-memory ${got} installed but package.json engineVersion says ${want}`); \
+  console.log(`@zibby/agent-graph-memory ${got} ok`);'
 RUN test -x node_modules/.bin/agent-graph-server \
-    || (echo "agent-graph-server binary missing from the installed agent-graph-memory — is the tarball the server build (package.json bin)?" && exit 1)
+    || (echo "agent-graph-server binary missing from the installed @zibby/agent-graph-memory — does the published package still declare it under package.json bin?" && exit 1)
 # The Postgres driver loads `pg` lazily (an OPTIONAL peer of the engine, so a
 # SQLite-only install stays dependency-free); this image declares it as a real
 # dependency and asserts it resolves, or the first request would 500.

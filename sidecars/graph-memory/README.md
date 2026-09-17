@@ -18,9 +18,8 @@ our open-source engine (`packages/agent-graph`) inside instead of GBrain.
 
 ```bash
 cd packages/skills/sidecars/graph-memory
-npm run vendor                 # npm pack ../../../agent-graph → vendor/agent-graph-memory-0.2.0.tgz
-docker build -t custom-sidecar-graph-memory:0.1.0 .
-docker run --rm -p 8093:8093 -v graph-memory-data:/data custom-sidecar-graph-memory:0.1.0
+docker build -t custom-sidecar-graph-memory:0.1.1 .   # engine comes from npm: @zibby/agent-graph-memory@<engineVersion>
+docker run --rm -p 8093:8093 -v graph-memory-data:/data custom-sidecar-graph-memory:0.1.1
 curl -s localhost:8093/health
 ```
 
@@ -31,8 +30,8 @@ the publish script resolves it, never spell it by hand.
 ## Publish (both architectures, from any machine with docker + aws)
 
 ```bash
-bash selfhosted/dist/publish-sidecar.sh graph-memory 0.1.0 --arch amd64
-bash selfhosted/dist/publish-sidecar.sh graph-memory 0.1.0 --arch arm64
+bash selfhosted/dist/publish-sidecar.sh graph-memory 0.1.1 --arch amd64
+bash selfhosted/dist/publish-sidecar.sh graph-memory 0.1.1 --arch arm64
 ```
 
 Then copy the printed `version / s3Url / sha256 / bytes` (both arches) into
@@ -43,5 +42,13 @@ spec and `sidecar-versions.json` agree.
 ## Tests
 
 `npm test` runs the declaration tripwires (`/data` parity, port parity, version
-parity with the template spec and the vendored engine tarball). Engine behaviour
-is tested in `packages/agent-graph`.
+parity with the template spec, and `engineVersion` == the exact registry pin of
+`@zibby/agent-graph-memory`). Engine behaviour is tested in `packages/agent-graph`.
+
+## Bumping the engine
+
+Publish `@zibby/agent-graph-memory` first (`packages/agent-graph`), then change
+BOTH `dependencies["@zibby/agent-graph-memory"]` and `engineVersion` in
+`package.json` to the new exact version, bump this sidecar's `version`, rebuild
+and re-publish both arches. The test and the Dockerfile's build assert each fail
+if only one of the two fields moved.
