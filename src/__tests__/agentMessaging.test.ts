@@ -455,11 +455,11 @@ describe('contract pin: agent-inbox.js message shape', () => {
     expect(d).toMatch(/platform will NOT announce|not announce/i);
     expect(d).toMatch(/build/i);                       // the case it is NOT for
     const p = agentMessagingSkill.promptFragment as string;
-    expect(p).toMatch(/Never sleep, never loop/i);
-    // The three situations, each answered.
-    expect(p).toMatch(/platform announces/i);
-    expect(p).toMatch(/nobody will announce/i);
-    expect(p).toMatch(/somebody else to decide/i);
+    expect(p).not.toMatch(/Never sleep, never loop|END YOUR ROUND/);
+    expect(p).toContain('Sending a build request does not require handing the work to a manager');
+    expect(p).toContain('Use delayed delivery for follow-ups');
+    expect(p).toContain('external CI');
+    expect(p).toContain('another agent');
     // And the note must carry its own context.
     expect(p).toMatch(/no memory of this round|remembers nothing/i);
   });
