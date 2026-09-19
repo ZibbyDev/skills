@@ -223,6 +223,37 @@ describe('message_agent', () => {
     expect(seen.filter((s) => s.method === 'POST')).toHaveLength(0);
   });
 
+  // WAKE-MY-FUTURE-SELF. The incident: a member told to wait could only stand
+  // guard in sleep loops until the watchdog killed the run. The move that
+  // exists now is a note to a LATER round — and the refusals have to TEACH it,
+  // or the model simply retries the thing that does not work.
+  it('refuses to address its OWN LIVE RUN, and the refusal names the move that works', async () => {
+    mockDoor([['/runs/active', () => ({ json: { runs: RUNS } })]]);
+    const out = await call('message_agent', { executionId: SELF, text: 'note to self' });
+    expect(out.code).toBe('self_run_addressed');
+    expect(out.error).toMatch(/delaySeconds/);
+    expect(out.error).toMatch(/workflowType/);
+    expect(out.error).toMatch(/no memory/);
+    expect(seen).toHaveLength(0);          // not even a lookup
+  });
+
+  it('addressed to its OWN AGENT with a delay: posted, and the reply says when it is held until', async () => {
+    mockDoor([['/workflows/project-manager/inbox', () => ({
+      json: { ok: true, messageId: 'note-3', woke: false, notBefore: '2026-09-19T10:05:00.000Z', delivered: 'Held until 2026-09-19T10:05:00.000Z.' },
+    })]]);
+    const out = await call('message_agent', { workflowType: 'project-manager', text: 'CI job 8123: check it and continue ZB-7', delaySeconds: 300 });
+    expect(seen[0].body).toMatchObject({ text: 'CI job 8123: check it and continue ZB-7', delaySeconds: 300 });
+    expect(out).toMatchObject({ ok: true, notBefore: '2026-09-19T10:05:00.000Z' });
+  });
+
+  it('a delay aimed at a specific run is refused here, before the round-trip', async () => {
+    mockDoor([['/runs/active', () => ({ json: { runs: RUNS } })]]);
+    const out = await call('message_agent', { executionId: 'grandchild-A1', text: 'later', delaySeconds: 300 });
+    expect(out.code).toBe('deferred_run_refused');
+    expect(out.error).toMatch(/workflowType/);
+    expect(seen).toHaveLength(0);
+  });
+
   it('a 400 credential_refused comes back as a plain {error} sentence', async () => {
     const refused = 'The message contains something shaped like a key or token, so it was not delivered.';
     mockDoor([['/inbox', () => ({ ok: false, status: 400, json: { error: refused, code: 'credential_refused' } })]]);
@@ -309,6 +340,35 @@ describe('check_messages', () => {
   });
 });
 
+describe('a note held for later is not handed over early', () => {
+  const PREFIX = 'project-manager:doorbell:';
+  it('leaves a not-yet-due note where it is, and takes it once the instant passes', async () => {
+    const row = (notBefore: string | null) => ({
+      scope: `${PREFIX}n1`,
+      content: JSON.stringify({
+        id: 'n1', at: '2026-09-13T09:59:00.000Z', from: { kind: 'member', name: 'developer' },
+        about: { executionId: SELF }, text: 'x', needsAck: true, ...(notBefore ? { notBefore } : {}),
+      }),
+    });
+    const future = new Date(Date.now() + 600000).toISOString();
+    mockDoor([[(u: string) => u.includes('/credits/review-memory'), (body: any) => (
+      body.op === 'recall-prefix' ? { json: { memories: [row(future)] } } : { json: { ok: true } })]]);
+    const held = await call('check_messages');
+    expect(held).toMatchObject({ messages: [], left: 1 });
+    expect(seen.filter((x) => x.body?.op === 'delete')).toHaveLength(0);
+
+    seen = [];
+    const past = new Date(Date.now() - 1000).toISOString();
+    mockDoor([[(u: string) => u.includes('/credits/review-memory'), (body: any) => (
+      body.op === 'recall-prefix' ? { json: { memories: [row(past)] } } : { json: { ok: true } })]]);
+    const due = await call('check_messages');
+    expect(due.messages).toHaveLength(1);
+    // The plumbing field never reaches the model.
+    expect(due.messages[0]).not.toHaveProperty('notBefore');
+    expect(seen.filter((x) => x.body?.op === 'delete')).toHaveLength(1);
+  });
+});
+
 describe('the skill object', () => {
   it('spawns the generic MCP server pointing at dist/agentMessaging.js, forwarding identity + session env', () => {
     const spec = agentMessagingSkill.resolve();
@@ -349,7 +409,13 @@ describe('contract pin: agent-inbox.js message shape', () => {
   it.skipIf(!present)('the platform declares exactly the fields this skill reads', () => {
     const src = readFileSync(backendFile, 'utf-8');
     // The header's one-line contract.
-    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*needsAck\s*\}/);
+    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*needsAck,\s*notBefore\?\s*\}/);
+    // Every key of the message, declared once — a field this skill reads that
+    // the platform no longer writes is drift.
+    const fields = /const MESSAGE_FIELDS = Object\.freeze\(\[([^\]]*)\]\)/.exec(src);
+    expect(fields, 'MESSAGE_FIELDS must be declared in agent-inbox.js').toBeTruthy();
+    expect(fields![1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean))
+      .toEqual(['id', 'at', 'from', 'about', 'text', 'needsAck', 'notBefore', 'afterExecutionId']);
     // The address vocabulary, declared once.
     const about = /const ABOUT_FIELDS = Object\.freeze\(\[([^\]]*)\]\)/.exec(src);
     expect(about, 'ABOUT_FIELDS must be declared in agent-inbox.js').toBeTruthy();
@@ -365,6 +431,39 @@ describe('contract pin: agent-inbox.js message shape', () => {
     }
   });
 
+  it.skipIf(!present)('the delay bounds the model is shown are the platform\'s own', () => {
+    const src = readFileSync(backendFile, 'utf-8');
+    const min = /const DELAY_MIN_SECONDS = (\d+)/.exec(src);
+    const max = /const DELAY_MAX_SECONDS = (\d+)/.exec(src);
+    expect(min && max, 'agent-inbox.js must declare the delay bounds').toBeTruthy();
+    const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent');
+    const field = tool.input_schema.properties.delaySeconds;
+    // A schema that offers a range the backend refuses spends a round per try.
+    expect(field.minimum).toBe(Number(min![1]));
+    expect(field.maximum).toBe(Number(max![1]));
+  });
+
+  // A CAPABILITY NOBODY IS TAUGHT TO USE IS NOT SHIPPED. The same mistake was
+  // made hours earlier: the default build gained public network access while
+  // the skill text still told members to enumerate every host, so the new
+  // default never fired once. These assertions are on the WORDS the model reads.
+  it('the tool description and the prompt teach WHEN to use a delayed note, not just how', () => {
+    const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent');
+    const d = tool.description as string;
+    expect(d).toMatch(/delaySeconds/);
+    expect(d).toMatch(/instead of sleeping or polling/i);
+    expect(d).toMatch(/platform will NOT announce|not announce/i);
+    expect(d).toMatch(/build/i);                       // the case it is NOT for
+    const p = agentMessagingSkill.promptFragment as string;
+    expect(p).toMatch(/Never sleep, never loop/i);
+    // The three situations, each answered.
+    expect(p).toMatch(/platform announces/i);
+    expect(p).toMatch(/nobody will announce/i);
+    expect(p).toMatch(/somebody else to decide/i);
+    // And the note must carry its own context.
+    expect(p).toMatch(/no memory of this round|remembers nothing/i);
+  });
+
   it('parseInboxNote reads a message built to that declaration (sample fixture)', () => {
     // The sample is the shape buildInboxMessage() returns for a member post with
     // both address keys — if the declaration above changes, so must this fixture.
@@ -377,7 +476,7 @@ describe('contract pin: agent-inbox.js message shape', () => {
     const parsed = parseInboxNote({ scope: `${mailboxPrefix()}${sample.id}`, content: JSON.stringify(sample) });
     expect(parsed).toEqual({
       id: sample.id, at: sample.at, from: { kind: 'member', name: 'project-manager' },
-      ticketKey: 'ZB-9', executionId: SELF, text: 'hello',
+      ticketKey: 'ZB-9', executionId: SELF, text: 'hello', notBefore: null, afterExecutionId: null,
     });
     // A platform note (parent-bell child_done) is NOT an inbox message.
     expect(parsedNull({ why: 'child_done', worker: 'developer' })).toBeNull();
@@ -445,4 +544,19 @@ describe('read_run_logs', () => {
     expect(agentMessagingSkill.tools.map((t: any) => t.name)).toContain('read_run_logs');
     expect(agentMessagingSkill.promptFragment).toMatch(/read_run_logs/);
   });
+});
+
+it('a due reminder reaches a future run but never the run that wrote it', async () => {
+  const row = (id:string, afterExecutionId:string, notBefore:string) => ({scope:`project-manager:doorbell:${id}`,
+    content:JSON.stringify({id,text:'Check external CI for Vikunja, then continue setup',from:{kind:'member',name:'developer'},about:{},needsAck:true,notBefore,afterExecutionId})});
+  mockDoor([[(u:string)=>u.includes('/credits/review-memory'),(body:any)=>body.op==='recall-prefix'
+    ? {json:{memories:[row('past','old-run',new Date(Date.now()-1000).toISOString()),row('self',SELF,new Date(Date.now()-1000).toISOString()),row('future','old-run',new Date(Date.now()+60000).toISOString())]}}
+    : {json:{ok:true}}]]);
+  const result = await call('check_messages');
+  expect(result.messages.map((m:any)=>m.id)).toEqual(['past']);
+  expect(result.left).toBe(2);
+});
+it('immediate self messages by agent type are refused without HTTP', async () => {
+  expect(await call('message_agent',{workflowType:ENV.WORKFLOW_TYPE,text:'loop'})).toMatchObject({code:'self_delay_required'});
+  expect(seen).toHaveLength(0);
 });
