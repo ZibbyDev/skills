@@ -560,3 +560,20 @@ it('immediate self messages by agent type are refused without HTTP', async () =>
   expect(await call('message_agent',{workflowType:ENV.WORKFLOW_TYPE,text:'loop'})).toMatchObject({code:'self_delay_required'});
   expect(seen).toHaveLength(0);
 });
+
+it('any parent reads ticketless completion context and explicitly acknowledges it only after handling', async () => {
+ const scope=mailboxPrefix()+'completion:child:completed';
+ const row={scope,content:JSON.stringify({why:'child_done',worker:'any-member',executionId:'child',completion:{result:{summary:'Ready at http://example.test'}}})};
+ let removed=false;
+ mockDoor([['/credits/review-memory',body=>{
+  if(body.op==='recall-prefix') return {json:{memories:removed?[]:[row]}};
+  if(body.op==='delete') {expect(body.scope).toBe(scope);removed=true;return {json:{deleted:true}};}
+  throw new Error('Unexpected op');
+ }]]);
+ const first=await call('check_messages');
+ expect(first.completions[0].completion.result.summary).toContain('http://example.test');
+ expect(removed).toBe(false);
+ expect((await call('check_messages')).completions).toHaveLength(1);
+ await call('check_messages',{acknowledgeCompletions:[first.completions[0].id]});
+ expect(removed).toBe(true);
+});
