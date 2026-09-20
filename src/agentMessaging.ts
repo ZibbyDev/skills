@@ -529,13 +529,24 @@ async function listMessages(args: any = {}) {
   const json: any = await res.json().catch(() => ({}));
   const data = json?.data && typeof json.data === 'object' ? json.data : json;
   const messages = Array.isArray(data?.messages) ? data.messages : [];
+  // A wake you already booked: a pending note from your OWN agent whose moment
+  // has not come. Computed here, from the platform's clock stamps, so the model
+  // never has to compare ISO instants to decide whether to schedule another.
+  const nowMs = Date.now();
+  const pendingWakes = messages
+    .filter((m: any) => !m?.ackedAt && m?.from?.workflowType === selfWorkflowType() && typeof m?.notBefore === 'string' && Date.parse(m.notBefore) > nowMs)
+    .map((m: any) => ({ id: m.id, notBefore: m.notBefore, dueInMinutes: Math.max(1, Math.round((Date.parse(m.notBefore) - nowMs) / 60000)), ...(m.about?.ticketKey ? { ticketKey: m.about.ticketKey } : {}) }));
   return {
     unacked,
     count: messages.length,
     ...(data?.truncated ? { truncated: true } : {}),
+    wakeAlreadyScheduled: pendingWakes.length > 0,
+    ...(pendingWakes.length ? { pendingWakes } : {}),
     messages,
     note: unacked
-      ? (messages.length ? 'Every message here is still yours until you act on it and acknowledge it (check_messages acknowledges what it hands you; a reply on the ticket + check_messages acknowledges the rest). A pending self-reminder (from.workflowType = your own) means a wake is already scheduled — do not schedule another.' : 'Nothing pending: you owe no message a reply.')
+      ? (messages.length
+        ? `Every message here is still yours until you act on it and acknowledge it (check_messages acknowledges what it hands you; a reply on the ticket + check_messages acknowledges the rest).${pendingWakes.length ? ` A wake is ALREADY scheduled for you (${pendingWakes.map((w: any) => `${w.id} in ~${w.dueInMinutes} min`).join(', ')}): do not schedule another — write the ticket and end the round.` : ''}`
+        : 'Nothing pending: you owe no message a reply.')
       : 'History within the retention window; acknowledged rows carry ackedAt/ackedBy.',
   };
 }
@@ -690,7 +701,8 @@ Tools:
 ### TAKING OVER — the rules every teammate on this project follows
 1. TICKET FIRST. Every state change or decision — took it on, blocked, handed
    back, done — is written to the ticket BEFORE any message. The ticket's
-   assignee is the owner; changing the owner means changing the assignee. A
+   assignee is the owner: when you take a request on, set the assignee to
+   yourself; handing it to someone means setting the assignee to them. A
    message is a doorbell; the ticket is the memory.
 2. MESSAGES ARE SELF-SUFFICIENT: the ticket key, what is blocked, what you
    need, and where the evidence is (your own executionId, so the reader can
@@ -699,12 +711,16 @@ Tools:
    else already moved it, stop — do not redo the work.
 4. CAN'T FINISH NOW: write the current state and the next step to the ticket,
    then rely on a real event (a completion, a reply) or schedule ONE wake with
-   message_agent(workflowType = your own, delaySeconds) — after checking
-   list_messages for a wake already pending. Never end a round with an open
-   obligation and no wake.
-5. BOUNDED ESCALATION: the same blocker after 3 self-wakes, or two agents each
-   waiting on the other, means a person is needed — move the ticket to the
-   human column and state exactly what a person must do.
+   message_agent(workflowType = your own, delaySeconds). A pending message
+   from your own workflowType with a future notBefore in list_messages IS
+   your wake: do not schedule another — write the ticket and end the round.
+   Never end a round with an open obligation and no wake.
+5. BLOCKED ON A TEAMMATE, THEN ON A PERSON. If another agent on the team can
+   unblock you, write the ticket, then message THAT agent (by workflowType)
+   and let it own the next step. Only when the same blocker survives
+   3 self-wakes, or two agents each wait on the other, is a person needed —
+   move the ticket to the human column and state exactly what a person must
+   do.
 6. REPLY TO A MEMBER BY ITS \`from.workflowType\`. No receipt will ever come for
    anything you send; silence means it is still yours.
 

@@ -642,6 +642,24 @@ describe('list_messages — what this agent still owes, or its history', () => {
     expect(out.note).toMatch(/still yours/);
     expect(out.messages[0].from).toEqual({ kind: 'member', name: 'developer', workflowType: 'developer', executionId: 'run-dev-1' });
   });
+  it('a pending self-reminder with a future notBefore is reported as a wake already scheduled', async () => {
+    const future = new Date(Date.now() + 8 * 60000).toISOString();
+    const rows = [
+      { id: 'r1', at: '2026-09-13T09:59:00.000Z', from: { kind: 'member', name: 'project-manager', workflowType: 'project-manager', executionId: 'pm-old' }, about: { ticketKey: 'ZB-1' }, text: 're-check', needsAck: true, notBefore: future },
+      { id: 'r0', at: '2026-09-13T09:00:00.000Z', from: { kind: 'member', name: 'project-manager', workflowType: 'project-manager' }, about: {}, text: 'old, due', needsAck: true, notBefore: new Date(Date.now() - 1000).toISOString() },
+      { id: 'm2', at: '2026-09-13T09:59:00.000Z', from: { kind: 'member', name: 'developer', workflowType: 'developer' }, about: {}, text: 'x', needsAck: true, notBefore: future },
+    ];
+    mockDoor([[(u) => u.startsWith(LIST_URL), () => ({ json: { ...listed, count: rows.length, messages: rows } })]]);
+    const out = await call('list_messages');
+    expect(out.wakeAlreadyScheduled).toBe(true);
+    expect(out.pendingWakes).toEqual([{ id: 'r1', notBefore: future, dueInMinutes: 8, ticketKey: 'ZB-1' }]);
+    expect(out.note).toMatch(/ALREADY scheduled .*r1 in ~8 min.*do not schedule another/);
+    // No pending self-wake → said plainly as false.
+    mockDoor([[(u) => u.startsWith(LIST_URL), () => ({ json: listed })]]);
+    const none = await call('list_messages');
+    expect(none.wakeAlreadyScheduled).toBe(false);
+    expect(none).not.toHaveProperty('pendingWakes');
+  });
   it('unacked:false / ticketKey / limit map onto the route query; a bad limit is refused before any request', async () => {
     mockDoor([[(u) => u.startsWith(LIST_URL), () => ({ json: { data: { ...listed, unacked: false } } })]]);
     const out = await call('list_messages', { unacked: false, ticketKey: 'ZB-1', limit: 5 });
