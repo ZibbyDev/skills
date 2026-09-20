@@ -586,6 +586,14 @@ async function checkMessages(args: { acknowledgeCompletions?: string[] } = {}) {
   const messages: any[] = [];
   const completions: any[] = [];
   const acknowledge = new Set(Array.isArray(args.acknowledgeCompletions) ? args.acknowledgeCompletions : []);
+  // THE PER-ID TRUTH ABOUT THE MARK, not the intention to make it. A tool that
+  // reports "acknowledged" before the platform has taken the mark is how a
+  // manager answered the same message seven rounds running (board-runner
+  // pm-tools.js `ackNow`, 2026-09-20): the mailbox refused with a 400, the
+  // model was told it had succeeded, the note came back and was acted on again.
+  const acknowledged: string[] = [];
+  const ackFailed: Array<{ id: string; reason: string }> = [];
+  const ackReason = (text: any) => String(text || 'the mailbox did not say why').replace(/\s+/g, ' ').trim().slice(0, 240);
   let left = 0;
   let more = false;
   let cursor: string | null = null;
@@ -619,7 +627,11 @@ async function checkMessages(args: { acknowledgeCompletions?: string[] } = {}) {
         if (acknowledge.has(id)) {
           // eslint-disable-next-line no-await-in-loop
           const acked = await ackNote(token, id);
-          if (acked.ok) continue;
+          if (acked.ok === true) { acknowledged.push(id); continue; }
+          // The platform refused the mark. The receipt is handed back (below)
+          // AND the refusal is named, so the model does not report the outcome
+          // a second time next round believing this one never landed.
+          ackFailed.push({ id, reason: ackReason((acked as any).error) });
         }
         completions.push({ ...report, id });
         continue;
@@ -631,9 +643,13 @@ async function checkMessages(args: { acknowledgeCompletions?: string[] } = {}) {
       if (!note || !noteDue(note) || (note.executionId !== self && !(note.notBefore && !note.executionId && note.afterExecutionId !== self))) { left += 1; continue; }
       // Read-then-ACKNOWLEDGE per row: the platform marks it (ackedAt/ackedBy =
       // this run) and keeps it as history. An ack that fails leaves the note to
-      // be re-read next time (a duplicate hint, harmless) — but we still return it.
+      // be re-read next time — we still return it, and the RESULT SAYS SO
+      // (`ackFailed`), because a note the model believes is history but which
+      // is still in the mailbox is a round that repeats itself forever.
       // eslint-disable-next-line no-await-in-loop
-      await ackNote(token, note.id);
+      const marked = await ackNote(token, note.id);
+      if (marked.ok === true) acknowledged.push(note.id);
+      else ackFailed.push({ id: note.id, reason: ackReason((marked as any).error) });
       const { executionId: _own, notBefore: _later, afterExecutionId: _previous, ackedAt: _acked, ackedBy: _acker, ...out } = note;
       messages.push(out);
     }
@@ -643,6 +659,13 @@ async function checkMessages(args: { acknowledgeCompletions?: string[] } = {}) {
   }
 
   const out: Record<string, any> = { messages, left, ...(completions.length ? { completions } : {}) };
+  if (acknowledged.length) out.acknowledged = acknowledged;
+  if (ackFailed.length) {
+    out.ackFailed = ackFailed;
+    out.ackNote = 'These are STILL in your mailbox and will be handed to you again next round. '
+      + 'Act on each of them ONCE — whatever you already wrote is written — and say in your summary, in plain words, '
+      + 'that the mailbox would not take the acknowledgement and why, so a person can look at it.';
+  }
   if (more) out.more = true;
   if (firstError) out.error = firstError;
   return out;
@@ -861,7 +884,7 @@ it is refused, and the right way is the agent's Env tab.`,
     },
     {
       name: 'check_messages',
-      description: 'Take the notes addressed to THIS run (from a manager, a person, or another agent). Each note is returned once and then marked acknowledged (kept as history, never re-delivered); due delayed reminders for this agent are included; future reminders and reminders written by this same run are left alone. A note from a member carries from.workflowType (reply to it by that) and from.executionId (its run — evidence you can read_run_logs). Also returns durable child completions with task context and declared results, whether or not the work had a ticket. Acknowledge their receipt ids only after reporting the outcome and preserving useful history. Returns { messages, completions?, left }.',
+      description: 'Take the notes addressed to THIS run (from a manager, a person, or another agent). Each note is handed over once and the mailbox is asked to mark it acknowledged (kept as history, never re-delivered); due delayed reminders for this agent are included; future reminders and reminders written by this same run are left alone. A note from a member carries from.workflowType (reply to it by that) and from.executionId (its run — evidence you can read_run_logs). Also returns durable child completions with task context and declared results, whether or not the work had a ticket. Acknowledge their receipt ids only after reporting the outcome and preserving useful history. Returns { messages, completions?, left, acknowledged?, ackFailed? }. `acknowledged` are the ids the mailbox really marked; anything under `ackFailed` carries the platform\'s own reason and is STILL in your mailbox — it will be handed to you again, so act on it once and say in your summary that the acknowledgement was refused and why.',
       input_schema: { type: 'object', properties: { acknowledgeCompletions: { type: 'array', items: { type: 'string' }, description: 'Receipt ids of completion reports already reported to the requester and retained in the declared shared memory when useful. Reading alone does not acknowledge.' } }, required: [] },
     },
     {

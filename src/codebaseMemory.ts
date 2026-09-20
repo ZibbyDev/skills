@@ -133,8 +133,10 @@ relationships, or "where does X live / what depends on Y":
 - detect_changes: what changed vs the indexed baseline — scope your work.
 - get_code_snippet / search_code: pull the exact code for a node / text match.
 - index_status / list_projects: confirm the index is present before querying.
-The repo is indexed for you at the start of the run; if a query comes back
-empty, call index_status, and only re-index (index_repository) if needed.`,
+Indexing is ATTEMPTED for you at the start of the run — it is not guaranteed to
+have finished or succeeded, and nothing tells you here when it did not. So an
+empty answer is never evidence that nothing matched: call index_status first,
+and re-index (index_repository) when the index is missing or partial.`,
 
   /**
    * stdio MCP server = the BARE binary with NO subcommand (verified for
@@ -192,6 +194,18 @@ empty, call index_status, and only re-index (index_repository) if needed.`,
       // would hit the same outcome, and the server can still index_repository
       // on demand. We only avoid the duplicate work within this run.
       try { writeFileSync(marker, `${new Date().toISOString()} status=${res.status}\n`); } catch { /* non-fatal */ }
+      // SAY IT OUT LOUD WHEN IT DID NOT WORK. The hook contributes nothing the
+      // model can see, so a failed index used to be invisible everywhere: the
+      // prompt said the repo was indexed, every query came back empty, and
+      // "nothing depends on Y" is what that reads as. The run log now names it,
+      // and the prompt no longer asserts what this never verified.
+      if (res.error || res.status !== 0) {
+        const why = res.error ? String(res.error.message || res.error) : `exit ${res.status}${res.signal ? ` (${res.signal})` : ''}`;
+        try {
+          process.stderr.write(`[codebase-memory] indexing ${repoDir} did NOT succeed (${why}) — `
+            + 'the code graph may be missing or partial; index_status/index_repository are the way back.\n');
+        } catch { /* non-fatal */ }
+      }
     } catch {
       // Never let indexing take down the run.
     }

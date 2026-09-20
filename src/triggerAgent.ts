@@ -186,6 +186,22 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
         return JSON.stringify({ ok: false, error: `trigger failed (HTTP ${resp.status})`, detail: (body && (body.error || body.message)) || text.slice(0, 300) });
       }
       const executionId = body.executionId || body.execution?.id || body.id || null;
+      // ⛔ NO RUN ID, NO "STARTED". A 2xx whose body carries no execution id is
+      // NOT evidence that a run exists — it is a shape this skill does not
+      // recognise (a gateway's own 200, a changed envelope, an unparseable
+      // body). Reporting "run started" for it hands the model a dispatch that
+      // never happened, and this tool is a fan-out primitive: the model is told
+      // to log the failure and move on, so a fabricated success silently drops
+      // that item for good. Say what was actually answered instead.
+      if (!executionId) {
+        return JSON.stringify({
+          ok: false,
+          workflowType,
+          error: `the platform answered HTTP ${resp.status} with no execution id, so this run may or may not have started`,
+          detail: text.slice(0, 300),
+          note: 'Do NOT record this as dispatched. Check whether a run for this agent exists before triggering it again.',
+        });
+      }
       return JSON.stringify({ ok: true, workflowType, executionId, ...(effort ? { effort } : {}), note: 'run started (fire-and-forget)' });
     } catch (e) {
       return JSON.stringify({ ok: false, error: `trigger_agent failed: ${e?.message || String(e)}` });

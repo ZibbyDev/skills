@@ -340,6 +340,60 @@ describe('check_messages', () => {
     expect(await call('check_messages')).toEqual({ messages: [], left: 0, error: 'upstream down' });
   });
 
+  // ⛔ THE CLASS: a tool that reports a write it never read the answer to.
+  // Live 2026-09-20 (board-runner): the mailbox refused an acknowledgement with
+  // a 400, the tool had already said "acknowledged", and the manager answered
+  // the same message seven rounds in six minutes. Here the mark is made at tool
+  // time, so the only defence is the RESULT saying which ids the mailbox
+  // actually took and which it refused, in the platform's own words.
+  it('an ack the mailbox REFUSES is reported per id, with the reason, and never as success', async () => {
+    const rows = [
+      note('n1', { about: { executionId: SELF }, text: 'first' }),
+      note('n2', { about: { executionId: SELF }, text: 'second' }),
+    ];
+    mockDoor([
+      [isAck, (_body, url) => (url.includes('/n2/') ? { ok: false, status: 400, json: { error: 'message n2 is not in this mailbox' } } : ackOk())],
+      [(url: string) => url.endsWith('/credits/review-memory'), () => ({ json: { truncated: false, memories: rows } })],
+    ]);
+
+    const out = await call('check_messages');
+    // Both notes are still handed over — losing one is the worse direction.
+    expect(out.messages.map((m: any) => m.id)).toEqual(['n1', 'n2']);
+    // …but the result tells the truth about the MARK, per id.
+    expect(out.acknowledged).toEqual(['n1']);
+    expect(out.ackFailed).toEqual([{ id: 'n2', reason: 'message n2 is not in this mailbox' }]);
+    expect(out.ackNote).toMatch(/STILL in your mailbox/);
+    expect(out.ackNote).toMatch(/ONCE/);
+  });
+
+  it('a completion whose acknowledgement is refused is named in ackFailed, not silently re-listed', async () => {
+    const receipt = {
+      scope: `${PREFIX}c1`,
+      content: JSON.stringify({ why: 'child_done', worker: 'developer', outcome: 'success', executionId: 'child-A', completion: { summary: 'done' }, at: '2026-09-13T09:59:00.000Z' }),
+    };
+    mockDoor([
+      [isAck, () => ({ ok: false, status: 502, json: { error: 'the mailbox is unavailable' } })],
+      [(url: string) => url.endsWith('/credits/review-memory'), () => ({ json: { truncated: false, memories: [receipt] } })],
+    ]);
+
+    const out = await call('check_messages', { acknowledgeCompletions: ['c1'] });
+    expect(out).not.toHaveProperty('acknowledged');
+    expect(out.ackFailed).toEqual([{ id: 'c1', reason: 'the mailbox is unavailable' }]);
+    // The receipt comes back too, so the manager can see what it still owes.
+    expect(out.completions.map((c: any) => c.id)).toEqual(['c1']);
+  });
+
+  it('when every mark lands, the result names the ids and carries no failure shape', async () => {
+    mockDoor([
+      [isAck, () => ackOk()],
+      [(url: string) => url.endsWith('/credits/review-memory'), () => ({ json: { truncated: false, memories: [note('n1', { about: { executionId: SELF }, text: 'x' })] } })],
+    ]);
+    const out = await call('check_messages');
+    expect(out.acknowledged).toEqual(['n1']);
+    expect(out).not.toHaveProperty('ackFailed');
+    expect(out).not.toHaveProperty('ackNote');
+  });
+
   it('errors without EXECUTION_ID or WORKFLOW_TYPE, and never opens the door', async () => {
     mockDoor([]);
     delete process.env.EXECUTION_ID;
@@ -610,8 +664,13 @@ describe('history: acknowledged rows are never re-delivered, and old history is 
   const row = (id: string, m: Record<string, any>) => ({ scope: `${PREFIX}${id}`, content: JSON.stringify({ id, at: '2026-09-13T09:59:00.000Z', from: { kind: 'human', name: 'leo' }, about: { executionId: SELF }, text: 'x', needsAck: true, ...m }) });
   it('an acked note for this run is skipped (not returned, not counted, not acked again); one past the TTL is pruned', async () => {
     const old = new Date(Date.now() - (INBOX_TTL_DAYS + 1) * 86400000).toISOString();
+    // "Fresh" has to be fresh AGAINST THE CLOCK THAT RUNS THE TEST. A literal
+    // date is fresh only until it is INBOX_TTL_DAYS old, and then this row is
+    // pruned instead of skipped and the suite goes red on a calendar day rather
+    // than on a change — which is exactly what happened here.
+    const fresh = new Date(Date.now() - 60_000).toISOString();
     const rows = [
-      row('fresh-acked', { ackedAt: '2026-09-13T10:00:05.000Z', ackedBy: { kind: 'member', workflowType: 'project-manager' } }),
+      row('fresh-acked', { at: fresh, ackedAt: fresh, ackedBy: { kind: 'member', workflowType: 'project-manager' } }),
       row('old-acked', { at: old, ackedAt: old, ackedBy: { kind: 'human' } }),
       row('pending', { text: 'still for you' }),
     ];
