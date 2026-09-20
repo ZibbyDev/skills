@@ -36,7 +36,7 @@ const ENV = {
 Object.assign(process.env, ENV);
 
 const {
-  agentMessagingSkill, descendantsOf, compactRun, parseInboxNote, mailboxPrefix, DRAIN_MAX_PAGES,
+  agentMessagingSkill, descendantsOf, compactRun, parseInboxNote, mailboxPrefix, DRAIN_MAX_PAGES, INBOX_TTL_DAYS, LIST_LIMIT_MAX,
   logsQuery, LOG_LINES_MAX, LOG_LINE_MAX_CHARS,
 } = await import('../agentMessaging.js');
 
@@ -63,6 +63,12 @@ function mockDoor(routes: Array<[string | ((url: string, body: any) => boolean),
     throw new Error(`unexpected request ${init?.method || 'GET'} ${url}`);
   });
 }
+
+/** The inbox ACK route of THIS agent's mailbox (marks the row; nothing is deleted). */
+const ACK_URL = /\/projects\/proj-1\/workflows\/project-manager\/inbox\/([^/?]+)\/ack$/;
+const isAck = (url: string) => ACK_URL.test(url);
+const ackedIds = () => seen.filter((x) => isAck(x.url)).map((x) => decodeURIComponent(ACK_URL.exec(x.url)![1]));
+const ackOk = () => ({ json: { ok: true, found: true, ackedAt: '2026-09-13T10:00:05.000Z', ackedBy: { kind: 'member', workflowType: 'project-manager', executionId: SELF } } });
 
 beforeEach(() => { seen = []; door.fetch.mockReset(); Object.assign(process.env, ENV); });
 afterEach(() => { vi.clearAllMocks(); });
@@ -199,6 +205,7 @@ describe('message_agent', () => {
       ok: true, messageId: 'note-1', woke: false,
       delivered: 'Stored in the agent\'s inbox; it reads it on its next run.',
       to: { workflowType: 'developer' },
+      receipt: expect.stringMatching(/store-and-ring/),
     });
   });
 
@@ -270,7 +277,7 @@ describe('check_messages', () => {
     createdAt: '2026-09-13T09:59:00.000Z',
   });
 
-  it('takes ONLY notes addressed to this execution, deletes exactly those, leaves the rest', async () => {
+  it('takes ONLY notes addressed to this execution, acknowledges exactly those (kept as history), leaves the rest', async () => {
     const rows = [
       note('n1', { about: { executionId: SELF, ticketKey: 'ZB-1' }, text: 'for you, about ZB-1' }),
       note('n2', { about: { ticketKey: 'ZB-2' }, text: 'for the tick reader (no executionId)' }),
@@ -281,15 +288,16 @@ describe('check_messages', () => {
       // A corrupt row — left alone (the tick reader owns junk).
       { scope: `${PREFIX}n6`, content: '{not json' },
     ];
-    const deleted: string[] = [];
-    mockDoor([[
-      (url, body) => url.endsWith('/credits/review-memory'),
-      (body) => {
-        if (body.op === 'recall-prefix') return { json: { count: rows.length, truncated: false, memories: rows } };
-        if (body.op === 'delete') { deleted.push(body.scope); return { json: { deleted: true, scope: body.scope } }; }
-        return { ok: false, status: 400, json: { error: `unexpected op ${body.op}` } };
-      },
-    ]]);
+    mockDoor([
+      [isAck, () => ackOk()],
+      [
+        (url, body) => url.endsWith('/credits/review-memory'),
+        (body) => {
+          if (body.op === 'recall-prefix') return { json: { count: rows.length, truncated: false, memories: rows } };
+          return { ok: false, status: 400, json: { error: `unexpected op ${body.op}` } };
+        },
+      ],
+    ]);
 
     const out = await call('check_messages');
     expect(seen[0].body).toEqual({ op: 'recall-prefix', scopePrefix: PREFIX });
@@ -298,17 +306,20 @@ describe('check_messages', () => {
       { id: 'n5', at: '2026-09-13T09:59:00.000Z', from: { kind: 'member', name: 'developer' }, text: 'second one for you' },
     ]);
     expect(out.left).toBe(4);
-    expect(deleted).toEqual([`${PREFIX}n1`, `${PREFIX}n5`]);
+    // ACKNOWLEDGED through the inbox route (marked, kept) — never a kv delete.
+    expect(ackedIds()).toEqual(['n1', 'n5']);
+    expect(seen.filter((x) => x.body?.op === 'delete')).toHaveLength(0);
+    // …and the plumbing never reaches the model.
+    for (const m of out.messages) { expect(m).not.toHaveProperty('ackedAt'); expect(m).not.toHaveProperty('ackedBy'); }
     expect(out).not.toHaveProperty('more');
     expect(out).not.toHaveProperty('error');
   });
 
   it('follows nextCursor page by page, capped at DRAIN_MAX_PAGES, and reports more', async () => {
     const pages: any[] = [];
-    mockDoor([[
+    mockDoor([[isAck, () => ackOk()], [
       (url) => url.endsWith('/credits/review-memory'),
       (body) => {
-        if (body.op === 'delete') return { json: { deleted: true } };
         pages.push(body.cursor || null);
         const n = pages.length;
         return { json: { truncated: true, nextCursor: `${PREFIX}p${n}`, memories: [note(`p${n}`, { about: { executionId: SELF }, text: `page ${n}` })] } };
@@ -351,21 +362,21 @@ describe('a note held for later is not handed over early', () => {
       }),
     });
     const future = new Date(Date.now() + 600000).toISOString();
-    mockDoor([[(u: string) => u.includes('/credits/review-memory'), (body: any) => (
+    mockDoor([[isAck, () => ackOk()], [(u: string) => u.includes('/credits/review-memory'), (body: any) => (
       body.op === 'recall-prefix' ? { json: { memories: [row(future)] } } : { json: { ok: true } })]]);
     const held = await call('check_messages');
     expect(held).toMatchObject({ messages: [], left: 1 });
-    expect(seen.filter((x) => x.body?.op === 'delete')).toHaveLength(0);
+    expect(ackedIds()).toEqual([]);
 
     seen = [];
     const past = new Date(Date.now() - 1000).toISOString();
-    mockDoor([[(u: string) => u.includes('/credits/review-memory'), (body: any) => (
+    mockDoor([[isAck, () => ackOk()], [(u: string) => u.includes('/credits/review-memory'), (body: any) => (
       body.op === 'recall-prefix' ? { json: { memories: [row(past)] } } : { json: { ok: true } })]]);
     const due = await call('check_messages');
     expect(due.messages).toHaveLength(1);
     // The plumbing field never reaches the model.
     expect(due.messages[0]).not.toHaveProperty('notBefore');
-    expect(seen.filter((x) => x.body?.op === 'delete')).toHaveLength(1);
+    expect(ackedIds()).toEqual(['n1']);
   });
 });
 
@@ -379,7 +390,7 @@ describe('the skill object', () => {
     }
     expect(agentMessagingSkill.serverName).toBe('agent_messaging');
     expect(agentMessagingSkill.allowedTools).toEqual(['mcp__agent_messaging__*']);
-    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages']);
+    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages', 'list_messages']);
   });
 
   it('unknown tool → {error}', async () => {
@@ -409,26 +420,34 @@ describe('contract pin: agent-inbox.js message shape', () => {
   it.skipIf(!present)('the platform declares exactly the fields this skill reads', () => {
     const src = readFileSync(backendFile, 'utf-8');
     // The header's one-line contract.
-    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*needsAck,\s*notBefore\?\s*\}/);
+    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name,\s*workflowType\?,\s*executionId\?\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*needsAck,\s*notBefore\?,\s*ackedAt\?,\s*ackedBy\?\s*\}/);
     // Every key of the message, declared once — a field this skill reads that
     // the platform no longer writes is drift.
-    const fields = /const MESSAGE_FIELDS = Object\.freeze\(\[([^\]]*)\]\)/.exec(src);
-    expect(fields, 'MESSAGE_FIELDS must be declared in agent-inbox.js').toBeTruthy();
-    expect(fields![1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean))
-      .toEqual(['id', 'at', 'from', 'about', 'text', 'needsAck', 'notBefore', 'afterExecutionId']);
+    const list = (name: string) => {
+      const m = new RegExp(`const ${name} = Object\\.freeze\\(\\[([^\\]]*)\\]\\)`).exec(src);
+      expect(m, `${name} must be declared in agent-inbox.js`).toBeTruthy();
+      return m![1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+    };
+    expect(list('MESSAGE_FIELDS')).toEqual(['id', 'at', 'from', 'about', 'text', 'needsAck', 'notBefore', 'afterExecutionId', 'ackedAt', 'ackedBy']);
     // The address vocabulary, declared once.
-    const about = /const ABOUT_FIELDS = Object\.freeze\(\[([^\]]*)\]\)/.exec(src);
-    expect(about, 'ABOUT_FIELDS must be declared in agent-inbox.js').toBeTruthy();
-    const aboutFields = about![1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
-    expect(aboutFields).toEqual(['ticketKey', 'executionId']);
+    expect(list('ABOUT_FIELDS')).toEqual(['ticketKey', 'executionId']);
+    // The SENDER vocabulary: what parseInboxNote reads off `from` is exactly this.
+    expect(list('FROM_FIELDS')).toEqual(['kind', 'name', 'workflowType', 'executionId']);
+    // The acknowledgement keys, and the retention window both ends age on.
+    expect(list('ACK_FIELDS')).toEqual(['ackedAt', 'ackedBy']);
+    const ttl = /const INBOX_TTL_DAYS = (\d+)/.exec(src);
+    expect(Number(ttl && ttl[1])).toBe(INBOX_TTL_DAYS);
+    const lim = /const LIST_LIMIT_MAX = (\d+)/.exec(src);
+    expect(Number(lim && lim[1])).toBe(LIST_LIMIT_MAX);
     // The sender kinds.
     const kinds = /const SENDER_KINDS = Object\.freeze\(\[([^\]]*)\]\)/.exec(src);
     expect(kinds).toBeTruthy();
     expect(kinds![1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''))).toEqual(['human', 'member', 'platform']);
     // The built message object literal carries every key in the order declared.
-    for (const key of ['id,', 'at:', 'from: { kind,', 'about: {', 'text: body,', 'needsAck: true']) {
+    for (const key of ['id,', 'at:', 'about: {', 'text: body,', 'needsAck: true']) {
       expect(src, `agent-inbox.js buildInboxMessage must still write \`${key}\``).toContain(key);
     }
+    expect(src, 'agent-inbox.js buildInboxMessage must still write `from: { kind, …`').toMatch(/from:\s*\{\s*kind,/);
   });
 
   it.skipIf(!present)('the delay bounds the model is shown are the platform\'s own', () => {
@@ -476,8 +495,11 @@ describe('contract pin: agent-inbox.js message shape', () => {
     const parsed = parseInboxNote({ scope: `${mailboxPrefix()}${sample.id}`, content: JSON.stringify(sample) });
     expect(parsed).toEqual({
       id: sample.id, at: sample.at, from: { kind: 'member', name: 'project-manager' },
-      ticketKey: 'ZB-9', executionId: SELF, text: 'hello', notBefore: null, afterExecutionId: null,
+      ticketKey: 'ZB-9', executionId: SELF, text: 'hello', notBefore: null, afterExecutionId: null, ackedAt: null, ackedBy: null,
     });
+    // A member's identity and an acknowledgement travel through the parser.
+    const withIdentity = parseInboxNote({ scope: 'x', content: JSON.stringify({ ...sample, from: { ...sample.from, workflowType: 'project-manager', executionId: 'run-pm-1' }, ackedAt: '2026-09-13T10:00:05.000Z', ackedBy: { kind: 'member', workflowType: 'developer' } }) });
+    expect(withIdentity).toMatchObject({ from: { kind: 'member', name: 'project-manager', workflowType: 'project-manager', executionId: 'run-pm-1' }, ackedAt: '2026-09-13T10:00:05.000Z', ackedBy: { kind: 'member', workflowType: 'developer' } });
     // A platform note (parent-bell child_done) is NOT an inbox message.
     expect(parsedNull({ why: 'child_done', worker: 'developer' })).toBeNull();
   });
@@ -549,7 +571,7 @@ describe('read_run_logs', () => {
 it('a due reminder reaches a future run but never the run that wrote it', async () => {
   const row = (id:string, afterExecutionId:string, notBefore:string) => ({scope:`project-manager:doorbell:${id}`,
     content:JSON.stringify({id,text:'Check external CI for Vikunja, then continue setup',from:{kind:'member',name:'developer'},about:{},needsAck:true,notBefore,afterExecutionId})});
-  mockDoor([[(u:string)=>u.includes('/credits/review-memory'),(body:any)=>body.op==='recall-prefix'
+  mockDoor([[isAck,()=>ackOk()],[(u:string)=>u.includes('/credits/review-memory'),(body:any)=>body.op==='recall-prefix'
     ? {json:{memories:[row('past','old-run',new Date(Date.now()-1000).toISOString()),row('self',SELF,new Date(Date.now()-1000).toISOString()),row('future','old-run',new Date(Date.now()+60000).toISOString())]}}
     : {json:{ok:true}}]]);
   const result = await call('check_messages');
@@ -564,16 +586,105 @@ it('immediate self messages by agent type are refused without HTTP', async () =>
 it('any parent reads ticketless completion context and explicitly acknowledges it only after handling', async () => {
  const scope=mailboxPrefix()+'completion:child:completed';
  const row={scope,content:JSON.stringify({why:'child_done',worker:'any-member',executionId:'child',completion:{result:{summary:'Ready at http://example.test'}}})};
- let removed=false;
- mockDoor([['/credits/review-memory',body=>{
-  if(body.op==='recall-prefix') return {json:{memories:removed?[]:[row]}};
-  if(body.op==='delete') {expect(body.scope).toBe(scope);removed=true;return {json:{deleted:true}};}
-  throw new Error('Unexpected op');
+ // The ack route MARKS the row (kept); the next read sees it as history.
+ mockDoor([[isAck,(_b,url)=>{ expect(decodeURIComponent(ACK_URL.exec(url)![1])).toBe('completion:child:completed'); const stored=JSON.parse(row.content); stored.ackedAt='2026-09-13T10:00:05.000Z'; stored.ackedBy={kind:'member',workflowType:'project-manager'}; row.content=JSON.stringify(stored); return ackOk(); }],
+  ['/credits/review-memory',body=>{
+  if(body.op==='recall-prefix') return {json:{memories:[row]}};
+  throw new Error('Unexpected op '+body.op);
  }]]);
  const first=await call('check_messages');
  expect(first.completions[0].completion.result.summary).toContain('http://example.test');
- expect(removed).toBe(false);
+ expect(ackedIds()).toEqual([]);
  expect((await call('check_messages')).completions).toHaveLength(1);
  await call('check_messages',{acknowledgeCompletions:[first.completions[0].id]});
- expect(removed).toBe(true);
+ expect(ackedIds()).toEqual(['completion:child:completed']);
+ // Marked, not deleted: the row is still in the mailbox, and is now history —
+ // not handed over again, not counted as left.
+ expect(JSON.parse(row.content).ackedAt).toBe('2026-09-13T10:00:05.000Z');
+ const after=await call('check_messages');
+ expect(after).toEqual({messages:[],left:0});
+});
+
+describe('history: acknowledged rows are never re-delivered, and old history is pruned', () => {
+  const PREFIX = 'project-manager:doorbell:';
+  const row = (id: string, m: Record<string, any>) => ({ scope: `${PREFIX}${id}`, content: JSON.stringify({ id, at: '2026-09-13T09:59:00.000Z', from: { kind: 'human', name: 'leo' }, about: { executionId: SELF }, text: 'x', needsAck: true, ...m }) });
+  it('an acked note for this run is skipped (not returned, not counted, not acked again); one past the TTL is pruned', async () => {
+    const old = new Date(Date.now() - (INBOX_TTL_DAYS + 1) * 86400000).toISOString();
+    const rows = [
+      row('fresh-acked', { ackedAt: '2026-09-13T10:00:05.000Z', ackedBy: { kind: 'member', workflowType: 'project-manager' } }),
+      row('old-acked', { at: old, ackedAt: old, ackedBy: { kind: 'human' } }),
+      row('pending', { text: 'still for you' }),
+    ];
+    const deleted: string[] = [];
+    mockDoor([[isAck, () => ackOk()], ['/credits/review-memory', (body) => {
+      if (body.op === 'recall-prefix') return { json: { memories: rows } };
+      if (body.op === 'delete') { deleted.push(body.scope); return { json: { deleted: true } }; }
+      throw new Error(`Unexpected op ${body.op}`);
+    }]]);
+    const out = await call('check_messages');
+    expect(out.messages.map((m: any) => m.id)).toEqual(['pending']);
+    expect(out.left).toBe(0);
+    expect(ackedIds()).toEqual(['pending']);
+    expect(deleted).toEqual([`${PREFIX}old-acked`]);
+  });
+});
+
+describe('list_messages — what this agent still owes, or its history', () => {
+  const LIST_URL = 'http://cp.local/projects/proj-1/workflows/project-manager/inbox';
+  const listed = { ok: true, agent: 'project-manager', unacked: true, count: 1, truncated: false, messages: [
+    { id: 'm1', at: '2026-09-13T09:59:00.000Z', from: { kind: 'member', name: 'developer', workflowType: 'developer', executionId: 'run-dev-1' }, about: { ticketKey: 'ZB-1' }, text: 'blocked on the build', needsAck: true },
+  ] };
+  it('default: GET the own mailbox, pending only, rows passed through with the sender identity', async () => {
+    mockDoor([[(u) => u.startsWith(LIST_URL), () => ({ json: listed })]]);
+    const out = await call('list_messages');
+    expect(seen[0]).toMatchObject({ url: LIST_URL, method: 'GET' });
+    expect(out).toMatchObject({ unacked: true, count: 1, messages: listed.messages });
+    expect(out.note).toMatch(/still yours/);
+    expect(out.messages[0].from).toEqual({ kind: 'member', name: 'developer', workflowType: 'developer', executionId: 'run-dev-1' });
+  });
+  it('unacked:false / ticketKey / limit map onto the route query; a bad limit is refused before any request', async () => {
+    mockDoor([[(u) => u.startsWith(LIST_URL), () => ({ json: { data: { ...listed, unacked: false } } })]]);
+    const out = await call('list_messages', { unacked: false, ticketKey: 'ZB-1', limit: 5 });
+    const u = new URL(seen[0].url);
+    expect(Object.fromEntries(u.searchParams)).toEqual({ unacked: 'false', ticketKey: 'ZB-1', limit: '5' });
+    expect(out.unacked).toBe(false);
+    expect(out.note).toMatch(/history/i);
+    seen = [];
+    expect((await call('list_messages', { limit: 0 })).error).toMatch(/limit/);
+    expect((await call('list_messages', { limit: 101 })).error).toMatch(/limit/);
+    expect(seen).toHaveLength(0);
+  });
+  it('a refusal (another agent\'s mailbox, per the platform) comes back as {error}; missing identity never opens the door', async () => {
+    mockDoor([[(u) => u.startsWith(LIST_URL), () => ({ ok: false, status: 403, json: { error: 'A run reads and acknowledges only its own agent\'s mailbox' } })]]);
+    expect((await call('list_messages')).error).toMatch(/own agent/);
+    seen = [];
+    delete process.env.WORKFLOW_TYPE;
+    expect((await call('list_messages')).error).toMatch(/WORKFLOW_TYPE/);
+    expect(seen).toHaveLength(0);
+  });
+  it('is declared as a tool and the prompt teaches the take-over rules around it', () => {
+    const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'list_messages');
+    expect(tool).toBeTruthy();
+    expect(tool.input_schema.properties.unacked.type).toBe('boolean');
+    expect(tool.input_schema.properties.limit.maximum).toBe(LIST_LIMIT_MAX);
+    const p = agentMessagingSkill.promptFragment as string;
+    expect(p).toContain('list_messages');
+    expect(p).toMatch(/TICKET FIRST/);
+    expect(p).toMatch(/assignee is the owner/);
+    expect(p).toMatch(/SELF-SUFFICIENT/);
+    expect(p).toMatch(/ON WAKING/);
+    expect(p).toMatch(/ONE wake/);
+    expect(p).toMatch(/3 self-wakes/);
+    expect(p).toMatch(/human column/);
+    expect(p).toMatch(/from\.workflowType/);
+    expect(p).toMatch(/No receipt will ever come/);
+    expect(p).toMatch(/run\s+log is evidence to cite/);
+  });
+  it('message_agent says on every result that no receipt will come', async () => {
+    mockDoor([['/workflows/developer/inbox', () => ({ json: { ok: true, messageId: 'note-1', woke: false } })]]);
+    const out = await call('message_agent', { workflowType: 'developer', text: 'please pick up ZB-7' });
+    expect(out.receipt).toMatch(/store-and-ring/);
+    expect(out.receipt).toMatch(/No receipt/i);
+    expect(agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent').description).toMatch(/NO receipt/);
+  });
 });
