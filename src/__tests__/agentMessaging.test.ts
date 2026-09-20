@@ -688,7 +688,8 @@ describe('list_messages — what this agent still owes, or its history', () => {
     const p = agentMessagingSkill.promptFragment as string;
     expect(p).toContain('list_messages');
     expect(p).toMatch(/TICKET FIRST/);
-    expect(p).toMatch(/assignee is the owner/);
+    expect(p).toMatch(/assignee field cannot tell agents apart/);
+    expect(p).toMatch(/dispatch worker=<agent> exec=<executionId>/);
     expect(p).toMatch(/SELF-SUFFICIENT/);
     expect(p).toMatch(/ON WAKING/);
     expect(p).toMatch(/ONE wake/);
