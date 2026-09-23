@@ -48,6 +48,19 @@ test('execution manifest reuses native file tools and never calls a chat API or 
   expect(command.ok).toBe(false); expect(command.instruction).toContain('existing file');
   expect(fetch).not.toHaveBeenCalled();
 });
+test('execution manifest accepts sources laid out in their on-disk arrangement, never a traversal', async () => {
+  const list = async (directory: string) => {
+    vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', workspaces: [
+      { id: 'one', directory, revision: 'a'.repeat(40), branch: 'HEAD' },
+    ] }));
+    return localWorkspaceSkill.handleToolCall('list_workspaces');
+  };
+  expect(JSON.parse(await list('/workspace/local-project/tree/app')).workspaces).toHaveLength(1);
+  expect(JSON.parse(await list('/workspace/local-project/tree')).workspaces).toHaveLength(1);
+  for (const bad of ['/workspace/local-project/tree/../etc', '/workspace/local-project/tree/./x', '/workspace/other']) {
+    expect(JSON.parse(await list(bad))).toMatchObject({ ok: false, error: expect.stringContaining('manifest is invalid') });
+  }
+});
 test('ordinary declared skill, backend-session env derived through the shared wrapper', () => {
   expect(localWorkspaceSkill.id).toBe(SKILL_IDS.LOCAL_WORKSPACE);
   const registered = withBackendSessionEnv(localWorkspaceSkill);

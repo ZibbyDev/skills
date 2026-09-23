@@ -13,6 +13,11 @@ const operations: Record<string, string> = {
   publish_workspace_file: 'publish',
 };
 
+// One directory per source id, or — for a run with several host sources — the
+// source's place in their real on-disk arrangement under the layout root
+// (backend local-project-input.js localSourceDirectories). No `.`/`..` parts.
+const EXECUTION_DIRECTORY = /^\/workspace\/local-project\/[a-zA-Z0-9-]+(?:\/(?!\.\.?(?:\/|$))[^/\x00-\x1f\x7f]+)*$/;
+
 function executionWorkspaces() {
   if (!process.env.LOCAL_PROJECT_CONTEXT) return null;
   const context = JSON.parse(process.env.LOCAL_PROJECT_CONTEXT);
@@ -20,7 +25,7 @@ function executionWorkspaces() {
   const workspaces = context.workspaces || [{ id: context.executionId, name: 'local-project',
     directory: context.path, revision: context.revision, branch: context.branch, status: 'ready' }];
   if (!Array.isArray(workspaces) || !workspaces.length || workspaces.length > 16
-    || workspaces.some(item => !/^\/workspace\/local-project\/[a-zA-Z0-9-]+$/.test(item.directory || '')
+    || workspaces.some(item => !EXECUTION_DIRECTORY.test(item.directory || '')
       || !/^[a-f0-9]{40,64}$/.test(item.revision || ''))) throw new Error('Invalid execution workspace context');
   return { workspaces, executionId: context.executionId, accessMode: 'native-tools',
     instruction: 'These directories are already in YOUR execution container. Use your existing file, search and command tools directly. No additional clone, remote sandbox or model delegation is needed.' };
