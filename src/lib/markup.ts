@@ -42,7 +42,9 @@
  * bullets, `1.`/`1)` ordered lists, `- [ ]`/`- [x]` task items, `[text](url)`
  * + bare URLs, `---` rules, `> ` blockquotes, GitHub-style alert panels
  * (`> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` / `[!WARNING]` / `[!CAUTION]` →
- * ADF panel info / success / note / warning / error), and simple GFM tables.
+ * ADF panel info / success / note / warning / error; on Vikunja, which has no
+ * panel, a one-cell table in the panel's colour — see `PANEL_LOOK`), and simple
+ * GFM tables.
  * Anything else is text. NOTHING HERE THROWS: every entry point catches and
  * degrades to the plain one-paragraph-per-line shape, because a render failure
  * that lost a comment would be strictly worse than the ugliness it fixes.
@@ -84,6 +86,30 @@ const ALERT_TO_PANEL: Record<string, PanelKind> = {
 const PANEL_TO_ALERT: Record<PanelKind, string> = {
   info: 'NOTE', success: 'TIP', note: 'IMPORTANT', warning: 'WARNING', error: 'CAUTION',
 };
+
+/**
+ * HOW A PANEL LOOKS WHERE THE BOARD HAS NO PANEL (Vikunja / Tiptap). Vikunja's
+ * editor keeps a background colour on exactly ONE node — a table cell (its
+ * `tableCell` extension parses `data-background-color` and renders it as an
+ * inline `background-color`); every other colour, highlight or style is dropped
+ * the first time a person saves. So a panel is a ONE-CELL TABLE in the panel's
+ * colour, and its heading carries the icon Jira draws for that panel type, so
+ * both boards show one.
+ *
+ * The colours are TRANSLUCENT on purpose: the same stored value has to read on
+ * Vikunja's light AND dark theme, and a fixed pastel is unreadable on dark.
+ * ONE table, read in both directions: the HTML reader recognises a one-cell
+ * table in one of these colours as that panel again, and takes the icon back
+ * off its heading, so the fleet's parsers see the heading that was written.
+ */
+const PANEL_LOOK: Record<PanelKind, { bg: string; rgb: [number, number, number]; icon: string }> = {
+  info: { bg: 'rgba(88, 140, 245, 0.16)', rgb: [88, 140, 245], icon: '\u2139\ufe0f' },     // ℹ️
+  note: { bg: 'rgba(160, 120, 240, 0.16)', rgb: [160, 120, 240], icon: '\u{1f4dd}' },       // 📝
+  warning: { bg: 'rgba(236, 170, 60, 0.15)', rgb: [236, 170, 60], icon: '\u26a0\ufe0f' },  // ⚠️
+  success: { bg: 'rgba(70, 190, 125, 0.16)', rgb: [70, 190, 125], icon: '\u2705' },         // ✅
+  error: { bg: 'rgba(235, 90, 80, 0.15)', rgb: [235, 90, 80], icon: '\u26d4' },             // ⛔
+};
+const PANEL_KINDS = Object.keys(PANEL_LOOK) as PanelKind[];
 
 const MAX_INPUT = 200_000;
 const MAX_HEADING = 6;
@@ -441,10 +467,17 @@ function blocksToAdf(blocks: Block[], where: Where): AdfNode[] {
         break;
       case 'quote':
         if (where === 'quote' || where === 'item') out.push(...blocksToAdf(b.c, where));
+        // ADF allows no blockquote inside a panel. Flattening it would be the
+        // one thing a quote must never become: its lines read back UNQUOTED —
+        // and `> ` is exactly how the fleet's sanitisers make a hostile line
+        // inert. So it is shown as what it is: its own lines, verbatim.
+        else if (where === 'panel') out.push(...literalLines(b).map((line) => ({ type: 'paragraph', content: [{ type: 'text', text: line }] })));
         else out.push({ type: 'blockquote', content: nonEmpty(blocksToAdf(b.c, 'quote')) });
         break;
       case 'panel':
-        if (where !== 'doc') out.push(...blocksToAdf(b.c, where));
+        // A panel inside a panel: same reason as a quote there — verbatim.
+        if (where === 'panel') out.push(...literalLines(b).map((line) => ({ type: 'paragraph', content: [{ type: 'text', text: line }] })));
+        else if (where !== 'doc') out.push(...blocksToAdf(b.c, where));
         else out.push({ type: 'panel', attrs: { panelType: b.kind }, content: nonEmpty(blocksToAdf(b.c, 'panel')) });
         break;
       case 'rule':
@@ -474,6 +507,10 @@ function blocksToAdf(blocks: Block[], where: Where): AdfNode[] {
   return out;
 }
 function nonEmpty(nodes: AdfNode[]): AdfNode[] { return nodes.length ? nodes : [{ type: 'paragraph' }]; }
+/** A block as the Markdown lines it reads back as — for a block shown verbatim. */
+function literalLines(b: Block): string[] {
+  return blocksToText([b]).replace(/\n$/, '').split('\n').filter((line) => line !== '');
+}
 function nonEmptyInline(nodes: AdfNode[]): AdfNode[] { return nodes.length ? nodes : [{ type: 'text', text: ' ' }]; }
 function joinCells(row: Inline[][]): Inline[] {
   const out: Inline[] = [];
@@ -535,14 +572,14 @@ function keepLeadingSpace(c: Inline[]): Inline[] {
   if (c.length && c[0].t === 'text' && /^ /.test(c[0].v)) return [{ t: 'text', v: `\u00a0${c[0].v.slice(1)}` }, ...c.slice(1)];
   return c;
 }
-function blocksToHtml(blocks: Block[]): string {
+function blocksToHtml(blocks: Block[], top = true): string {
   let out = '';
   for (const b of blocks) {
     switch (b.t) {
       case 'paragraph': out += `<p>${inlineToHtml(keepLeadingSpace(b.c))}</p>`; break;
       case 'heading': out += `<h${b.level}>${inlineToHtml(b.c)}</h${b.level}>`; break;
-      case 'bullet': out += `<ul>${b.items.map((it) => `<li>${blocksToHtml(it)}</li>`).join('')}</ul>`; break;
-      case 'ordered': out += `<ol${b.start !== 1 ? ` start="${b.start}"` : ''}>${b.items.map((it) => `<li>${blocksToHtml(it)}</li>`).join('')}</ol>`; break;
+      case 'bullet': out += `<ul>${b.items.map((it) => `<li>${blocksToHtml(it, false)}</li>`).join('')}</ul>`; break;
+      case 'ordered': out += `<ol${b.start !== 1 ? ` start="${b.start}"` : ''}>${b.items.map((it) => `<li>${blocksToHtml(it, false)}</li>`).join('')}</ol>`; break;
       case 'task':
         // Tiptap's task-list HTML — the shape Vikunja's own editor stores.
         out += `<ul data-type="taskList">${b.items.map((it) => (
@@ -552,13 +589,27 @@ function blocksToHtml(blocks: Block[]): string {
         )).join('')}</ul>`;
         break;
       case 'code': out += `<pre><code${b.lang ? ` class="language-${esc(b.lang)}"` : ''}>${esc(b.v)}</code></pre>`; break;
-      case 'quote': out += `<blockquote>${blocksToHtml(b.c)}</blockquote>`; break;
-      case 'panel':
-        // Tiptap has no panel: an honest degrade — a blockquote whose first
-        // line names the kind in bold, which is also how GitHub renders the
-        // alert syntax when unsupported.
-        out += `<blockquote><p><strong>${PANEL_TO_ALERT[b.kind][0]}${PANEL_TO_ALERT[b.kind].slice(1).toLowerCase()}</strong></p>${blocksToHtml(b.c)}</blockquote>`;
+      case 'quote': out += `<blockquote>${blocksToHtml(b.c, false)}</blockquote>`; break;
+      case 'panel': {
+        // Only a TOP-LEVEL panel is a coloured cell; one nested in a quote, a
+        // list or another panel is shown verbatim (its `> [!X]` lines), the
+        // same rule the ADF writer follows — so a nested one reads back quoted.
+        if (!top) { out += literalLines(b).map((line) => `<p>${esc(line)}</p>`).join(''); break; }
+        const look = PANEL_LOOK[b.kind];
+        // A table inside the cell would make it a table-in-a-table, which the
+        // reader cannot tell from a person's grid — one paragraph per row
+        // instead, exactly what the ADF writer does (ADF allows no table in a panel).
+        const flat: Block[] = b.c.flatMap((x): Block[] => (x.t === 'table'
+          ? [...(x.header ? [x.header] : []), ...x.rows].map((row) => ({ t: 'paragraph' as const, c: joinCells(row) }))
+          : [x]));
+        const [head, ...rest] = flat;
+        const c = head && head.t === 'heading'
+          ? [{ ...head, c: [{ t: 'text' as const, v: `${look.icon} ` }, ...head.c] }, ...rest]
+          : flat;
+        out += `<table><tbody><tr><td data-background-color="${look.bg}" style="background-color: ${look.bg}">`
+          + `${blocksToHtml(c, false) || '<p></p>'}</td></tr></tbody></table>`;
         break;
+      }
       case 'rule': out += '<hr>'; break;
       case 'table': {
         let t = '<table><tbody>';
@@ -611,7 +662,14 @@ function inlineToText(inline: Inline[]): string {
  */
 export function blocksToText(blocks: Block[]): string {
   let out = '';
+  let prevQuoted = false;
   for (const b of blocks) {
+    // Two quotes/panels in a row are separated by ONE blank line — without it
+    // their `> ` lines are one run, and the text re-parses as ONE panel (a
+    // ticket rewritten from what was read would merge its sections).
+    const quoted = b.t === 'quote' || b.t === 'panel';
+    if (quoted && prevQuoted) out += '\n';
+    prevQuoted = quoted;
     switch (b.t) {
       case 'paragraph': out += `${inlineToText(b.c)}\n`; break;
       case 'heading': out += `${'#'.repeat(Math.max(1, Math.min(MAX_HEADING, b.level)))} ${inlineToText(b.c)}\n`; break;
@@ -944,6 +1002,8 @@ function htmlBlocks(toks: Tok[]): Block[] {
     if (name === 'table') {
       flushRun();
       const inner = collect('table');
+      const panel = panelFromTable(inner);
+      if (panel) { out.push(panel); continue; }
       const rows: Inline[][][] = [];
       const headerFlags: boolean[] = [];
       let j = 0;
@@ -988,6 +1048,44 @@ function htmlBlocks(toks: Tok[]): Block[] {
   }
   flushRun();
   return out;
+}
+/**
+ * A one-cell table in one of `PANEL_LOOK`'s colours is the panel the HTML
+ * writer made — read it back as that panel, with the icon the writer put on its
+ * heading taken off again. Anything else (more rows or cells, no colour, a
+ * colour that is not ours) stays a table. The colour is matched on its RGB,
+ * because an editor may re-spell `rgba(…)` when a person saves.
+ */
+function panelFromTable(inner: Tok[]): Block | null {
+  const opens = inner.filter((x): x is Extract<Tok, { kind: 'open' }> => x.kind === 'open');
+  const rows = opens.filter((x) => x.name === 'tr');
+  const cells = opens.filter((x) => x.name === 'td' || x.name === 'th');
+  if (rows.length !== 1 || cells.length !== 1 || opens.some((x) => x.name === 'table')) return null;
+  const cell = cells[0];
+  const colour = cell.attrs['data-background-color'] || /background-color\s*:\s*([^;]+)/i.exec(cell.attrs.style || '')?.[1] || '';
+  const rgb = /rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i.exec(colour);
+  if (!rgb) return null;
+  const kind = PANEL_KINDS.find((k) => PANEL_LOOK[k].rgb.every((v, n) => v === Number(rgb[n + 1])));
+  if (!kind) return null;
+  const from = inner.indexOf(cell) + 1;
+  let depth = 1;
+  let to = from;
+  for (; to < inner.length; to++) {
+    const t = inner[to];
+    if (t.kind === 'open' && t.name === cell.name && !t.selfClose) depth++;
+    if (t.kind === 'close' && t.name === cell.name && --depth === 0) break;
+  }
+  const c = htmlBlocks(inner.slice(from, to));
+  const head = c[0];
+  if (head && head.t === 'heading' && head.c[0]?.t === 'text') {
+    const icon = PANEL_LOOK[kind].icon.replace(/\ufe0f$/, '');
+    const text = (head.c[0] as { v: string }).v;
+    if (text.startsWith(icon)) {
+      const v = text.slice(icon.length).replace(/^\ufe0f/, '').replace(/^\s+/, '');
+      c[0] = { ...head, c: v ? [{ t: 'text', v }, ...head.c.slice(1)] : head.c.slice(1) };
+    }
+  }
+  return { t: 'panel', kind, c };
 }
 function popMark(stack: Array<'strong' | 'em' | 'strike' | { link: string }>, kind: 'strong' | 'em' | 'strike') {
   const k = stack.lastIndexOf(kind);

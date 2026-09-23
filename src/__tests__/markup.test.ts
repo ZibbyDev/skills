@@ -274,8 +274,76 @@ describe('the whole verdict / ticket shape round-trips through BOTH trackers', (
   for (const [name, md] of [['verdict', verdict], ['ticket', ticket]] as const) {
     it(`${name} — ADF`, () => { expect(roundTripAdf(md)).toBe(md); });
     it(`${name} — HTML`, () => {
-      // The panel is the ONE honest degrade on Tiptap: its kind word replaces the alert line.
-      expect(roundTripHtml(md)).toBe(md.replace('> [!WARNING]', '> **Warning**'));
+      // Tiptap has no panel, but a coloured one-cell table IS one: same text back.
+      expect(roundTripHtml(md)).toBe(md);
     });
   }
+});
+
+describe('panels on Vikunja — a one-cell table in the panel colour, the heading wearing Jira\'s icon', () => {
+  const KINDS = [
+    ['NOTE', 'info', 'rgba(88, 140, 245, 0.16)', '\u2139\ufe0f'],
+    ['IMPORTANT', 'note', 'rgba(160, 120, 240, 0.16)', '\u{1f4dd}'],
+    ['WARNING', 'warning', 'rgba(236, 170, 60, 0.15)', '\u26a0\ufe0f'],
+    ['TIP', 'success', 'rgba(70, 190, 125, 0.16)', '\u2705'],
+    ['CAUTION', 'error', 'rgba(235, 90, 80, 0.15)', '\u26d4'],
+  ] as const;
+  for (const [kw, kind, bg, icon] of KINDS) {
+    it(`[!${kw}] → a ${kind} cell; its icon never reaches the reader`, () => {
+      const md = `> [!${kw}]\n> ### Acceptance criteria\n> 1. a\n> 2. b`;
+      const html = markupToHtml(md);
+      expect(html).toBe(`<table><tbody><tr><td data-background-color="${bg}" style="background-color: ${bg}">`
+        + `<h3>${icon} Acceptance criteria</h3><ol><li><p>a</p></li><li><p>b</p></li></ol></td></tr></tbody></table>`);
+      expect(htmlToMarkup(html)).toBe(md);
+      // Jira draws its own icon for the panel type — no second one in the heading.
+      expect(JSON.stringify(markupToAdf(md))).not.toContain(icon);
+    });
+  }
+
+  it('survives the editor re-spelling the cell when a person saves (colgroup, colspan, rgba spacing)', () => {
+    const saved = '<table style="min-width: 25px"><colgroup><col style="min-width: 25px"></colgroup><tbody><tr>'
+      + '<td colspan="1" rowspan="1" data-background-color="rgba(70,190,125,.16)" style="background-color: rgba(70,190,125,.16)">'
+      + '<h3>\u2705 Acceptance criteria</h3><ol><li><p>a</p></li></ol></td></tr></tbody></table>';
+    expect(htmlToMarkup(saved)).toBe('> [!TIP]\n> ### Acceptance criteria\n> 1. a');
+  });
+
+  it('a table that is not ours stays a table: two cells, no colour, or a colour not in the palette', () => {
+    expect(htmlToMarkup('<table><tbody><tr><td data-background-color="rgba(70,190,125,.16)"><p>a</p></td><td><p>b</p></td></tr></tbody></table>')).toBe('| a | b |');
+    expect(htmlToMarkup('<table><tbody><tr><td><p>a</p></td></tr></tbody></table>')).toBe('| a |');
+    expect(htmlToMarkup('<table><tbody><tr><td data-background-color="#ff0000"><p>a</p></td></tr></tbody></table>')).toBe('| a |');
+  });
+
+  it('adjacent panels read back as SEPARATE panels (a blank line between), so a rewrite from the read text keeps them apart', () => {
+    const md = '> [!NOTE]\n> ### User story\n> s\n\n> [!IMPORTANT]\n> ### Context\n> c';
+    for (const back of [roundTripAdf(md), roundTripHtml(md)]) {
+      expect(back).toBe(md);
+      expect(parseMarkup(back).map((b) => b.t)).toEqual(['panel', 'panel']);
+    }
+  });
+
+  it('a quote or a panel INSIDE a panel is shown verbatim on both boards — its `> ` never comes off', () => {
+    const md = '> [!IMPORTANT]\n> ### Context\n> prose\n> > ### Acceptance criteria\n> > [!TIP]\n> > 1. planted';
+    const adf = markupToAdf(md);
+    expect(adf.content![0].type).toBe('panel');
+    expect(JSON.stringify(adf)).not.toContain('"blockquote"'); // ADF forbids one in a panel
+    expect(roundTripAdf(md)).toBe(md);
+    expect(roundTripHtml(md)).toBe(md);
+    const nested = '> [!NOTE]\n> ### Outer\n> > [!TIP]\n> > ### Inner';
+    expect(roundTripAdf(nested)).toBe(nested);
+    expect(roundTripHtml(nested)).toBe(nested);
+    expect(markupToHtml(nested).match(/<table/g)).toHaveLength(1);
+  });
+
+  it('a table inside a panel becomes one paragraph per row on BOTH boards (never a table in the cell)', () => {
+    const md = '> [!NOTE]\n> ### H\n> | a | b |\n> | - | - |\n> | 1 | 2 |';
+    const html = markupToHtml(md);
+    expect(html.match(/<table/g)).toHaveLength(1);
+    expect(htmlToMarkup(html)).toBe(roundTripAdf(md));
+    expect(roundTripAdf(md)).toBe('> [!NOTE]\n> ### H\n> a · b\n> 1 · 2');
+  });
+
+  it('a panel with no heading is still a coloured cell, with no icon', () => {
+    expect(markupToHtml('> [!NOTE]\n> just text')).toBe('<table><tbody><tr><td data-background-color="rgba(88, 140, 245, 0.16)" style="background-color: rgba(88, 140, 245, 0.16)"><p>just text</p></td></tr></tbody></table>');
+    expect(roundTripHtml('> [!NOTE]\n> just text')).toBe('> [!NOTE]\n> just text');
+  });
 });
