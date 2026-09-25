@@ -1,7 +1,7 @@
 /**
  * The project's repository selection is an access boundary for every token.
  *
- * Founder's rule: if a project did not select a repository (Project Settings →
+ * The rule: if a project did not select a repository (Project Settings →
  * Repository access), that project's agents must not have access to it. A
  * GitHub App token can be minted scoped to the selection; a personal access
  * token cannot — so before this, a PAT-connected box handed every project's
