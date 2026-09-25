@@ -66,7 +66,7 @@ describe('artifact_publish', () => {
     expect(rec).toMatchObject({ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', title: 'Status Report', kind: 'report', summary: 'weekly status' });
   });
 
-  // A chat ABOUT another agent (the Copilot answering on magnum's page) files the
+  // A chat ABOUT another agent (the Copilot answering on an agent's own page) files the
   // page under THAT agent; everything else keeps WORKFLOW_TYPE. The owner value
   // arrives turn-locally from the runtime — see ARTIFACT_OWNER_ENV.
   describe('owner namespace', () => {
@@ -84,8 +84,8 @@ describe('artifact_publish', () => {
     afterEach(() => { delete process.env[ARTIFACT_OWNER_ENV]; });
 
     it('the bound agent owns what a turn about it publishes', async () => {
-      process.env[ARTIFACT_OWNER_ENV] = 'magnum';
-      expect(await publishedScope()).toBe(`magnum:artifact:${ID}`);
+      process.env[ARTIFACT_OWNER_ENV] = 'release-manager';
+      expect(await publishedScope()).toBe(`release-manager:artifact:${ID}`);
     });
 
     it('no bound agent → the running agent (the Copilot) owns it', async () => {

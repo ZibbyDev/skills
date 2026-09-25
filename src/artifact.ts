@@ -156,7 +156,7 @@ function agentNamespace() {
  * agent a conversation is ABOUT, when that is not the agent running it.
  *
  * The dashboard lets a person chat with the Copilot on another agent's page
- * ("Ask about magnum…"). The Copilot runs that turn, so WORKFLOW_TYPE names the
+ * ("Ask about <agent>…"). The Copilot runs that turn, so WORKFLOW_TYPE names the
  * Copilot — and every page published there used to land on the COPILOT's
  * Artifacts tab instead of the agent the person was looking at. The runtime that
  * knows which agent the conversation is bound to (the web chat resolves it
