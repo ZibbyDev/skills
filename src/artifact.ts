@@ -151,9 +151,41 @@ function agentNamespace() {
   return wt || 'agent';
 }
 
+/**
+ * WHO OWNS WHAT THIS TURN PUBLISHES — an optional, PER-TURN statement of the
+ * agent a conversation is ABOUT, when that is not the agent running it.
+ *
+ * The dashboard lets a person chat with the Copilot on another agent's page
+ * ("Ask about magnum…"). The Copilot runs that turn, so WORKFLOW_TYPE names the
+ * Copilot — and every page published there used to land on the COPILOT's
+ * Artifacts tab instead of the agent the person was looking at. The runtime that
+ * knows which agent the conversation is bound to (the web chat resolves it
+ * server-side, member- and same-project-checked) hands its workflowType to THIS
+ * child only, turn-locally — never through process.env — under this name.
+ *
+ * AN IDENTIFIER, NEVER AUTHORITY (security invariant #1): it only picks the
+ * index namespace WITHIN the tenant the Bearer token already proves; the
+ * review-memory handler derives that partition server-side and ignores this.
+ * Absent (Slack, Lark, a run, cloud, a plain Copilot chat) → WORKFLOW_TYPE,
+ * byte-identical to before.
+ */
+export const ARTIFACT_OWNER_ENV = 'ARTIFACT_OWNER_WORKFLOW_TYPE';
+
+/** The namespace artifact INDEX records live under: the bound agent, else this agent. */
+function artifactOwnerNamespace() {
+  const raw = process.env[ARTIFACT_OWNER_ENV];
+  const owner = typeof raw === 'string' ? raw.trim() : '';
+  // Same identifier bounds the platform applies to a caller workflowType it
+  // threads elsewhere (it becomes part of a sort key): ≤200 chars, no control
+  // characters. A value that fails them is ignored, not trusted half-way.
+  // eslint-disable-next-line no-control-regex
+  if (owner && owner.length <= 200 && !/[\x00-\x1f\x7f]/.test(owner)) return owner;
+  return agentNamespace();
+}
+
 /** The kv-memory scope an artifact's index record lives at. */
 function indexScope(id) {
-  return `${agentNamespace()}:artifact:${id}`;
+  return `${artifactOwnerNamespace()}:artifact:${id}`;
 }
 
 /**

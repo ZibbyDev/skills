@@ -15,7 +15,7 @@ process.env.WORKFLOW_TYPE = 'zibby-copilot';
 
 const {
   artifactSkill, __resetPublishBudget, __compareStoredSource,
-  ARTIFACT_TITLE_RULE, ARTIFACT_DESCRIPTION_RULE,
+  ARTIFACT_TITLE_RULE, ARTIFACT_DESCRIPTION_RULE, ARTIFACT_OWNER_ENV,
 } = await import('../artifact.js');
 
 // Route the mocked fetch by URL + parse the JSON body for assertions.
@@ -64,6 +64,40 @@ describe('artifact_publish', () => {
     expect(index[2].scope).toBe('zibby-copilot:artifact:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     const rec = JSON.parse(index[2].content);
     expect(rec).toMatchObject({ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', title: 'Status Report', kind: 'report', summary: 'weekly status' });
+  });
+
+  // A chat ABOUT another agent (the Copilot answering on magnum's page) files the
+  // page under THAT agent; everything else keeps WORKFLOW_TYPE. The owner value
+  // arrives turn-locally from the runtime — see ARTIFACT_OWNER_ENV.
+  describe('owner namespace', () => {
+    const ID = 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
+    async function publishedScope() {
+      const seen = [];
+      global.fetch = mockFetch([
+        ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '<h1>x</h1>', format: 'html' } })],
+        ['/artifacts', () => ({ json: { id: ID, url: `http://box/a/${ID}`, createdAt: '2026-09-25T00:00:00Z' } })],
+        ['/credits/review-memory', (body) => { seen.push(body); return { json: { stored: true } }; }],
+      ]);
+      await artifactSkill.handleToolCall('artifact_publish', { title: 'Driftwood Coffee', html: '<h1>x</h1>' });
+      return seen.find((b) => b.op === 'store').scope;
+    }
+    afterEach(() => { delete process.env[ARTIFACT_OWNER_ENV]; });
+
+    it('the bound agent owns what a turn about it publishes', async () => {
+      process.env[ARTIFACT_OWNER_ENV] = 'magnum';
+      expect(await publishedScope()).toBe(`magnum:artifact:${ID}`);
+    });
+
+    it('no bound agent → the running agent (the Copilot) owns it', async () => {
+      expect(await publishedScope()).toBe(`zibby-copilot:artifact:${ID}`);
+    });
+
+    it('an unusable owner value is ignored, never half-trusted', async () => {
+      process.env[ARTIFACT_OWNER_ENV] = 'mag\nnum';
+      expect(await publishedScope()).toBe(`zibby-copilot:artifact:${ID}`);
+      process.env[ARTIFACT_OWNER_ENV] = 'x'.repeat(201);
+      expect(await publishedScope()).toBe(`zibby-copilot:artifact:${ID}`);
+    });
   });
 
   it('rejects missing title or neither content form', async () => {
