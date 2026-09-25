@@ -1,7 +1,7 @@
 import { spawn, execSync } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, join, basename } from 'path';
-import { assertGitUrlAllowed, isRepoNotSelected } from '@zibby/core/utils/repo-access.js';
+import { assertGitUrlAllowed, isRepoNotSelected } from './lib/repo-access.js';
 
 const DEFAULT_CHECKOUT_DIR = '.zibby/repos';
 
@@ -205,7 +205,7 @@ async function handleCheckout(args, cwd) {
   if (!url.includes('://') && !url.startsWith('git@')) {
     url = `https://github.com/${url}`;
   }
-  // PROJECT REPO SELECTION (@zibby/core/utils/repo-access): a github/gitlab
+  // PROJECT REPO SELECTION (lib/repo-access.js — canonical in @zibby/core): a github/gitlab
   // repository this project did not select is refused before any token is
   // attached — also for a public one, which the project did not choose either.
   assertGitUrlAllowed(url);

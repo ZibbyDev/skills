@@ -73,7 +73,7 @@ import {
   repoRefusal,
   RepoNotSelectedError,
   isRepoNotSelected,
-} from '@zibby/core/utils/repo-access.js';
+} from './lib/repo-access.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -273,7 +273,7 @@ function gitlabAuthHeaders() {
  * @param {{ method?: string, body?: object, raw?: boolean }} [opts]
  */
 export async function glFetch(path, opts: any = {}) {
-  // PROJECT REPO SELECTION (@zibby/core/utils/repo-access): every GitLab
+  // PROJECT REPO SELECTION (lib/repo-access.js — canonical in @zibby/core): every GitLab
   // request — the gitlab_* tools and template nodes' own glFetch calls — is
   // checked against the project's selected repositories before the token is
   // used. A GitLab token cannot be narrowed to a repository, so this is where
@@ -409,7 +409,7 @@ function encodeProject(projectId) {
 // So the boundary is enforced HERE, at the tool layer, on the ONE chokepoint
 // every gitlab tool passes through (and again in glFetch, for template nodes
 // that call the API directly). The selection arrives as REPO_ALLOWLIST (see
-// @zibby/core/utils/repo-access): PRESENT ⇒ enforced, and an EMPTY selection
+// lib/repo-access.js — canonical in @zibby/core): PRESENT ⇒ enforced, and an EMPTY selection
 // allows nothing. Only a run the platform did not scope (no REPO_ALLOWLIST and
 // none of the older channels below) is unrestricted.
 //
@@ -418,7 +418,7 @@ function encodeProject(projectId) {
 // RESOLVED to its path before the check, so `projectId: 42` cannot walk around
 // the list.
 function allowedRepos() {
-  // THE PROJECT'S SELECTION (REPO_ALLOWLIST, @zibby/core/utils/repo-access) is
+  // THE PROJECT'S SELECTION (REPO_ALLOWLIST, lib/repo-access.js — canonical in @zibby/core) is
   // the answer whenever the platform scoped this run — including the empty
   // selection, which allows NOTHING. The two sources below are the older
   // channels, read only when REPO_ALLOWLIST is absent (a control plane that
@@ -1293,7 +1293,7 @@ export const gitlabSkill: any = {
     // fail-OPEN direction, which is why it belongs next to the token it bounds.
     'GITLAB_ALLOWED_REPOS',
     // The project's repository selection across providers — the channel every
-    // repository check reads (REPO_ALLOWLIST, @zibby/core/utils/repo-access).
+    // repository check reads (REPO_ALLOWLIST, lib/repo-access.js — canonical in @zibby/core).
     // Same fail-open hazard if it is missing here.
     'REPO_ALLOWLIST',
     // The multi-server table (host + token + repos per connected GitLab). Same

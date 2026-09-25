@@ -11,7 +11,7 @@ import {
   repoRefusal,
   readRepoAllowlist,
   RepoNotSelectedError,
-} from '@zibby/core/utils/repo-access.js';
+} from './lib/repo-access.js';
 import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
 import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
@@ -39,7 +39,7 @@ function resolveSkillBin() {
 // cannot be, so the selection is enforced HERE, where every GitHub request —
 // the github_* tools, git-write's delegations and template nodes' own ghFetch
 // calls — passes before a token is used. The rule itself lives in
-// @zibby/core/utils/repo-access (REPO_ALLOWLIST); this is one of its consumers.
+// lib/repo-access.js — canonical in @zibby/core (REPO_ALLOWLIST); this is one of its consumers.
 //
 //   /repos/{owner}/{repo}/…      → that repository must be selected.
 //   /repositories/{id}, /graphql → cannot be tied to one repository without
