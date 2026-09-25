@@ -65,6 +65,15 @@ import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
 import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
 import { fetchWithDeadline } from './lib/http-deadline.js';
+import {
+  selectedRepos,
+  repoAccessEnforced,
+  assertRepoAllowed,
+  filterAllowedRepos,
+  repoRefusal,
+  RepoNotSelectedError,
+  isRepoNotSelected,
+} from '@zibby/core/utils/repo-access.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -264,6 +273,71 @@ function gitlabAuthHeaders() {
  * @param {{ method?: string, body?: object, raw?: boolean }} [opts]
  */
 export async function glFetch(path, opts: any = {}) {
+  // PROJECT REPO SELECTION (@zibby/core/utils/repo-access): every GitLab
+  // request — the gitlab_* tools and template nodes' own glFetch calls — is
+  // checked against the project's selected repositories before the token is
+  // used. A GitLab token cannot be narrowed to a repository, so this is where
+  // the selection holds. Unscoped runs (no REPO_ALLOWLIST) are unchanged.
+  if (!repoAccessEnforced()) return glRequest(path, opts);
+  const target = gitlabRequestTarget(path);
+  if (target.kind === 'project') {
+    const repo = /^\d+$/.test(target.ident) ? await resolveNumericProjectCached(target.ident) : target.ident;
+    if (!repo) {
+      // An id that cannot be resolved cannot be shown to be selected.
+      throw new RepoNotSelectedError(repoRefusal('gitlab', target.ident, { gitlab: new Set(selectedRepos('gitlab') || []) }));
+    }
+    assertRepoAllowed('gitlab', repo);
+    return glRequest(path, opts);
+  }
+  if (target.kind === 'list') {
+    const data = await glRequest(path, opts);
+    return Array.isArray(data) ? filterAllowedRepos('gitlab', data, (p) => p && p.path_with_namespace) : data;
+  }
+  if (target.kind === 'meta') return glRequest(path, opts);
+  const refusal = repoRefusal('gitlab', String(path).split('?')[0], { gitlab: new Set(selectedRepos('gitlab') || []) });
+  refusal.error = 'This GitLab request is not addressed to one of this project\'s selected repositories, so it is not allowed. '
+    + 'Address the repository as /projects/<group%2Frepo>/… instead. ' + refusal.error;
+  throw new RepoNotSelectedError(refusal);
+}
+
+/**
+ * What a GitLab API path addresses: one project (by id or encoded path), the
+ * project list, account metadata, or something else.
+ */
+function gitlabRequestTarget(path: string): { kind: 'project', ident: string } | { kind: 'list' } | { kind: 'meta' } | { kind: 'other' } {
+  let pathname = String(path || '');
+  if (/^https?:\/\//i.test(pathname)) {
+    try { pathname = new URL(pathname).pathname; } catch { return { kind: 'other' }; }
+  }
+  pathname = pathname.split('?')[0].replace(/^\/api\/v\d+/, '');
+  const m = pathname.match(/^\/projects\/([^/]+)/);
+  if (m) {
+    let ident = m[1];
+    try { ident = decodeURIComponent(ident); } catch { /* keep raw */ }
+    return { kind: 'project', ident };
+  }
+  if (/^\/projects\/?$/.test(pathname) || /^\/groups\/[^/]+\/projects\/?$/.test(pathname)) return { kind: 'list' };
+  if (/^\/(user|version|metadata)\/?$/.test(pathname)) return { kind: 'meta' };
+  return { kind: 'other' };
+}
+
+// numeric id → path, per API base. A project id is only meaningful on the
+// server that issued it, so the base is part of the key.
+const numericProjectPaths = new Map<string, string | null>();
+async function resolveNumericProjectCached(id: string): Promise<string | null> {
+  const key = `${gitlabApiBase()}|${id}`;
+  if (numericProjectPaths.has(key)) return numericProjectPaths.get(key) ?? null;
+  let path: string | null = null;
+  try {
+    const proj = await glRequest(`/projects/${id}`);
+    path = (proj && proj.path_with_namespace) || null;
+  } catch { path = null; }
+  if (path) numericProjectPaths.set(key, path);
+  return path;
+}
+
+/** The unchecked request — only for glFetch above and id resolution. */
+async function glRequest(path, opts: any = {}) {
   const url = /^https?:\/\//.test(path) ? path : `${gitlabApiBase()}${path}`;
   const headers: any = {
     Accept: 'application/json',
@@ -333,14 +407,24 @@ function encodeProject(projectId) {
 // 12 repos for a project that had selected one.
 //
 // So the boundary is enforced HERE, at the tool layer, on the ONE chokepoint
-// every gitlab tool passes through. ABSENT/EMPTY ⇒ unrestricted, byte-identical
-// to before — a run that injects nothing is unaffected.
+// every gitlab tool passes through (and again in glFetch, for template nodes
+// that call the API directly). The selection arrives as REPO_ALLOWLIST (see
+// @zibby/core/utils/repo-access): PRESENT ⇒ enforced, and an EMPTY selection
+// allows nothing. Only a run the platform did not scope (no REPO_ALLOWLIST and
+// none of the older channels below) is unrestricted.
 //
 // Paths are compared case-insensitively and slash-normalized (GitLab paths are
 // case-preserving but case-insensitive to look up). A numeric project id is
 // RESOLVED to its path before the check, so `projectId: 42` cannot walk around
 // the list.
 function allowedRepos() {
+  // THE PROJECT'S SELECTION (REPO_ALLOWLIST, @zibby/core/utils/repo-access) is
+  // the answer whenever the platform scoped this run — including the empty
+  // selection, which allows NOTHING. The two sources below are the older
+  // channels, read only when REPO_ALLOWLIST is absent (a control plane that
+  // predates it).
+  const selection = selectedRepos('gitlab');
+  if (selection) return new Set(selection);
   // With a server table, the union of its `repos` IS the selection. DERIVING it
   // (rather than also requiring GITLAB_ALLOWED_REPOS to be set and to agree)
   // keeps ONE place deciding what is reachable — CLAUDE.md's two-places rule.
@@ -382,7 +466,7 @@ function namedProject(args) {
 async function resolveProjectPath(ident) {
   if (!/^\d+$/.test(ident)) return ident;
   try {
-    const proj = await glFetch(`/projects/${encodeProject(ident)}`);
+    const proj = await glRequest(`/projects/${encodeProject(ident)}`);
     return (proj && proj.path_with_namespace) || null;
   } catch {
     return null;
@@ -1094,7 +1178,10 @@ async function dispatchTool(name, args) {
       for (const inst of (instances || [null])) {
         const rows = inst ? await routedInstance.run(inst, page) : await page();
         for (const p of rows) {
-          if (isAllowedPath(inst ? inst.repos : allow, p && p.path_with_namespace)) {
+          // A server's own `repos` decide which of its answers are its to give
+          // (routing); the project's selection decides what may be seen at all.
+          const path = p && p.path_with_namespace;
+          if (isAllowedPath(allow, path) && (!inst || isAllowedPath(inst.repos, path))) {
             all.push({ p, host: inst ? inst.webHost : null });
           }
         }
@@ -1205,6 +1292,10 @@ export const gitlabSkill: any = {
     // omission here silently disables the allowlist rather than erroring — the
     // fail-OPEN direction, which is why it belongs next to the token it bounds.
     'GITLAB_ALLOWED_REPOS',
+    // The project's repository selection across providers — the channel every
+    // repository check reads (REPO_ALLOWLIST, @zibby/core/utils/repo-access).
+    // Same fail-open hazard if it is missing here.
+    'REPO_ALLOWLIST',
     // The multi-server table (host + token + repos per connected GitLab). Same
     // fail-open hazard: absent here, the child sees one server and two thirds
     // of a spanning project's repos are simply unreachable. It carries TOKENS —
@@ -1289,13 +1380,9 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
           // asking the wrong host.
           if (!isAllowedPath(allow, path) || (instances && !instance)) {
             // Name what IS allowed — a bare "denied" reads to the model as a
-            // transient failure and it retries the same call.
-            return JSON.stringify({
-              error: `Repository "${path || ident}" is not available to this project. `
-                + `This project's agents may only use: ${[...allow].join(', ')}. `
-                + `An owner changes this in Project Settings → Repository access.`,
-              allowedRepos: [...allow],
-            });
+            // transient failure and it retries the same call. The shape is the
+            // platform's ONE repository refusal (code REPO_NOT_SELECTED).
+            return JSON.stringify(repoRefusal('gitlab', path || ident, { gitlab: allow }));
           }
           route = instance;
         }
@@ -1306,6 +1393,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
         ? await routedInstance.run(route, () => dispatchTool(name, args))
         : await dispatchTool(name, args);
     } catch (e) {
+      if (isRepoNotSelected(e)) return JSON.stringify(e.refusal);
       return JSON.stringify({ error: e.message });
     }
   },

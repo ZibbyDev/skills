@@ -100,7 +100,7 @@ describe('gitlab multi-instance routing', () => {
       process.env.GITLAB_ALLOWED_REPOS = 'root/kb-demo';
       stubApi(() => MR);
       const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: 'root/hono', iid: 7 }));
-      expect(res.error).toMatch(/not available to this project/);
+      expect(res.error).toMatch(/not selected for this project/);
     });
 
     test('enumeration carries no host field (the response shape is byte-identical)', async () => {
@@ -211,7 +211,7 @@ describe('gitlab multi-instance routing', () => {
     test('a repo no server claims is refused, with the existing allowlist error shape', async () => {
       const calls = stubApi(() => MR);
       const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: 'root/hono', iid: 7 }));
-      expect(res.error).toMatch(/root\/hono.*not available to this project/);
+      expect(res.error).toMatch(/root\/hono.*not selected for this project/);
       expect(res.allowedRepos).toEqual(['root/kb-demo', 'root/meter-shop', 'zibby-group/zibby-project']);
       expect(calls, 'a refused call must not have touched any server').toHaveLength(0);
     });
@@ -223,7 +223,7 @@ describe('gitlab multi-instance routing', () => {
       const ok = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: 'root/kb-demo', iid: 7 }));
       expect(ok.iid).toBe(7);
       const no = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: 'root/hono', iid: 7 }));
-      expect(no.error).toMatch(/not available/);
+      expect(no.error).toMatch(/not selected/);
     });
 
     test('a numeric id is probed per-server and cannot cross onto another host', async () => {
@@ -257,14 +257,14 @@ describe('gitlab multi-instance routing', () => {
         return url.startsWith(CLOUD) ? undefined : { path_with_namespace: 'zibby-group/Zibby-project' };
       });
       const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: '7', iid: 1 }));
-      expect(res.error).toMatch(/not available to this project/);
+      expect(res.error).toMatch(/not selected for this project/);
       expect(calls.every((c) => !c.url.includes('/merge_requests/')), 'no MR call may have gone out').toBe(true);
     });
 
     test('a numeric id no server claims is refused (fail-closed)', async () => {
       stubApi((url) => (url.includes('/projects/99') ? { path_with_namespace: 'root/hono' } : MR));
       const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: '99', iid: 7 }));
-      expect(res.error).toMatch(/root\/hono.*not available/);
+      expect(res.error).toMatch(/root\/hono.*not selected/);
     });
 
     test('an UNROUTED call has no host or token to fall back to', async () => {

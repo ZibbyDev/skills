@@ -2,6 +2,16 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve as resolvePath } from 'path';
 import { resolveIntegrationToken } from '@zibby/core/backend-client.js';
+import {
+  assertRepoAllowed,
+  repoAccessEnforced,
+  filterAllowedRepos,
+  selectedRepos,
+  isRepoNotSelected,
+  repoRefusal,
+  readRepoAllowlist,
+  RepoNotSelectedError,
+} from '@zibby/core/utils/repo-access.js';
 import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
 import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
@@ -23,11 +33,84 @@ function resolveSkillBin() {
   return existsSync(candidate) ? candidate : null;
 }
 
+// ── PROJECT REPO SELECTION ──────────────────────────────────────────────────
+// A project's agents may use only the repositories selected in Project Settings.
+// A GitHub App token is minted scoped to that selection; a personal access token
+// cannot be, so the selection is enforced HERE, where every GitHub request —
+// the github_* tools, git-write's delegations and template nodes' own ghFetch
+// calls — passes before a token is used. The rule itself lives in
+// @zibby/core/utils/repo-access (REPO_ALLOWLIST); this is one of its consumers.
+//
+//   /repos/{owner}/{repo}/…      → that repository must be selected.
+//   /repositories/{id}, /graphql → cannot be tied to one repository without
+//                                  another call, so a scoped run refuses them.
+//   anything else (search, /user/repos, /installation/repositories, …)
+//                                → allowed, and every repository-naming item in
+//                                  the answer is filtered to the selection.
+function githubApiTarget(path: string): { kind: 'repo', repo: string } | { kind: 'opaque' } | { kind: 'other' } {
+  let pathname = String(path || '');
+  if (/^https?:\/\//i.test(pathname)) {
+    try {
+      const u = new URL(pathname);
+      const host = u.hostname.toLowerCase();
+      if (host !== 'api.github.com' && host !== 'uploads.github.com') return { kind: 'other' };
+      pathname = u.pathname;
+    } catch {
+      return { kind: 'opaque' };
+    }
+  }
+  pathname = pathname.split('?')[0];
+  const m = pathname.match(/^\/repos\/([^/]+)\/([^/]+)/);
+  if (m) return { kind: 'repo', repo: `${decodeURIComponent(m[1])}/${decodeURIComponent(m[2])}` };
+  if (/^\/(repositories|graphql)(\/|$)/.test(pathname)) return { kind: 'opaque' };
+  return { kind: 'other' };
+}
+
+/** The repository an item of a GitHub list/search answer names, if any. */
+function githubItemRepo(item: any): string | null {
+  if (!item || typeof item !== 'object') return null;
+  if (typeof item.full_name === 'string' && item.full_name.includes('/')) return item.full_name;
+  if (item.repository && typeof item.repository.full_name === 'string') return item.repository.full_name;
+  if (typeof item.repository_url === 'string') {
+    const m = item.repository_url.match(/\/repos\/([^/]+\/[^/?#]+)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** Filter every repository-naming list in a GitHub answer to the selection. */
+function filterGithubAnswer(data: any): any {
+  const keep = (arr) => filterAllowedRepos('github', arr, githubItemRepo);
+  if (Array.isArray(data)) return keep(data);
+  if (!data || typeof data !== 'object') return data;
+  let out = data;
+  for (const key of ['items', 'repositories']) {
+    if (Array.isArray(out[key])) {
+      const kept = keep(out[key]);
+      if (kept.length !== out[key].length) {
+        out = { ...out, [key]: kept };
+        if (typeof out.total_count === 'number') out.total_count = kept.length;
+      }
+    }
+  }
+  return out;
+}
+
 // Exported so a node (e.g. the code-review template's deterministic diff
 // prefetch) can reach GitHub endpoints the tools don't expose WITHOUT
 // re-implementing auth — this stays the single GitHub auth chokepoint (mirrors
 // @zibby/skills/gitlab glFetch).
 export async function ghFetch(path, opts: any = {}) {
+  if (repoAccessEnforced()) {
+    const target = githubApiTarget(path);
+    if (target.kind === 'repo') assertRepoAllowed('github', target.repo);
+    else if (target.kind === 'opaque') {
+      const refusal = repoRefusal('github', String(path).split('?')[0], readRepoAllowlist());
+      refusal.error = 'This GitHub request cannot be matched to one of this project\'s selected repositories, so it is not allowed. '
+        + 'Address the repository by owner/name instead. ' + refusal.error;
+      throw new RepoNotSelectedError(refusal);
+    }
+  }
   const { token } = await resolveIntegrationToken('github');
   const url = path.startsWith('https://') ? path : `https://api.github.com${path}`;
   const headers: any = {
@@ -52,7 +135,8 @@ export async function ghFetch(path, opts: any = {}) {
     throw e;
   }
   if (opts.raw) return res.text();
-  return res.json();
+  const data = await res.json();
+  return repoAccessEnforced() && githubApiTarget(path).kind === 'other' ? filterGithubAnswer(data) : data;
 }
 
 export const githubSkill: any = {
@@ -72,7 +156,11 @@ export const githubSkill: any = {
   // cloud died with "No session token. Run `zibby login` first." — reads AND
   // writes — while the template's node-side ghFetch (same process as the run,
   // full env) worked fine, which made it look like a write-permission problem.
-  envKeys: ['GITHUB_TOKEN', 'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
+  //
+  // REPO_ALLOWLIST is the project's repository selection (see ghFetch). This
+  // list is the child's whole environment, so omitting it would not error — it
+  // would silently lift the boundary.
+  envKeys: ['GITHUB_TOKEN', 'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'REPO_ALLOWLIST'],
   description: 'GitHub — issues, PRs, commits, code search, file reading',
 
   promptFragment: `## GitHub
@@ -626,6 +714,9 @@ When user just wants to "look at" or "read" files (not clone):
         case 'github_clone': {
           const { owner, repo, destination } = args;
           if (!owner || !repo) return JSON.stringify({ error: 'owner and repo are required' });
+          // The clone below uses the token directly (not ghFetch), so it asks
+          // the selection itself before the token is resolved.
+          assertRepoAllowed('github', `${owner}/${repo}`);
           
           const { execSync } = await import('child_process');
           const { join, resolve: resolvePath } = await import('path');
@@ -770,6 +861,32 @@ When user just wants to "look at" or "read" files (not clone):
               || (m.fullName && m.fullName.toLowerCase().includes(q))
               || (m.description && m.description.toLowerCase().includes(q));
           };
+
+          // ── SCOPED RUN: the project's selection IS the accessible set ─────
+          // Listing what the token can see and filtering it would page through
+          // everything the token reaches (a personal token can reach hundreds
+          // of repositories) and could stop before reaching a selected one.
+          // Read the selected repositories directly instead.
+          const selection = selectedRepos('github');
+          if (selection) {
+            const wantOwner = owner ? String(owner).toLowerCase() : null;
+            const rows: any[] = [];
+            for (const full of selection) {
+              if (wantOwner && full.split('/')[0] !== wantOwner) continue;
+              try {
+                rows.push(mapRepo(await ghFetch(`/repos/${full}`)));
+              } catch (e: any) {
+                rows.push({ name: full.split('/')[1], fullName: full, fullPath: full, error: `could not read: ${e?.status || e?.message || e}` });
+              }
+            }
+            const matched = rows.filter(matchesQuery).slice(0, maxResults);
+            return JSON.stringify({
+              count: matched.length,
+              repos: matched,
+              truncated: false,
+              message: `This project can use ${selection.length} selected GitHub repositor${selection.length === 1 ? 'y' : 'ies'}.`,
+            });
+          }
 
           // ── NO OWNER: "everything this credential can see" ───────────────
           // TWO ENDPOINTS, AND THE TOKEN DECIDES WHICH — not the arguments.
@@ -1170,6 +1287,9 @@ When user just wants to "look at" or "read" files (not clone):
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
     } catch (e) {
+      // A repository outside the project's selection is a refusal with a code,
+      // not a failure to retry.
+      if (isRepoNotSelected(e)) return JSON.stringify(e.refusal);
       return JSON.stringify({ error: e.message });
     }
   },

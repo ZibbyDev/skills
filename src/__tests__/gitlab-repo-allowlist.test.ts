@@ -76,7 +76,7 @@ describe('gitlab repo allowlist', () => {
     process.env.GITLAB_ALLOWED_REPOS = 'root/kb-demo';
     stubApi(() => ({}));
     const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: 'root/hono', iid: 1 }));
-    expect(res.error).toMatch(/root\/hono.*not available to this project/);
+    expect(res.error).toMatch(/root\/hono.*not selected for this project/);
     // A bare "denied" reads to the model as a transient failure and it retries.
     expect(res.allowedRepos).toEqual(['root/kb-demo']);
   });
@@ -85,7 +85,7 @@ describe('gitlab repo allowlist', () => {
     process.env.GITLAB_ALLOWED_REPOS = 'root/kb-demo';
     stubApi(() => ({ iid: 1, title: 'x', diff_refs: {} }));
     const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: 'root/kb-demo', iid: 1 }));
-    expect(String(res.error || '')).not.toMatch(/not available to this project/);
+    expect(String(res.error || '')).not.toMatch(/not selected for this project/);
   });
 
   test('a NUMERIC project id is resolved to its path before the check', async () => {
@@ -93,21 +93,21 @@ describe('gitlab repo allowlist', () => {
     process.env.GITLAB_ALLOWED_REPOS = 'root/kb-demo';
     stubApi((url) => (url.includes('/projects/42') ? { path_with_namespace: 'root/hono' } : {}));
     const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: '42', iid: 1 }));
-    expect(res.error).toMatch(/root\/hono.*not available/);
+    expect(res.error).toMatch(/root\/hono.*not selected/);
   });
 
   test('an unresolvable id is refused rather than allowed (fail-closed)', async () => {
     process.env.GITLAB_ALLOWED_REPOS = 'root/kb-demo';
     stubApi(() => undefined); // every lookup 404s
     const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: '999', iid: 1 }));
-    expect(res.error).toMatch(/not available to this project/);
+    expect(res.error).toMatch(/not selected for this project/);
   });
 
   test('matching is case- and slash-insensitive', async () => {
     process.env.GITLAB_ALLOWED_REPOS = ' Root/KB-Demo , ';
     stubApi(() => ({ iid: 1 }));
     const res = JSON.parse(await gitlabSkill.handleToolCall('gitlab_get_mr', { projectId: '/root/kb-demo/', iid: 1 }));
-    expect(String(res.error || '')).not.toMatch(/not available to this project/);
+    expect(String(res.error || '')).not.toMatch(/not selected for this project/);
   });
 
   test('the env key is declared, or the child never receives the list', async () => {

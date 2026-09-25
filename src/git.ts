@@ -1,6 +1,7 @@
 import { spawn, execSync } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, join, basename } from 'path';
+import { assertGitUrlAllowed, isRepoNotSelected } from '@zibby/core/utils/repo-access.js';
 
 const DEFAULT_CHECKOUT_DIR = '.zibby/repos';
 
@@ -113,7 +114,9 @@ function exec(cmd, cwd, env: any = {}) {
 export const gitSkill: any = {
   id: 'git',
   description: 'Clone and manage git repositories for codebase analysis',
-  envKeys: ['GITHUB_TOKEN', 'GITLAB_TOKEN'],
+  // REPO_ALLOWLIST: the project's repository selection — git_checkout refuses a
+  // github/gitlab repository outside it (see handleCheckout).
+  envKeys: ['GITHUB_TOKEN', 'GITLAB_TOKEN', 'REPO_ALLOWLIST'],
   // Tools run ONLY inside the assistant strategy's loop (handleToolCall;
   // resolve() below is null — no MCP server). Under claude/codex/gemini the
   // tools don't exist, so the engine must not inject the fragment there
@@ -148,6 +151,9 @@ When your task needs repository context you don't have yet:
         default: return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
     } catch (e) {
+      // A repository outside the project's selection: a coded refusal, not an
+      // error to retry.
+      if (isRepoNotSelected(e)) return JSON.stringify(e.refusal);
       // git_checkout embeds the VCS token in the clone URL; git/exec errors can
       // echo that URL back. Redact any token value + the URL userinfo so the
       // model never sees a live credential in an error message.
@@ -199,6 +205,10 @@ async function handleCheckout(args, cwd) {
   if (!url.includes('://') && !url.startsWith('git@')) {
     url = `https://github.com/${url}`;
   }
+  // PROJECT REPO SELECTION (@zibby/core/utils/repo-access): a github/gitlab
+  // repository this project did not select is refused before any token is
+  // attached — also for a public one, which the project did not choose either.
+  assertGitUrlAllowed(url);
 
   const repoName = name || basename(url.replace(/\.git$/, ''));
   const reposDir = resolve(cwd, DEFAULT_CHECKOUT_DIR);
