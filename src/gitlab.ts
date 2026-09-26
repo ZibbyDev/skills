@@ -65,6 +65,7 @@ import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
 import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
 import { fetchWithDeadline } from './lib/http-deadline.js';
+import { repositoryRulesField } from './lib/checkout-rules.js';
 import {
   selectedRepos,
   repoAccessEnforced,
@@ -548,7 +549,7 @@ async function dispatchTool(name, args) {
       mkdirSync(baseDir, { recursive: true });
 
       if (existsSync(destPath)) {
-        return JSON.stringify({ success: true, path: destPath, message: `Already cloned at ${destPath}`, alreadyCloned: true });
+        return JSON.stringify({ success: true, path: destPath, message: `Already cloned at ${destPath}`, alreadyCloned: true, ...(await repositoryRulesField(destPath)) });
       }
 
       const host = gitlabWebHost().replace(/^https?:\/\//, '');
@@ -572,6 +573,8 @@ async function dispatchTool(name, args) {
           path: destPath,
           message: `Cloned ${path} to ${destPath}`,
           contents: contents.split('\n').slice(0, 30).join('\n'),
+          // The repository's own rule files, for work in it (lib/checkout-rules.ts).
+          ...(await repositoryRulesField(destPath)),
         });
       } catch (err) {
         // Never leak the token in an error string: git's stderr / execSync's

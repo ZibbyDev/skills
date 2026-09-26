@@ -2,6 +2,7 @@ import { spawn, execSync } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, join, basename } from 'path';
 import { assertGitUrlAllowed, isRepoNotSelected } from './lib/repo-access.js';
+import { repositoryRulesField } from './lib/checkout-rules.js';
 
 const DEFAULT_CHECKOUT_DIR = '.zibby/repos';
 
@@ -248,6 +249,7 @@ async function handleCheckout(args, cwd) {
       path: repoPath,
       branch: branch || 'default',
       head,
+      ...(await repositoryRulesField(repoPath)),
     });
   }
 
@@ -272,6 +274,8 @@ async function handleCheckout(args, cwd) {
     branch: branch || 'default',
     shallow,
     head,
+    // The repository's own rule files, for work in it (lib/checkout-rules.ts).
+    ...(await repositoryRulesField(repoPath)),
   });
 }
 

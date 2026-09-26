@@ -16,6 +16,7 @@ import { INTEGRATIONS } from './integrations.js';
 import { scrubClonedRemoteSync } from './git.js';
 import { dedupeInline, extractFp, hasSummaryMarker, SUMMARY_MARKER } from './review-dedup.js';
 import { fetchWithDeadline } from './lib/http-deadline.js';
+import { repositoryRulesField } from './lib/checkout-rules.js';
 
 /**
  * Resolve the path to the generic skill MCP server binary. Derived from
@@ -778,6 +779,8 @@ When user just wants to "look at" or "read" files (not clone):
               message: `Cloned ${owner}/${repo} to ${destPath}`,
               contents: contents.split('\n').slice(0, 30).join('\n'), // First 30 lines
               instructions: 'IMPORTANT: Show the contents field to the user - it contains the directory listing.',
+              // The repository's own rule files, for work in it (lib/checkout-rules.ts).
+              ...(await repositoryRulesField(destPath)),
             });
           } catch (err) {
             // NEVER echo the token-embedded remote URL back: execSync's error
