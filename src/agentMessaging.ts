@@ -409,6 +409,64 @@ async function messageAgent(args: any) {
   return out;
 }
 
+// ── needs_you ───────────────────────────────────────────────────────────────
+//
+// A CARD IN FRONT OF A PERSON, written by the agent itself (founder,
+// 2026-09-28): what happened, its best guess at what the person most likely
+// wants next, and 1..N choices it writes for THIS case. The platform adds a
+// "Chat" button to every card; a pick arrives in the agent's chat as the
+// person's message. It goes through the ONE door every person-facing signal
+// takes (POST /projects/{id}/events → backend services/human-signal.js): a run
+// that has a declared manager never reaches a person this way — its card is
+// delivered to the manager as a message, and the manager decides. The choices
+// are checked there (project-events-format validateCardChoices), never here:
+// one declaration of the bounds.
+
+export const selfWorkflowUuid = () => envStr('WORKFLOW_UUID');
+
+async function needsYou(args: any = {}) {
+  const text = typeof args.text === 'string' ? args.text.trim() : '';
+  if (!text) return { error: 'text is required: what happened, in plain words for the person' };
+  if (!Array.isArray(args.options) || !args.options.length) return { error: 'options is required: 1 to 6 choices you write for this case (a "Chat" button is added for you)' };
+  const token = getSessionToken();
+  if (!token) return { error: 'No backend credential (PROJECT_API_TOKEN). A card can only be raised inside a Zibby run.' };
+  const projectId = selfProjectId();
+  if (!projectId) return { error: 'PROJECT_ID is not set — this run does not know which project it belongs to.' };
+  const workflowUuid = selfWorkflowUuid();
+  if (!workflowUuid) return { error: 'WORKFLOW_UUID is not set — this run does not know which agent it is.' };
+  const data: Record<string, any> = { question: text, options: args.options };
+  if (typeof args.likely === 'string' && args.likely.trim()) data.likely = args.likely;
+  if (typeof args.multi === 'boolean') data.multi = args.multi;
+  if (typeof args.ticketKey === 'string' && args.ticketKey.trim()) data.ticketKey = args.ticketKey.trim();
+  if (typeof args.ticketNumber === 'string' && args.ticketNumber.trim()) data.ticketNumber = args.ticketNumber.trim();
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/projects/${encodeURIComponent(projectId)}/events`, {
+    method: 'POST',
+    headers: authHeaders(token, true),
+    body: JSON.stringify({
+      kind: 'needs_human',
+      workflowUuid,
+      ...(selfWorkflowType() ? { workflowType: selfWorkflowType() } : {}),
+      ...(selfExecutionId() ? { executionId: selfExecutionId() } : {}),
+      data,
+    }),
+  }, { kind: 'api', what: 'agent-messaging POST card' });
+  if (!res.ok) return { error: await errorTextOf(res, 'raising the card') };
+  const json: any = await res.json().catch(() => ({}));
+  if (json?.routed === 'supervisor') {
+    return {
+      ok: true,
+      to: 'manager',
+      note: 'Your run has a manager, so no card went to a person: your words and choices were delivered to your manager as a message, and it decides whether a person is asked.',
+    };
+  }
+  return {
+    ok: true,
+    to: 'person',
+    cardId: json?.id ?? null,
+    note: 'The card is on the person\'s timeline with your choices and a Chat button. Their pick (or their own words) comes to your chat as their message; the card closes when they answer. Raising another card on the same ticket (or, with no ticket, from this run) replaces this one.',
+  };
+}
+
 // ── check_messages ──────────────────────────────────────────────────────────
 
 /** A kv row as the recall-prefix route returns it. */
@@ -683,7 +741,7 @@ export const agentMessagingSkill: any = {
   // `skill.meta.toggleable` off this. See strategy/skills-platform-architecture.md.
   meta: SKILL_META['agent-messaging'],
   allowedTools: ['mcp__agent_messaging__*'],
-  description: 'Agent messaging — see which runs you may reach are active, read their logs (head, tail or search), leave a note for a running run or a deployed agent (including your own future self, at a time you choose, instead of waiting), and read the notes left for this run',
+  description: 'Agent messaging — see which runs you may reach are active, read their logs (head, tail or search), leave a note for a running run or a deployed agent (including your own future self, at a time you choose, instead of waiting), read the notes left for this run, and put a card with your own choices in front of a person',
 
   // WHAT THIS ROLE-NEUTRAL PAGE CARRIES: when to use each tool and the
   // take-over rules. HOW a tool is called lives in its own description below —
@@ -701,6 +759,7 @@ Tools (each one's description carries its arguments):
 - message_agent — a note to a RUNNING run (executionId) or a deployed agent (workflowType, your OWN included); delaySeconds holds it and wakes the recipient then.
 - check_messages — take the notes and child completions addressed to THIS run; call it at the START of each round.
 - list_messages — what your agent still owes (unacked), or recent history; read it when you wake and before scheduling a reminder.
+- needs_you — a card for a PERSON on the project's timeline, in your words, with the choices you write for it.
 
 ### TAKING OVER — the rules every teammate on this project follows
 1. TICKET FIRST. Every state change or decision — took it on, blocked, handed back,
@@ -762,6 +821,8 @@ refused; credentials belong on the agent's Env tab.`,
       'RUN_LOGS_API_URL',
       // The run's identity — which mailbox is ours, which project, which run.
       'EXECUTION_ID', 'PROJECT_ID', 'WORKFLOW_TYPE',
+      // Which agent a card is from (needs_you) — its identity on the project's timeline.
+      'WORKFLOW_UUID',
     ]) {
       if (process.env[key]) env[key] = process.env[key];
     }
@@ -787,6 +848,8 @@ refused; credentials belong on the agent's Env tab.`,
           return JSON.stringify(await checkMessages(args));
         case 'list_messages':
           return JSON.stringify(await listMessages(args));
+        case 'needs_you':
+          return JSON.stringify(await needsYou(args));
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -860,6 +923,28 @@ refused; credentials belong on the agent's Env tab.`,
           limit: { type: 'integer', minimum: 1, maximum: 100, description: 'How many (default 50, max 100), oldest first.' },
         },
         required: [],
+      },
+    },
+    {
+      name: 'needs_you',
+      description: 'Put a card in front of a PERSON on the project\'s timeline — for a decision or an action only a person can give. '
+        + 'You write all of it: `text` = what happened, short, for someone who knows nothing of your work (no error codes, ids, labels or internal names); '
+        + '`likely` = your best guess at what they most likely want next; `options` = 1 to 6 short choices you write for THIS case (e.g. "Yes" / "No"), which the person clicks. '
+        + 'The platform always adds a "Chat" button so they can answer in their own words. Their pick, or their words, arrives in your chat as their message, quoting the card; the card closes once they answer. '
+        + 'One open card per ticket (or, with no ticket, per run): raising another replaces it. '
+        + 'If your run has a manager, nothing reaches a person: the card goes to your manager as a message, and the manager decides whether to ask one. '
+        + 'Never put a credential in it.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'What happened, in two or three plain sentences for the person.' },
+          likely: { type: 'string', description: 'Your best guess at what the person most likely wants next (up to 300 characters).' },
+          options: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 6, description: 'The choices you offer, each up to 80 characters, written for this case. Do not add "Chat" — it is always there.' },
+          multi: { type: 'boolean', description: 'true when the person may pick several of the options; default one.' },
+          ticketKey: { type: 'string', description: 'Optional: the ticket the card is about, as the board keys it.' },
+          ticketNumber: { type: 'string', description: 'Optional: the ticket as a person reads it (e.g. "#40").' },
+        },
+        required: ['text', 'options'],
       },
     },
   ],

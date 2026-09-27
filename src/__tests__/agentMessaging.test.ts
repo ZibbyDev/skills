@@ -444,7 +444,7 @@ describe('the skill object', () => {
     }
     expect(agentMessagingSkill.serverName).toBe('agent_messaging');
     expect(agentMessagingSkill.allowedTools).toEqual(['mcp__agent_messaging__*']);
-    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages', 'list_messages']);
+    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages', 'list_messages', 'needs_you']);
   });
 
   it('unknown tool → {error}', async () => {
@@ -764,5 +764,45 @@ describe('list_messages — what this agent still owes, or its history', () => {
     expect(out.receipt).toMatch(/store-and-ring/);
     expect(out.receipt).toMatch(/No receipt/i);
     expect(agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent').description).toMatch(/NO receipt/);
+  });
+});
+
+describe('needs_you — a card the agent writes for a person', () => {
+  beforeEach(() => { process.env.WORKFLOW_UUID = 'uuid-self'; });
+  afterEach(() => { delete process.env.WORKFLOW_UUID; });
+
+  it('posts ONE needs_human event through the person-facing door, with the agent\'s own words and choices', async () => {
+    mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: 'events:1-a', routed: 'person' } })]]);
+    const out = await call('needs_you', {
+      text: 'QA could not start: the selfhosted folder is read-only.', likely: 'Turn write on for selfhosted',
+      options: ['Turn write on', 'Skip QA for now'], ticketKey: '460', ticketNumber: '#41',
+    });
+    expect(out).toMatchObject({ ok: true, to: 'person', cardId: 'events:1-a' });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      url: 'http://cp.local/projects/proj-1/events', method: 'POST',
+      body: {
+        kind: 'needs_human', workflowUuid: 'uuid-self', workflowType: 'project-manager', executionId: SELF,
+        data: { question: 'QA could not start: the selfhosted folder is read-only.', likely: 'Turn write on for selfhosted', options: ['Turn write on', 'Skip QA for now'], ticketKey: '460', ticketNumber: '#41' },
+      },
+    });
+  });
+  it('a run with a manager is told its card went to the manager, not a person', async () => {
+    mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: null, routed: 'supervisor' } })]]);
+    const out = await call('needs_you', { text: 'x', options: ['Yes', 'No'] });
+    expect(out).toMatchObject({ ok: true, to: 'manager' });
+  });
+  it('the platform\'s refusal comes back as its sentence; missing words are refused before any request', async () => {
+    mockDoor([['/projects/proj-1/events', () => ({ ok: false, status: 400, json: { error: '"Chat" is added to every card by the platform — offer only your own choices' } })]]);
+    expect((await call('needs_you', { text: 'x', options: ['Chat'] })).error).toMatch(/added to every card/);
+    seen = [];
+    expect((await call('needs_you', { options: ['Yes'] })).error).toMatch(/text is required/);
+    expect((await call('needs_you', { text: 'x' })).error).toMatch(/options is required/);
+    expect(seen).toHaveLength(0);
+  });
+  it('is declared as a tool, and the child gets WORKFLOW_UUID', () => {
+    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toContain('needs_you');
+    process.env.MCP_SKILL_PATH = '/bin/mcp-skill.mjs';
+    try { expect(agentMessagingSkill.resolve().env.WORKFLOW_UUID).toBe('uuid-self'); } finally { delete process.env.MCP_SKILL_PATH; }
   });
 });
