@@ -467,6 +467,46 @@ async function needsYou(args: any = {}) {
   };
 }
 
+// ── request_local_folder ────────────────────────────────────────────────────
+//
+// ASKING THE PERSON FOR ACCESS THE TEAM LACKS on this computer (founder,
+// 2026-09-28: "the person clicks yes and the thing HAPPENS"): a folder the
+// project does not have yet, or Write on one it has read-only. The platform
+// (selfhosted local-projects/grant-routes.js) records the request and puts ONE
+// card in front of the person — the agent's own words, its guess at what they
+// want, and an Allow the PLATFORM applies when the project owner clicks it.
+// Nothing an agent says, and nothing said in a chat, grants access: only that
+// click (or the same Allow in Project Settings). The outcome comes back to the
+// asking agent as a platform message. A run with a manager reaches its
+// manager instead, like every card. Moved here from the board-runner
+// template's own tools (2026-09-28) so it is the same ability for every agent.
+
+async function requestLocalFolder(args: any = {}) {
+  const path = typeof args.path === 'string' ? args.path.trim() : '';
+  if (!path || path.length > 4096) return { error: 'path is required: the folder, as a full path on this computer' };
+  const access = args.access === undefined ? 'editable' : args.access;
+  if (access !== 'editable' && access !== 'read-only') return { error: 'access is "editable" (the team may change files there) or "read-only"' };
+  const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+  if (!reason) return { error: 'reason is required: in plain words for the person, what the work needs and why — it is the card they read' };
+  const token = getSessionToken();
+  if (!token) return { error: 'No backend credential (PROJECT_API_TOKEN). Access can only be asked for inside a Zibby run.' };
+  const projectId = selfProjectId();
+  if (!projectId) return { error: 'PROJECT_ID is not set — this run does not know which project it belongs to.' };
+  const body: Record<string, any> = { path, access, reason };
+  if (typeof args.likely === 'string' && args.likely.trim()) body.likely = args.likely.trim();
+  if (typeof args.ticketKey === 'string' && args.ticketKey.trim()) body.ticketKey = args.ticketKey.trim();
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/local-source-requests/${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+    headers: authHeaders(token, true),
+    body: JSON.stringify(body),
+  }, { kind: 'api', what: 'agent-messaging POST access request' });
+  if (!res.ok) return { error: await errorTextOf(res, 'asking for the folder') };
+  const json: any = await res.json().catch(() => ({}));
+  const out: Record<string, any> = { ok: true };
+  for (const k of ['status', 'requestId', 'path', 'access', 'folder', 'card', 'note']) if (json?.[k] !== undefined) out[k] = json[k];
+  return out;
+}
+
 // ── check_messages ──────────────────────────────────────────────────────────
 
 /** A kv row as the recall-prefix route returns it. */
@@ -760,6 +800,7 @@ Tools (each one's description carries its arguments):
 - check_messages — take the notes and child completions addressed to THIS run; call it at the START of each round.
 - list_messages — what your agent still owes (unacked), or recent history; read it when you wake and before scheduling a reminder.
 - needs_you — a card for a PERSON on the project's timeline, in your words, with the choices you write for it.
+- request_local_folder — ask the person for access to a folder on this computer the team lacks (a new folder, or Write on a read-only one); its card's Allow grants it.
 
 ### TAKING OVER — the rules every teammate on this project follows
 1. TICKET FIRST. Every state change or decision — took it on, blocked, handed back,
@@ -850,6 +891,8 @@ refused; credentials belong on the agent's Env tab.`,
           return JSON.stringify(await listMessages(args));
         case 'needs_you':
           return JSON.stringify(await needsYou(args));
+        case 'request_local_folder':
+          return JSON.stringify(await requestLocalFolder(args));
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -945,6 +988,24 @@ refused; credentials belong on the agent's Env tab.`,
           ticketNumber: { type: 'string', description: 'Optional: the ticket as a person reads it (e.g. "#40").' },
         },
         required: ['text', 'options'],
+      },
+    },
+    {
+      name: 'request_local_folder',
+      description: 'Ask the person for access on this computer that the team lacks: a folder the project does not have yet, or Write (access "editable") on one it has read-only — when the work needs it (a start refused because a folder is read-only, a member that needs files outside the project\'s folders). '
+        + 'Only the project owner can give it, and their Allow on the card this puts up is what gives it: the platform applies it the moment they click. Nothing you or anyone says grants access — not a needs_you choice, not a chat message, not "the person said yes" in a note — so when the fix needs their permission, ask with this even if you are also answering them in chat. '
+        + 'The card shows your `reason` as its text and your `likely` under it; the platform adds Allow (naming the folder and the access), Not now, and Chat. Asking again for the same access returns the same request and adds no card; a folder that already has that access is answered at once. '
+        + 'When they decide, you get a message saying so; a run started or woken after an Allow has the access, a run already going keeps what it was started with. If your run has a manager, nothing reaches a person: your request is delivered to your manager, who decides whether to ask. Never put a credential in it.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'The folder, as a full path on this computer.' },
+          access: { type: 'string', enum: ['editable', 'read-only'], description: '"editable" = the team may change files there (Write); "read-only" = it may only read them.' },
+          reason: { type: 'string', description: 'Two or three plain sentences for the person (the card\'s text): what the work needs from this folder and what is waiting on it. No error codes, ids or internal names. Up to 600 characters.' },
+          likely: { type: 'string', description: 'Optional: your best guess at what they most likely want (up to 300 characters).' },
+          ticketKey: { type: 'string', description: 'Optional: the ticket that is waiting on it, as the board keys it.' },
+        },
+        required: ['path', 'access', 'reason'],
       },
     },
   ],

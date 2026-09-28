@@ -444,7 +444,7 @@ describe('the skill object', () => {
     }
     expect(agentMessagingSkill.serverName).toBe('agent_messaging');
     expect(agentMessagingSkill.allowedTools).toEqual(['mcp__agent_messaging__*']);
-    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages', 'list_messages', 'needs_you']);
+    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages', 'list_messages', 'needs_you', 'request_local_folder']);
   });
 
   it('unknown tool → {error}', async () => {
@@ -804,5 +804,26 @@ describe('needs_you — a card the agent writes for a person', () => {
     expect(agentMessagingSkill.tools.map((t: any) => t.name)).toContain('needs_you');
     process.env.MCP_SKILL_PATH = '/bin/mcp-skill.mjs';
     try { expect(agentMessagingSkill.resolve().env.WORKFLOW_UUID).toBe('uuid-self'); } finally { delete process.env.MCP_SKILL_PATH; }
+  });
+});
+
+describe('request_local_folder — asking the person for access the team lacks', () => {
+  it('posts the ask to the platform\'s access door with the agent\'s words; the platform\'s answer comes back as facts', async () => {
+    mockDoor([['/local-source-requests/proj-1', () => ({ json: { requestId: 'r-1', status: 'pending', path: '/Users/me/zibby/selfhosted', access: 'editable', card: true, note: 'A card is in front of the project owner' } })]]);
+    const out = await call('request_local_folder', { path: '/Users/me/zibby/selfhosted', access: 'editable',
+      reason: 'QA cannot check #41: it has to write in selfhosted, which is read-only.', likely: 'Turn Write on so QA can check #41.', ticketKey: '460' });
+    expect(out).toEqual({ ok: true, status: 'pending', requestId: 'r-1', path: '/Users/me/zibby/selfhosted', access: 'editable', card: true, note: 'A card is in front of the project owner' });
+    expect(seen).toEqual([{ url: 'http://cp.local/local-source-requests/proj-1', method: 'POST', body: {
+      path: '/Users/me/zibby/selfhosted', access: 'editable', reason: 'QA cannot check #41: it has to write in selfhosted, which is read-only.',
+      likely: 'Turn Write on so QA can check #41.', ticketKey: '460' } }]);
+  });
+  it('a refusal is the platform\'s sentence; a bad ask is refused before any request', async () => {
+    mockDoor([['/local-source-requests/proj-1', () => ({ ok: false, status: 400, json: { code: 'LOCAL_GRANT_CREDENTIAL', error: 'The request carries something shaped like a key or token — nothing was sent.' } })]]);
+    expect((await call('request_local_folder', { path: '/a', access: 'editable', reason: 'r' })).error).toMatch(/shaped like a key/);
+    seen = [];
+    expect((await call('request_local_folder', { access: 'editable', reason: 'r' })).error).toMatch(/path is required/);
+    expect((await call('request_local_folder', { path: '/a', access: 'root', reason: 'r' })).error).toMatch(/access is/);
+    expect((await call('request_local_folder', { path: '/a', access: 'editable' })).error).toMatch(/reason is required/);
+    expect(seen).toHaveLength(0);
   });
 });
