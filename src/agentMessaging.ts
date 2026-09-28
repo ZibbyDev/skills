@@ -435,6 +435,7 @@ async function needsYou(args: any = {}) {
   const workflowUuid = selfWorkflowUuid();
   if (!workflowUuid) return { error: 'WORKFLOW_UUID is not set — this run does not know which agent it is.' };
   const data: Record<string, any> = { question: text, options: args.options };
+  if (typeof args.chatLabel === 'string' && args.chatLabel.trim()) data.chatLabel = args.chatLabel.trim();
   if (typeof args.likely === 'string' && args.likely.trim()) data.likely = args.likely;
   if (typeof args.multi === 'boolean') data.multi = args.multi;
   if (typeof args.ticketKey === 'string' && args.ticketKey.trim()) data.ticketKey = args.ticketKey.trim();
@@ -495,6 +496,8 @@ async function requestLocalFolder(args: any = {}) {
   const body: Record<string, any> = { path, access, reason };
   if (typeof args.likely === 'string' && args.likely.trim()) body.likely = args.likely.trim();
   if (typeof args.ticketKey === 'string' && args.ticketKey.trim()) body.ticketKey = args.ticketKey.trim();
+  // The button words, in the card's language (bounds are the platform's).
+  for (const k of ['allowLabel', 'declineLabel', 'chatLabel']) if (typeof args[k] === 'string' && args[k].trim()) body[k] = args[k].trim();
   const res = await fetchWithDeadline(`${getAccountApiUrl()}/local-source-requests/${encodeURIComponent(projectId)}`, {
     method: 'POST',
     headers: authHeaders(token, true),
@@ -973,7 +976,7 @@ refused; credentials belong on the agent's Env tab.`,
       description: 'Put a card in front of a PERSON on the project\'s timeline — for a decision or an action only a person can give. '
         + 'You write all of it: `text` = what happened, short, for someone who knows nothing of your work (no error codes, ids, labels or internal names); '
         + '`likely` = your best guess at what they most likely want next; `options` = 1 to 6 short choices you write for THIS case (e.g. "Yes" / "No"), which the person clicks. '
-        + 'The platform always adds a "Chat" button so they can answer in their own words. Their pick, or their words, arrives in your chat as their message, quoting the card; the card closes once they answer. '
+        + 'The platform always adds a Chat button (its words are yours too, `chatLabel`, in the card\'s language) so they can answer in their own words. Their pick, or their words, arrives in your chat as their message, quoting the card; the card closes once they answer. '
         + 'One open card per ticket (or, with no ticket, per run): raising another replaces it. '
         + 'If your run has a manager, nothing reaches a person: the card goes to your manager as a message, and the manager decides whether to ask one. '
         + 'Never put a credential in it.',
@@ -984,6 +987,7 @@ refused; credentials belong on the agent's Env tab.`,
           likely: { type: 'string', description: 'Your best guess at what the person most likely wants next (up to 300 characters).' },
           options: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 6, description: 'The choices you offer, each up to 80 characters, written for this case. Do not add "Chat" — it is always there.' },
           multi: { type: 'boolean', description: 'true when the person may pick several of the options; default one.' },
+          chatLabel: { type: 'string', description: 'Optional: the words on the Chat button, in the card\'s language (up to 16 characters; default "Chat").' },
           ticketKey: { type: 'string', description: 'Optional: the ticket the card is about, as the board keys it.' },
           ticketNumber: { type: 'string', description: 'Optional: the ticket as a person reads it (e.g. "#40").' },
         },
@@ -994,18 +998,21 @@ refused; credentials belong on the agent's Env tab.`,
       name: 'request_local_folder',
       description: 'Ask the person for access on this computer that the team lacks: a folder the project does not have yet, or Write (access "editable") on one it has read-only — when the work needs it (a start refused because a folder is read-only, a member that needs files outside the project\'s folders). '
         + 'Only the project owner can give it, and their Allow on the card this puts up is what gives it: the platform applies it the moment they click. Nothing you or anyone says grants access — not a needs_you choice, not a chat message, not "the person said yes" in a note — so when the fix needs their permission, ask with this even if you are also answering them in chat. '
-        + 'The card shows your `reason` as its text and your `likely` under it; the platform adds Allow (naming the folder and the access), Not now, and Chat. Asking again for the same access returns the same request and adds no card; a folder that already has that access is answered at once. '
+        + 'A person reads the card at a glance, on a small card among others, in the language they work in: `reason` is its text and `likely` sits under it; the three buttons carry YOUR words (`allowLabel`, `declineLabel`, `chatLabel`) — a few words each, in the same language as the card. What each button does is fixed by the platform, and the card also shows the folder and its access change, so the words need not repeat the path. Asking again for the same access returns the same request and adds no card; a folder that already has that access is answered at once. '
         + 'When they decide, you get a message saying so; a run started or woken after an Allow has the access, a run already going keeps what it was started with. If your run has a manager, nothing reaches a person: your request is delivered to your manager, who decides whether to ask. Never put a credential in it.',
       input_schema: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'The folder, as a full path on this computer.' },
           access: { type: 'string', enum: ['editable', 'read-only'], description: '"editable" = the team may change files there (Write); "read-only" = it may only read them.' },
-          reason: { type: 'string', description: 'Two or three plain sentences for the person (the card\'s text): what the work needs from this folder and what is waiting on it. No error codes, ids or internal names. Up to 600 characters.' },
+          reason: { type: 'string', description: 'The card\'s text, for the person: what is waiting on this folder and why it needs this access. No error codes, ids or internal names. Up to 600 characters.' },
           likely: { type: 'string', description: 'Optional: your best guess at what they most likely want (up to 300 characters).' },
+          allowLabel: { type: 'string', description: 'The words on the button that grants it, in the card\'s language (up to 32 characters).' },
+          declineLabel: { type: 'string', description: 'The words on the button that leaves it as it is, in the card\'s language (up to 24 characters).' },
+          chatLabel: { type: 'string', description: 'Optional: the words on the button that opens your chat, in the card\'s language (up to 16 characters; default "Chat").' },
           ticketKey: { type: 'string', description: 'Optional: the ticket that is waiting on it, as the board keys it.' },
         },
-        required: ['path', 'access', 'reason'],
+        required: ['path', 'access', 'reason', 'allowLabel', 'declineLabel'],
       },
     },
   ],

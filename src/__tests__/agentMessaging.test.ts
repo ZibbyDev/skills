@@ -811,11 +811,12 @@ describe('request_local_folder — asking the person for access the team lacks',
   it('posts the ask to the platform\'s access door with the agent\'s words; the platform\'s answer comes back as facts', async () => {
     mockDoor([['/local-source-requests/proj-1', () => ({ json: { requestId: 'r-1', status: 'pending', path: '/Users/me/zibby/selfhosted', access: 'editable', card: true, note: 'A card is in front of the project owner' } })]]);
     const out = await call('request_local_folder', { path: '/Users/me/zibby/selfhosted', access: 'editable',
-      reason: 'QA cannot check #41: it has to write in selfhosted, which is read-only.', likely: 'Turn Write on so QA can check #41.', ticketKey: '460' });
+      reason: 'QA cannot check #41: it has to write in selfhosted, which is read-only.', likely: 'Turn Write on so QA can check #41.', ticketKey: '460',
+      allowLabel: 'Turn on Write', declineLabel: 'Not now' });
     expect(out).toEqual({ ok: true, status: 'pending', requestId: 'r-1', path: '/Users/me/zibby/selfhosted', access: 'editable', card: true, note: 'A card is in front of the project owner' });
     expect(seen).toEqual([{ url: 'http://cp.local/local-source-requests/proj-1', method: 'POST', body: {
       path: '/Users/me/zibby/selfhosted', access: 'editable', reason: 'QA cannot check #41: it has to write in selfhosted, which is read-only.',
-      likely: 'Turn Write on so QA can check #41.', ticketKey: '460' } }]);
+      likely: 'Turn Write on so QA can check #41.', ticketKey: '460', allowLabel: 'Turn on Write', declineLabel: 'Not now' } }]);
   });
   it('a refusal is the platform\'s sentence; a bad ask is refused before any request', async () => {
     mockDoor([['/local-source-requests/proj-1', () => ({ ok: false, status: 400, json: { code: 'LOCAL_GRANT_CREDENTIAL', error: 'The request carries something shaped like a key or token — nothing was sent.' } })]]);
@@ -825,5 +826,19 @@ describe('request_local_folder — asking the person for access the team lacks',
     expect((await call('request_local_folder', { path: '/a', access: 'root', reason: 'r' })).error).toMatch(/access is/);
     expect((await call('request_local_folder', { path: '/a', access: 'editable' })).error).toMatch(/reason is required/);
     expect(seen).toHaveLength(0);
+  });
+});
+
+describe('the button words are the card author\'s', () => {
+  it('request_local_folder requires the Allow and Not-now words; needs_you carries an optional Chat word', async () => {
+    const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'request_local_folder');
+    expect(tool.input_schema.required).toEqual(['path', 'access', 'reason', 'allowLabel', 'declineLabel']);
+    expect(tool.description).toMatch(/at a glance/);
+    expect(tool.description).toMatch(/in the same language as the card/);
+    process.env.WORKFLOW_UUID = 'uuid-self';
+    mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: 'events:1-a', routed: 'person' } })]]);
+    await call('needs_you', { text: '要打开写权限吗？', options: ['好', '不要'], chatLabel: '聊聊' });
+    expect(seen[0].body.data.chatLabel).toBe('聊聊');
+    delete process.env.WORKFLOW_UUID;
   });
 });
