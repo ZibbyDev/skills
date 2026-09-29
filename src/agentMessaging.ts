@@ -737,6 +737,11 @@ async function checkMessages(args: { acknowledgeCompletions?: string[] } = {}) {
         completions.push({ ...report, id });
         continue;
       }
+      // A PERSON'S REPLY TO A VERIFICATION CARD (agent-inbox.js REPLY_TO_FIELD):
+      // the person_verification call that is waiting for it reads it by key.
+      // Taking it here would steal the answer from that call and put a code
+      // into the conversation as a plain message.
+      if (typeof report?.replyTo === 'string' && report.replyTo) { left += 1; continue; }
       const note = parseInboxNote(row);
       // Not ours: no executionId (the agent's tick reader owns it), another
       // run's, or not an inbox message at all. Left untouched, counted.

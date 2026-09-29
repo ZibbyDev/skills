@@ -315,6 +315,22 @@ describe('check_messages', () => {
     expect(out).not.toHaveProperty('error');
   });
 
+  it('never takes a person\'s reply to a verification card — the waiting person_verification call reads it by key', async () => {
+    const rows = [
+      note('verify-1-a', { about: { executionId: SELF }, text: '482913', replyTo: 'events:1-a' }),
+      note('n1', { about: { executionId: SELF }, text: 'an ordinary note for you' }),
+    ];
+    mockDoor([
+      [isAck, () => ackOk()],
+      [(url) => url.endsWith('/credits/review-memory'), () => ({ json: { count: rows.length, truncated: false, memories: rows } })],
+    ]);
+    const out = await call('check_messages');
+    expect(out.messages.map((m: any) => m.id)).toEqual(['n1']);
+    expect(JSON.stringify(out)).not.toContain('482913');
+    expect(ackedIds()).toEqual(['n1']);
+    expect(out.left).toBe(1);
+  });
+
   it('follows nextCursor page by page, capped at DRAIN_MAX_PAGES, and reports more', async () => {
     const pages: any[] = [];
     mockDoor([[isAck, () => ackOk()], [
@@ -474,7 +490,7 @@ describe('contract pin: agent-inbox.js message shape', () => {
   it.skipIf(!present)('the platform declares exactly the fields this skill reads', () => {
     const src = readFileSync(backendFile, 'utf-8');
     // The header's one-line contract.
-    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name,\s*workflowType\?,\s*executionId\?\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*needsAck,\s*notBefore\?,\s*ackedAt\?,\s*ackedBy\?\s*\}/);
+    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name,\s*workflowType\?,\s*executionId\?\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*relayNote\?,\s*personWordsCheck\?,\s*needsAck,\s*notBefore\?,\s*ackedAt\?,\s*ackedBy\?,\s*replyTo\?\s*\}/);
     // Every key of the message, declared once — a field this skill reads that
     // the platform no longer writes is drift.
     const list = (name: string) => {
@@ -482,7 +498,10 @@ describe('contract pin: agent-inbox.js message shape', () => {
       expect(m, `${name} must be declared in agent-inbox.js`).toBeTruthy();
       return m![1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
     };
-    expect(list('MESSAGE_FIELDS')).toEqual(['id', 'at', 'from', 'about', 'text', 'needsAck', 'notBefore', 'afterExecutionId', 'ackedAt', 'ackedBy']);
+    expect(list('MESSAGE_FIELDS')).toEqual(['id', 'at', 'from', 'about', 'text', 'relayNote', 'personWordsCheck', 'needsAck', 'notBefore', 'afterExecutionId', 'ackedAt', 'ackedBy', 'replyTo']);
+    // A person's reply to a verification card is marked with this field, and the
+    // drain below leaves such a row to the person_verification call waiting for it.
+    expect(src).toMatch(/const REPLY_TO_FIELD = 'replyTo';/);
     // The address vocabulary, declared once.
     expect(list('ABOUT_FIELDS')).toEqual(['ticketKey', 'executionId']);
     // The SENDER vocabulary: what parseInboxNote reads off `from` is exactly this.
