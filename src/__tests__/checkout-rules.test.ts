@@ -25,7 +25,7 @@ describe('checkout answers carry the repository\'s rule files', () => {
     const block = await checkedOutRepositoryRules(repo);
     expect(block).toContain(`Repository rules (from ${join(repo, 'CLAUDE.md')})`);
     expect(block).toContain('Run npm run lint before every commit.');
-    expect(block).toContain('applies to work under api/');
+    expect(block).toContain(`- ${join(repo, 'api', 'AGENTS.md')} — applies to work under ${join(repo, 'api')}/`);
     expect(block).not.toContain('REPO_HOOK');
     expect(await repositoryRulesField(repo)).toEqual({ repositoryRules: block });
   });
