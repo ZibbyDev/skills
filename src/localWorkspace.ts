@@ -34,8 +34,11 @@ function executionWorkspaces() {
 export const localWorkspaceSkill: any = {
   id: SKILL_IDS.LOCAL_WORKSPACE,
   callsBackend: true,
-  serverName: 'workspace',
-  allowedTools: ['mcp__workspace__*'],
+  // Claude SDK reserves/omits the bare "workspace" MCP server name. In a live
+  // Copilot turn the configured server vanished from SDK init and ToolSearch;
+  // the same server connected and read files when given a distinct name.
+  serverName: 'local_files',
+  allowedTools: ['mcp__local_files__*'],
   envKeys: ['LOCAL_PROJECT_CONTEXT'],
   description: 'Local files and directories for the current self-host chat or execution, with direct command access.',
   promptFragment: `## Local files

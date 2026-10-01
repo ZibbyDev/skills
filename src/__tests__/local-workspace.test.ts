@@ -63,6 +63,9 @@ test('execution manifest accepts sources laid out in their on-disk arrangement, 
 });
 test('ordinary declared skill, backend-session env derived through the shared wrapper', () => {
   expect(localWorkspaceSkill.id).toBe(SKILL_IDS.LOCAL_WORKSPACE);
+  // The bare "workspace" MCP name is swallowed by Claude SDK before ToolSearch.
+  expect(localWorkspaceSkill.serverName).toBe('local_files');
+  expect(localWorkspaceSkill.allowedTools).toContain(`mcp__${localWorkspaceSkill.serverName}__*`);
   const registered = withBackendSessionEnv(localWorkspaceSkill);
   expect(registered.envKeys).toEqual(expect.arrayContaining(['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL']));
   expect(localWorkspaceSkill.tools.map((tool: any) => tool.name)).toEqual([
