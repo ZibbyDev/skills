@@ -1,14 +1,12 @@
 /**
  * codebaseMemory.js — code-graph + semantic codebase memory skill, backed by
- * the DeusData/codebase-memory-mcp binary BAKED INTO the agent image.
+ * a sha256-pinned DeusData/codebase-memory-mcp artifact delivered on demand.
  *
  * WHAT IT IS
  * ──────────
  * A hand-written stdio MCP skill (same shape as kvMemory.js) that points the
- * agent at the `codebase-memory-mcp` server binary already on the image PATH
- * (/usr/local/bin/codebase-memory-mcp — see agent-ops/Dockerfile and
- * backend/lib/docker/zibby-agent/Dockerfile, which fetch the v0.8.1 portable
- * static build at build time, sha256-verified, multi-arch). The server indexes
+ * agent at the `codebase-memory-mcp` server binary materialized by the shared
+ * @zibby/bin-registry mechanism when the skill is enabled. The server indexes
  * a checked-out repository into a code graph + embeddings (Apache-2.0 nomic
  * embeddings) and exposes architecture / search / trace tools over it.
  *
@@ -34,13 +32,10 @@
  *
  * INDEX-AT-START HOOK
  * ───────────────────
- * invokeAgentOptions() runs ONCE per run (idempotent via a per-repo marker
- * file under CBM_CACHE_DIR) to index the checked-out repo with the imperative
- * `cli index_repository` path BEFORE the node's agent runs, so the graph/search
- * tools have data on the very first tool call. It is wrapped in try/catch and
- * NEVER throws — a failed index degrades to "tools return empty", not a crashed
- * run. The hook returns {} (it contributes no agent-visible options); its only
- * job is the side-effect of building the index.
+ * invokeAgentOptions() prepares the pinned artifact, then (idempotent via a
+ * per-repo marker under CBM_CACHE_DIR) indexes the checked-out repo with the imperative
+ * `cli index_repository` path BEFORE the node's agent runs. Delivery and index
+ * failures are written to the run log and the graph is never claimed ready.
  *
  * It only helps agents whose repo is ALREADY checked out when the node starts.
  * An agent that clones INSIDE its own run has nothing to index at hook time —
@@ -55,10 +50,11 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { SKILL_META } from '@zibby/skill-ids';
+import { cachedToolPath, ensureTool } from '@zibby/bin-registry';
 
-/** Absolute path to the baked-in server binary (override for local dev/tests). */
+/** The current pin's private, verified binary (override for local dev/tests). */
 function binPath() {
-  return process.env.CBM_BIN || '/usr/local/bin/codebase-memory-mcp';
+  return process.env.CBM_BIN || cachedToolPath('codebase-memory');
 }
 
 /**
@@ -123,8 +119,8 @@ export const codebaseMemorySkill: any = {
     'Codebase memory — code-graph + semantic index over the checked-out repo (architecture, graph search, dependency trace, change detection)',
 
   promptFragment: `## Codebase Memory (code-graph + semantic index over THIS repo)
-The checked-out repository is indexed into a queryable code graph + semantic
-index. Reach for these instead of blindly grepping when you need structure,
+The checked-out repository can be indexed into a queryable code graph + semantic
+index. Reach for these when available and you need structure,
 relationships, or "where does X live / what depends on Y":
 - get_architecture: high-level architecture / module map — START HERE to orient.
 - search_graph: semantic-ish search over the code graph (symbols, files, concepts).
@@ -133,18 +129,23 @@ relationships, or "where does X live / what depends on Y":
 - detect_changes: what changed vs the indexed baseline — scope your work.
 - get_code_snippet / search_code: pull the exact code for a node / text match.
 - index_status / list_projects: confirm the index is present before querying.
-Indexing is ATTEMPTED for you at the start of the run — it is not guaranteed to
-have finished or succeeded, and nothing tells you here when it did not. So an
-empty answer is never evidence that nothing matched: call index_status first,
-and re-index (index_repository) when the index is missing or partial.`,
+Indexing is attempted at the start of the run when a repo is already checked
+out. If this run clones later, call index_repository on that clone. Always call
+index_status before drawing conclusions; an empty query is never evidence of
+no callers when the index is missing or partial. If the code-graph tools are
+unavailable, continue with file reads and search and state that limitation.`,
 
   /**
    * stdio MCP server = the BARE binary with NO subcommand (verified for
-   * v0.8.1). Never returns { command: null } — the binary is baked into the
-   * image; if it's somehow absent the server simply fails to spawn and its
-   * tools are unavailable, which does not crash the run.
+   * v0.9.0). The graph's async preparation hook materializes the binary before
+   * the strategy resolves MCP servers. A failed fetch removes the server rather
+   * than pointing an MCP client at an absent executable.
    */
   resolve() {
+    const bin = binPath();
+    if (!bin || !existsSync(bin)) {
+      return { command: null, args: [], env: {}, description: this.description };
+    }
     const dir = cacheDir();
     try { mkdirSync(dir, { recursive: true }); } catch { /* non-fatal */ }
     const env: any = { CBM_CACHE_DIR: dir };
@@ -152,7 +153,7 @@ and re-index (index_repository) when the index is missing or partial.`,
     if (process.env.WORKSPACE) env.WORKSPACE = process.env.WORKSPACE;
     return {
       type: 'stdio',
-      command: binPath(),
+      command: bin,
       args: [],
       env,
       description: this.description,
@@ -168,16 +169,29 @@ and re-index (index_repository) when the index is missing or partial.`,
    * under CBM_CACHE_DIR; fully wrapped so it NEVER throws into the run.
    * Returns {} — it contributes no agent-visible options.
    */
-  invokeAgentOptions() {
+  async invokeAgentOptions() {
     try {
+      let bin = binPath();
+      if (!bin) {
+        try {
+          bin = await ensureTool('codebase-memory', {
+            onEvent: ({ phase, version }) => {
+              if (phase === 'downloading') process.stderr.write(`[codebase-memory] downloading pinned v${version} artifact\n`);
+              if (phase === 'shared-cache-hit') process.stderr.write(`[codebase-memory] verified shared v${version} archive\n`);
+            },
+          });
+        } catch (error: any) {
+          process.stderr.write(`[codebase-memory] binary unavailable (${error?.reason || 'unknown'}): ${error?.message || error}. `
+            + 'Code-graph tools are unavailable; review with file reads and search.\n');
+          return {};
+        }
+      }
       const repoDir = repoDirToIndex();
       if (!repoDir) return {};
       const dir = cacheDir();
       try { mkdirSync(dir, { recursive: true }); } catch { /* non-fatal */ }
       const marker = join(dir, `.cbm-indexed-${pathHash(repoDir)}`);
       if (existsSync(marker)) return {}; // already indexed this repo this run
-      const bin = binPath();
-      if (!existsSync(bin) && !process.env.CBM_BIN) return {}; // binary missing → skip silently
       const res = spawnSync(
         bin,
         ['cli', 'index_repository', JSON.stringify({ repo_path: repoDir })],
@@ -190,10 +204,11 @@ and re-index (index_repository) when the index is missing or partial.`,
           maxBuffer: 32 * 1024 * 1024,
         },
       );
-      // Write the marker regardless of exit status: a re-attempt next node
-      // would hit the same outcome, and the server can still index_repository
-      // on demand. We only avoid the duplicate work within this run.
-      try { writeFileSync(marker, `${new Date().toISOString()} status=${res.status}\n`); } catch { /* non-fatal */ }
+      // A failed index is NOT a completed index. Leave it retryable and never
+      // let later nodes read a success marker for a partial graph.
+      if (!res.error && res.status === 0) {
+        try { writeFileSync(marker, `${new Date().toISOString()} status=0\n`); } catch { /* non-fatal */ }
+      }
       // SAY IT OUT LOUD WHEN IT DID NOT WORK. The hook contributes nothing the
       // model can see, so a failed index used to be invisible everywhere: the
       // prompt said the repo was indexed, every query came back empty, and
@@ -206,8 +221,9 @@ and re-index (index_repository) when the index is missing or partial.`,
             + 'the code graph may be missing or partial; index_status/index_repository are the way back.\n');
         } catch { /* non-fatal */ }
       }
-    } catch {
-      // Never let indexing take down the run.
+    } catch (error: any) {
+      process.stderr.write(`[codebase-memory] preparation failed: ${error?.message || error}. `
+        + 'Code-graph tools may be unavailable; use file reads and search.\n');
     }
     return {};
   },
