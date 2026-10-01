@@ -144,7 +144,7 @@ unavailable, continue with file reads and search and state that limitation.`,
   resolve() {
     const bin = binPath();
     if (!bin || !existsSync(bin)) {
-      return { command: null, args: [], env: {}, description: this.description };
+      return null;
     }
     const dir = cacheDir();
     try { mkdirSync(dir, { recursive: true }); } catch { /* non-fatal */ }

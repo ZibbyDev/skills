@@ -45,3 +45,11 @@ test('any graph declaring codebase-memory prepares it before its model call', as
     expect(existsSync(process.env.CBM_TEST_LOG!)).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('missing artifact omits the MCP server so normal file-search tools remain usable', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cbm-missing-'));
+  try {
+    process.env.CBM_BIN = join(root, 'unavailable-codebase-memory-mcp');
+    expect(codebaseMemorySkill.resolve()).toBeNull();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
