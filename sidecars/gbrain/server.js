@@ -173,10 +173,10 @@ async function handleQuery(body) {
   if (!q) return { status: 400, body: { ok: false, error: 'query is required' } };
   const topK = Number.isInteger(body?.topK) && body.topK > 0 ? Math.min(body.topK, 50) : 8;
   const r = await withEmbedding(embedEnvFrom(body), () => query(kbId, q, topK));
-  // `mode` says how this brain actually searches ('vector' = hybrid vector+BM25,
-  // 'lexical' = keyword only) and `stale` says it was frozen in a mode that
-  // disagrees with the credentials on THIS request. Without them a keyword-only
-  // brain answered semantic queries with an empty list and looked simply empty.
+  // `mode` says how this request actually searched ('vector' = hybrid
+  // vector+BM25, 'lexical' = keyword only). A vector brain without a key still
+  // has its BM25 index, so it serves lexical results without being stale.
+  // `stale` means the request has a provider but the brain lacks vectors.
   return { status: 200, body: { ok: true, results: r.results, mode: r.mode, stale: r.stale } };
 }
 

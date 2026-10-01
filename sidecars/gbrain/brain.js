@@ -651,20 +651,20 @@ async function writeMarker(brainDir, embeddings) {
 }
 
 /**
- * How this brain SEARCHES, as opposed to how it is configured:
+ * How this request SEARCHES, as opposed to how the brain was configured:
  *   { mode: 'vector'|'lexical', stale: boolean }
- * `stale` = the brain was frozen in a mode that disagrees with what this request
- * can do (almost always: created keyword-only before a key was available, and a
- * key is present now). It is REPORTED, never acted on — the brain is destroyed
- * and rebuilt only by an explicit /drop, because a KB may hold pages saved
- * straight from an editor that exist nowhere else. Silent rebuild = data loss.
+ * A vector brain has a BM25 index too. When the request lacks an embedding
+ * provider, GBrain searches that index without changing stored data; this is a
+ * valid lexical mode, not a stale index. The reverse IS stale: a brain created
+ * keyword-only cannot produce vectors merely because a key appeared later.
+ * It is REPORTED, never auto-rebuilt — a KB may contain irreplaceable pages.
  */
-async function embeddingState(brainDir) {
+export async function embeddingState(brainDir) {
   const want = embeddingsEnabled();
   const marker = await readMarker(brainDir);
   // No marker → the brain predates it, so reconstruct the old code's decision.
   const have = marker ? marker.embeddings : legacyEmbeddingsEnabled();
-  return { mode: have ? 'vector' : 'lexical', stale: want !== have };
+  return { mode: want && have ? 'vector' : 'lexical', stale: want && !have };
 }
 
 /** Has this brain been initialised on disk? The same fact `ensureBrain` keys on. */
