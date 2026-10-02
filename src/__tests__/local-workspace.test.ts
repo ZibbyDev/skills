@@ -82,6 +82,17 @@ test('a read-only folder with no Git (revision "") beside the repo does not inva
     { id: 'one', directory: '/workspace/local-project/tree/backend', revision: 'not-a-commit', branch: 'HEAD' },
   ] }));
   expect(JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces'))).toMatchObject({ ok: false, error: expect.stringContaining('manifest is invalid') });
+  for (const entry of [
+    { kind: 'worktree', revision: '' },
+    { kind: 'worktree' },
+    { kind: 'direct', revision: 'a'.repeat(40) },
+  ]) {
+    vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', workspaces: [
+      { id: 'one', directory: '/workspace/local-project/tree/backend', branch: 'HEAD', ...entry },
+    ] }));
+    expect(JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces')))
+      .toMatchObject({ ok: false, error: expect.stringContaining('manifest is invalid') });
+  }
 });
 test('ordinary declared skill, backend-session env derived through the shared wrapper', () => {
   expect(localWorkspaceSkill.id).toBe(SKILL_IDS.LOCAL_WORKSPACE);

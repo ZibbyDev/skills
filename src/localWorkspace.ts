@@ -25,7 +25,12 @@ const EXECUTION_DIRECTORY = /^\/workspace\/local-project\/[a-zA-Z0-9-]+(?:\/(?!\
 // handed one such folder beside its repo, and the tool told the model "do not
 // infer directories" — a code review on 542 stopped there, inconclusive,
 // while the same files were readable with plain shell tools (2026-10-01).
-const EXECUTION_REVISION = /^(?:[a-f0-9]{40,64})?$/;
+const EXECUTION_REVISION = /^[a-f0-9]{40,64}$/;
+function validExecutionRevision(item: any) {
+  return item.kind === 'direct'
+    ? item.revision === ''
+    : typeof item.revision === 'string' && EXECUTION_REVISION.test(item.revision);
+}
 
 function executionWorkspaces() {
   if (!process.env.LOCAL_PROJECT_CONTEXT) return null;
@@ -35,7 +40,7 @@ function executionWorkspaces() {
     directory: context.path, revision: context.revision, branch: context.branch, status: 'ready' }];
   if (!Array.isArray(workspaces) || !workspaces.length || workspaces.length > 16
     || workspaces.some(item => !EXECUTION_DIRECTORY.test(item.directory || '')
-      || !EXECUTION_REVISION.test(item.revision || ''))) throw new Error('Invalid execution workspace context');
+      || !validExecutionRevision(item))) throw new Error('Invalid execution workspace context');
   return { workspaces, executionId: context.executionId, accessMode: 'native-tools',
     instruction: 'These directories are already in YOUR execution container. Use your existing file, search and command tools directly. No additional clone, remote sandbox or model delegation is needed.' };
 }
