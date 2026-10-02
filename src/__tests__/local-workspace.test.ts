@@ -61,6 +61,28 @@ test('execution manifest accepts sources laid out in their on-disk arrangement, 
     expect(JSON.parse(await list(bad))).toMatchObject({ ok: false, error: expect.stringContaining('manifest is invalid') });
   }
 });
+test('a read-only folder with no Git (revision "") beside the repo does not invalidate the manifest', async () => {
+  // The exact shape docker-dispatcher.js emits for host-v1 sources: one
+  // worktree with a commit, two `direct` folders the platform cannot name a
+  // revision for. Review run a379788e (ticket 542) got "manifest is invalid"
+  // from this and stopped.
+  vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', content: 'local-files', workspaces: [
+    { id: 'one', name: 'backend', kind: 'worktree', access: 'editable', directory: '/workspace/local-project/tree/backend', revision: 'a'.repeat(40), branch: 'agent/work-one', isPrimary: true, status: 'ready' },
+    { id: 'two', name: 'selfhosted', kind: 'direct', access: 'read-only', directory: '/workspace/local-project/tree/selfhosted', revision: '', branch: '', status: 'ready' },
+    { id: 'three', name: 'plans', kind: 'direct', access: 'read-only', directory: '/workspace/local-project/tree/plans', revision: '', branch: '', status: 'ready' },
+  ] }));
+  const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+  const list = JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces'));
+  expect(list).toMatchObject({ ok: true, accessMode: 'native-tools' }); expect(list.workspaces).toHaveLength(3);
+  const command = JSON.parse(await localWorkspaceSkill.handleToolCall('run_workspace_command', { path: '/workspace/local-project/tree/backend', command: 'git log -1' }));
+  expect(command.ok).toBe(false); expect(command.error).not.toContain('manifest is invalid'); expect(command.instruction).toContain('existing file');
+  expect(fetch).not.toHaveBeenCalled();
+  // A revision that is neither empty nor a commit id is still refused.
+  vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', workspaces: [
+    { id: 'one', directory: '/workspace/local-project/tree/backend', revision: 'not-a-commit', branch: 'HEAD' },
+  ] }));
+  expect(JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces'))).toMatchObject({ ok: false, error: expect.stringContaining('manifest is invalid') });
+});
 test('ordinary declared skill, backend-session env derived through the shared wrapper', () => {
   expect(localWorkspaceSkill.id).toBe(SKILL_IDS.LOCAL_WORKSPACE);
   // The bare "workspace" MCP name is swallowed by Claude SDK before ToolSearch.

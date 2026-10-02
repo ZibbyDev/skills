@@ -17,6 +17,15 @@ const operations: Record<string, string> = {
 // source's place in their real on-disk arrangement under the layout root
 // (backend local-project-input.js localSourceDirectories). No `.`/`..` parts.
 const EXECUTION_DIRECTORY = /^\/workspace\/local-project\/[a-zA-Z0-9-]+(?:\/(?!\.\.?(?:\/|$))[^/\x00-\x1f\x7f]+)*$/;
+// A Git checkout's entry names the commit it was cut at. A folder with no Git
+// (`kind: 'direct'` — a read-only sibling folder such as a plans directory)
+// has no revision to name and the platform sends '' for it
+// (selfhosted/local-projects/host-targets.js readOnlyTarget / prepareTarget).
+// Refusing that entry made the whole manifest "invalid" for every run that was
+// handed one such folder beside its repo, and the tool told the model "do not
+// infer directories" — a code review on 542 stopped there, inconclusive,
+// while the same files were readable with plain shell tools (2026-10-01).
+const EXECUTION_REVISION = /^(?:[a-f0-9]{40,64})?$/;
 
 function executionWorkspaces() {
   if (!process.env.LOCAL_PROJECT_CONTEXT) return null;
@@ -26,7 +35,7 @@ function executionWorkspaces() {
     directory: context.path, revision: context.revision, branch: context.branch, status: 'ready' }];
   if (!Array.isArray(workspaces) || !workspaces.length || workspaces.length > 16
     || workspaces.some(item => !EXECUTION_DIRECTORY.test(item.directory || '')
-      || !/^[a-f0-9]{40,64}$/.test(item.revision || ''))) throw new Error('Invalid execution workspace context');
+      || !EXECUTION_REVISION.test(item.revision || ''))) throw new Error('Invalid execution workspace context');
   return { workspaces, executionId: context.executionId, accessMode: 'native-tools',
     instruction: 'These directories are already in YOUR execution container. Use your existing file, search and command tools directly. No additional clone, remote sandbox or model delegation is needed.' };
 }
