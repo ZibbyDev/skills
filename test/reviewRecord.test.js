@@ -9,6 +9,8 @@ import {
   serializeReviewRecord,
   parseReviewMemory,
   summarizeForPrompt,
+  normalizeCouncilMemory,
+  withCouncilMemory,
 } from '../src/reviewRecord.js';
 
 const REAL_FINDINGS = [
@@ -202,5 +204,66 @@ describe('end-to-end round-trip (build → reply → serialize → parse → sum
     const stored2 = serializeReviewRecord(replied);
     const recalled2 = parseReviewMemory(stored2);
     expect(recalled2.record.findings.find((f) => f.id === 'f2').status).toBe('conceded');
+  });
+});
+
+// ── AI Council on the record ─────────────────────────────────────────────────
+// A consultation's refs ride the record so a later run on the same change can
+// reuse them and its triage can see they exist (ticket 542, 2026-10-01: a
+// finished Council was lost when the review node failed after it).
+const BUNDLE = {
+  schemaVersion: 'decision-support-bundle.v1', consumerOwnsDecision: true,
+  delivery: { mode: 'child-execution-refs', contentComplete: true },
+  proposals: [
+    { seatId: 'p1', answerRef: { executionId: 'exec-claude', resultPath: 'contribute_blind', rawArtifact: { big: 'x'.repeat(5000) }, inlinePresent: true } },
+    { seatId: 'p2', answerRef: { executionId: 'exec-codex', resultPath: 'contribute_blind' } },
+  ],
+  reviews: [{ reviewerSeatId: 'p1', reviewRef: { executionId: 'exec-claude-2', resultPath: 'contribute_review' } }],
+};
+const CONSULT = { question: 'Does the maintenance barrier settle every accepted request?', revision: 'c'.repeat(40), consultedAt: '2026-10-01T23:15:00Z', runId: 'a379788e', bundle: BUNDLE };
+
+describe('council memory', () => {
+  it('normalizes to refs only (no inline artifacts), keeps question/revision/run', () => {
+    const c = normalizeCouncilMemory(CONSULT);
+    expect(c.question).toBe(CONSULT.question);
+    expect(c.revision).toBe('c'.repeat(40));
+    expect(c.runId).toBe('a379788e');
+    expect(c.bundle.proposals).toEqual([
+      { seatId: 'p1', answerRef: { executionId: 'exec-claude', resultPath: 'contribute_blind' } },
+      { seatId: 'p2', answerRef: { executionId: 'exec-codex', resultPath: 'contribute_blind' } },
+    ]);
+    expect(c.bundle.reviews).toHaveLength(1);
+    expect(JSON.stringify(c)).not.toContain('xxxx');
+  });
+  it('refuses a consultation with nothing to reuse', () => {
+    expect(normalizeCouncilMemory(null)).toBeNull();
+    expect(normalizeCouncilMemory({ question: 'q', bundle: null })).toBeNull();
+    expect(normalizeCouncilMemory({ question: 'q', bundle: { proposals: [{ seatId: 'p1', answerRef: { executionId: 'x' } }] } })).toBeNull();
+  });
+  it('rides the record through serialize → parse → summarize; survives a reply upsert', () => {
+    const rec = buildReviewRecord({ verdict: 'REQUEST_CHANGES', findings: REAL_FINDINGS, headSha: 'c'.repeat(40), council: CONSULT });
+    const back = parseReviewMemory(serializeReviewRecord(rec));
+    expect(back.kind).toBe('record');
+    expect(back.record.council.bundle.proposals.map((p) => p.answerRef.executionId)).toEqual(['exec-claude', 'exec-codex']);
+    const replied = upsertReplyOutcome(back.record, { findingId: 'f1', status: 'held' });
+    expect(replied.council).toEqual(back.record.council);
+    const text = summarizeForPrompt(back);
+    expect(text).toContain('AI Council already gave independent views');
+    expect(text).toContain('2 answers, 1 peer reviews');
+    expect(text).toContain(CONSULT.question);
+  });
+  it('withCouncilMemory attaches to an existing record and creates an empty one when nothing was stored yet', () => {
+    const existing = buildReviewRecord({ verdict: 'APPROVE', findings: REAL_FINDINGS });
+    const merged = withCouncilMemory(existing, CONSULT);
+    expect(merged.verdict).toBe('APPROVE'); expect(merged.findings).toHaveLength(3); expect(merged.council.runId).toBe('a379788e');
+    expect(existing.council).toBeUndefined(); // new record, input untouched
+    const fresh = withCouncilMemory(null, CONSULT);
+    expect(fresh.kind).toBe(REVIEW_RECORD_KIND); expect(fresh.findings).toEqual([]); expect(fresh.headSha).toBe('c'.repeat(40));
+    expect(withCouncilMemory(existing, { bundle: null })).toBe(existing);
+  });
+  it('a record without council summarizes exactly as before', () => {
+    const rec = buildReviewRecord({ verdict: 'COMMENT', findings: REAL_FINDINGS });
+    expect(rec).not.toHaveProperty('council');
+    expect(summarizeForPrompt(parseReviewMemory(serializeReviewRecord(rec)))).not.toContain('Council');
   });
 });

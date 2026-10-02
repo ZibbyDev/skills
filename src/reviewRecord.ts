@@ -86,8 +86,10 @@ export function buildReviewRecord({
   objectivesChecked = false,
   findings = [],
   nowIso = null,
+  council = null,
 }: any = {}) {
   const list = Array.isArray(findings) ? findings : [];
+  const consult = normalizeCouncilMemory(council);
   return {
     schemaVersion: REVIEW_RECORD_SCHEMA_VERSION,
     kind: REVIEW_RECORD_KIND,
@@ -95,6 +97,7 @@ export function buildReviewRecord({
     verdict: String(verdict || 'COMMENT'),
     objectivesChecked: !!objectivesChecked,
     reviewedAt: nowIso || null,
+    ...(consult ? { council: consult } : {}),
     findings: list.map((f, i) => ({
       id: `f${i + 1}`,
       file: clamp(f?.file, 512),
@@ -108,6 +111,62 @@ export function buildReviewRecord({
       status: 'open',
     })),
   };
+}
+
+/**
+ * WHAT AI COUNCIL ALREADY SAID ABOUT THIS CHANGE — kept on the record so a
+ * later run on the same change does not pay for the same consultation twice,
+ * and so its triage can see that independent views already exist.
+ *
+ * Shape: { question, revision, consultedAt, runId, bundle } where `bundle` is
+ * the consumer's compact child-execution refs (collaboration-discussion's
+ * decision-support bundle: proposals[].answerRef / reviews[].reviewRef, each
+ * {executionId, resultPath}). Refs only — the full answers stay on the child
+ * executions and are resolved by whoever consumes them (council-seam.js
+ * materializeCouncilAdvice). ~1 KB, well inside the content cap.
+ *
+ * Why this exists (2026-10-01, ticket 542): a review's Council finished (two
+ * blind answers, two peer reviews, five minutes) and the review node then
+ * failed on an unrelated tool error; the retry's triage saw nothing of it,
+ * asked for no Council, and the advice was simply lost.
+ */
+export function normalizeCouncilMemory(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const bundle = raw.bundle && typeof raw.bundle === 'object' ? raw.bundle : null;
+  const proposals = Array.isArray(bundle?.proposals) ? bundle.proposals : [];
+  const reviews = Array.isArray(bundle?.reviews) ? bundle.reviews : [];
+  if (!proposals.length) return null;
+  const ref = (r) => (r && typeof r === 'object' && typeof r.executionId === 'string' && typeof r.resultPath === 'string'
+    ? { executionId: r.executionId, resultPath: r.resultPath } : null);
+  const p = proposals.map((e) => ({ seatId: String(e?.seatId || ''), answerRef: ref(e?.answerRef) })).filter((e) => e.answerRef);
+  const r = reviews.map((e) => ({ reviewerSeatId: String(e?.reviewerSeatId || ''), reviewRef: ref(e?.reviewRef) })).filter((e) => e.reviewRef);
+  if (!p.length) return null;
+  return {
+    question: clamp(raw.question, 1000),
+    revision: clamp(raw.revision, 64) || null,
+    consultedAt: clamp(raw.consultedAt, 40) || null,
+    runId: clamp(raw.runId, 64) || null,
+    bundle: {
+      schemaVersion: typeof bundle.schemaVersion === 'string' ? bundle.schemaVersion : 'decision-support-bundle.v1',
+      consumerOwnsDecision: true,
+      delivery: { mode: 'child-execution-refs', contentComplete: true },
+      proposals: p,
+      reviews: r,
+    },
+  };
+}
+
+/**
+ * Attach (or replace) the Council section on a record. Returns a NEW record;
+ * an unusable `council` leaves the record unchanged. A record that does not
+ * exist yet (first thing known about this change is its Council) is created
+ * as an empty one: no verdict, no findings, just the consultation.
+ */
+export function withCouncilMemory(record, council) {
+  const consult = normalizeCouncilMemory(council);
+  if (!consult) return record;
+  const base = looksLikeRecord(record) ? record : buildReviewRecord({ verdict: 'COMMENT', headSha: consult.revision });
+  return { ...base, council: consult };
 }
 
 /**
@@ -233,5 +292,11 @@ export function summarizeForPrompt(parsed) {
     return `- [${f.severity}] ${loc} — ${f.claim || ''}${st}`;
   });
   if (r.truncated) lines.push('- (…older/lower-severity findings were truncated to fit memory)');
+  const c = normalizeCouncilMemory(r.council);
+  if (c) {
+    lines.push(`AI Council already gave independent views on this change${c.revision ? ` at commit ${c.revision}` : ''}`
+      + `${c.runId ? ` (run ${c.runId}` : ''}${c.consultedAt ? `${c.runId ? ', ' : ' ('}${c.consultedAt}` : ''}${c.runId || c.consultedAt ? ')' : ''}`
+      + `: ${c.bundle.proposals.length} answers, ${c.bundle.reviews.length} peer reviews. Its question: ${c.question || '(unrecorded)'}`);
+  }
   return [...head, ...lines].join('\n');
 }

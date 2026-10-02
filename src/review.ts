@@ -17,6 +17,8 @@ export {
   FINDING_STATUSES,
   normalizeSeverity,
   buildReviewRecord,
+  normalizeCouncilMemory,
+  withCouncilMemory,
   upsertReplyOutcome,
   serializeReviewRecord,
   parseReviewMemory,
