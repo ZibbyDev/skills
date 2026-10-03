@@ -1,4 +1,5 @@
 /** Generated from pinned codebase-memory-mcp v0.9.0 tools/list (all pages). Verify against the binary when the pin changes. */
+export const CODEBASE_MEMORY_TOOL_SCHEMA_VERSION = '0.9.0';
 export const CODEBASE_MEMORY_TOOLS = [
   {
     "name": "index_repository",
