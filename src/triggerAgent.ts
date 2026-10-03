@@ -40,7 +40,8 @@ function resolveSkillBin() {
 }
 
 /** The run's backend credential (Fargate-injected PROJECT_API_TOKEN first). */
-function getSessionToken() {
+function getSessionToken(context?: { bearerToken?: string }) {
+  if (context) return context.bearerToken || null;
   return process.env.PROJECT_API_TOKEN || process.env.ZIBBY_USER_TOKEN || null;
 }
 
@@ -52,7 +53,8 @@ function getSessionToken() {
  *    fall back to it (the same base @zibby/skills/datasetStore uses, which is why
  *    datasets work self-hosted). api-prod is the final default (matches datasetStore).
  */
-function getApiBase() {
+function getApiBase(context?: { apiBase?: string }) {
+  if (context) return (context.apiBase || '').replace(/\/+$/, '');
   const fromProgress = (process.env.PROGRESS_API_URL || '').replace(/\/executions\/?$/, '');
   const raw = fromProgress
     || process.env.ZIBBY_ACCOUNT_API_URL
@@ -93,6 +95,9 @@ const TRIGGER_TOOL: any = {
 
 export const triggerAgentSkill: any = {
   id: 'trigger-agent',
+  // Explicit run context makes this API-only skill safe to serve in the shared
+  // platform process. No other skill is opted in by callsBackend alone.
+  sharedMcp: 'platform',
   // Backend-calling: the MCP child talks to Zibby's own backend — the
   // session-env contract is guaranteed by backendSession.ts at registration
   // (declare ONCE here; see backend-session-env-contract.test.ts).
@@ -138,20 +143,27 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
     };
   },
 
-  async handleToolCall(name, args: any = {}) {
+  async handleToolCall(name, args: any = {}, context?: {
+    executionId: string;
+    projectId: string;
+    workflowType?: string;
+    apiBase?: string;
+    bearerToken?: string;
+  }) {
     if (name !== 'trigger_agent') {
       return JSON.stringify({ ok: false, error: `unknown tool: ${name}` });
     }
     try {
-      const projectId = process.env.PROJECT_ID;
-      const token = getSessionToken();
+      const projectId = context ? context.projectId : process.env.PROJECT_ID;
+      const token = getSessionToken(context);
       const workflowType =
         (typeof args.workflowType === 'string' && args.workflowType.trim())
           ? args.workflowType.trim()
-          : (process.env.WORKFLOW_TYPE || '').trim();
+          : ((context ? context.workflowType : process.env.WORKFLOW_TYPE) || '').trim();
       if (!projectId) return JSON.stringify({ ok: false, error: 'PROJECT_ID not set — cannot resolve the target project.' });
       if (!token)     return JSON.stringify({ ok: false, error: 'PROJECT_API_TOKEN not set — cannot authenticate the trigger.' });
       if (!workflowType) return JSON.stringify({ ok: false, error: 'No workflowType given and WORKFLOW_TYPE is unset — nothing to trigger.' });
+      if (context && !context.apiBase) return JSON.stringify({ ok: false, error: 'apiBase not set in shared run context.' });
       // Per-run effort: validated against the engine's closed set BEFORE the
       // trigger, so a bad pick is a readable refusal, not a started run.
       let effort: string | null = null;
@@ -163,7 +175,7 @@ It never throws — a failure comes back as { ok:false, error }; log it and move
         effort = pick;
       }
 
-      const url = `${getApiBase()}/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowType)}/trigger`;
+      const url = `${getApiBase(context)}/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowType)}/trigger`;
       // Was a hand-rolled AbortController + a literal 20000 — correct, but the
       // shape #1124 exists to remove: a budget spelled once per call site is a
       // budget nobody can find, tune or keep in step with its siblings. One

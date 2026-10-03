@@ -11,6 +11,10 @@
       "default": "./dist/index.js"
     },
     "./bin/mcp-skill.mjs": "./bin/mcp-skill.mjs",
+    "./shared-mcp": {
+      "types": "./dist/sharedMcpServer.d.ts",
+      "default": "./dist/sharedMcpServer.js"
+    },
     "./bin/mcp-sentry.mjs": "./bin/mcp-sentry.mjs",
     "./bin/mcp-lark.mjs": "./bin/mcp-lark.mjs",
     "./bin/mcp-slack.mjs": "./bin/mcp-slack.mjs",
@@ -116,6 +120,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server": "2.2.0",
     "@resvg/resvg-js": "^2.6.2",
     "@zibby/agent-workflow": "2.0.28",
     "@zibby/bin-registry": "1.0.5",

@@ -68,5 +68,32 @@ describe('trigger_agent skill', () => {
     expect(triggerAgentSkill.tools).toHaveLength(1);
     expect(triggerAgentSkill.tools[0].name).toBe('trigger_agent');
     expect(triggerAgentSkill.id).toBe('trigger-agent');
+    expect(triggerAgentSkill.sharedMcp).toBe('platform');
+  });
+
+  it('shared serving uses only the verified request context, never ambient run env', async () => {
+    process.env.PROJECT_ID = 'wrong-project';
+    process.env.PROJECT_API_TOKEN = 'wrong-token';
+    process.env.WORKFLOW_TYPE = 'wrong-workflow';
+    process.env.PROGRESS_API_URL = 'https://wrong.example/executions';
+    const context = {
+      executionId: 'run-1', projectId: 'right-project',
+      workflowType: 'right-workflow', apiBase: 'https://right.example/',
+      bearerToken: 'short-lived-run-token',
+    };
+    const out = JSON.parse(await triggerAgentSkill.handleToolCall('trigger_agent', { input: {} }, context));
+    expect(out.ok).toBe(true);
+    const [url, opts] = globalThis.fetch.mock.calls[0];
+    expect(url).toBe('https://right.example/projects/right-project/workflows/right-workflow/trigger');
+    expect(opts.headers.authorization).toBe('Bearer short-lived-run-token');
+  });
+
+  it('shared serving never falls back to ambient credentials when context is incomplete', async () => {
+    const out = JSON.parse(await triggerAgentSkill.handleToolCall('trigger_agent', {}, {
+      executionId: 'run-1', projectId: 'right-project', workflowType: 'right-workflow',
+      apiBase: 'https://right.example',
+    }));
+    expect(out.ok).toBe(false);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });
