@@ -76,6 +76,12 @@ The preview lives only as long as this run. Do not put PREVIEW_TOKEN anywhere ex
 export const browserSkill: any = {
   id: 'browser',
   serverName: 'playwright',
+  // The shared implementation is the Browser agent's sessionful MCP sidecar,
+  // published by this declaration. The platform route must resolve the
+  // deployed endpoint and proxy its session protocol before enabling it;
+  // the local stdio resolve below remains the rollback path until then.
+  sharedMcp: 'sidecar',
+  sidecarRef: 'endpoint:browser/mcp',
   cursorKey: 'playwright-official',
   allowedTools: ['mcp__playwright__*'],
   sessionEnvKey: 'ZIBBY_SESSION_INFO',

@@ -23,6 +23,17 @@ afterEach(() => {
 const fragment = () => (browserSkill.promptFragment as () => string)();
 
 describe('browser skill preview prompt fragment', () => {
+  test('declares the sessionful Browser member while local stdio fallback remains unchanged', () => {
+    expect(browserSkill.sharedMcp).toBe('sidecar');
+    expect(browserSkill.sidecarRef).toBe('endpoint:browser/mcp');
+    expect(browserSkill.tools).toEqual([]); // the live sidecar owns its schemas
+    const spec = browserSkill.resolve({ sessionPath: '/tmp/browser-run', nodeName: 'execute_live', headless: true });
+    expect(spec.command).toBe('node');
+    expect(spec.args).toContain('--isolated');
+    expect(spec.args).toContain('--save-video=1280x720');
+    expect(spec.args).toContain('--output-dir=/tmp/browser-run/execute_live');
+    expect(spec.args).toContain('--headless');
+  });
   test('no preview env ⇒ the historical fragment, byte-identical (cloud / preview-off boxes unchanged)', () => {
     const f = fragment();
     expect(f).toContain('You MUST make actual browser tool calls');
