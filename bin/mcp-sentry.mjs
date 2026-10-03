@@ -3,8 +3,8 @@
  * Zibby Sentry MCP Server — standalone stdio MCP binary.
  *
  * Mirrors the @zibby/mcp-browser pattern: this is a self-contained
- * MCP server that exposes Sentry tools (list_projects, list_issues,
- * get_issue) to any MCP client (Claude Code, Cursor, etc.). Skill's
+ * MCP server that exposes five Sentry tools (including issue updates and
+ * comments) to any MCP client (Claude Code, Cursor, etc.). Skill's
  * `resolve()` just spawns this binary; everything else runs inside
  * the spawned process.
  *
@@ -31,7 +31,30 @@ import { z } from 'zod';
 // Sentry endpoint = one edit in src/sentry.js, not three. Deterministic
 // workflow nodes import the same functions for cost-optimized fetches
 // that skip the LLM entirely.
-import { sentryListProjects, sentryListIssues, sentryGetIssue, sentryUpdateIssue, sentryAddComment } from '../dist/sentry.js';
+import { sentrySkill, sentryListProjects, sentryListIssues, sentryGetIssue, sentryUpdateIssue, sentryAddComment } from '../dist/sentry.js';
+
+/** The one declared schema list also feeds the Assistant and shared MCP. */
+const toolsByName = new Map(sentrySkill.tools.map((tool) => [tool.name, tool]));
+function configFor(name) {
+  const tool = toolsByName.get(name);
+  if (!tool) throw new Error(`Sentry MCP tool ${name} has no skill declaration`);
+  const schema = tool.input_schema || {};
+  const required = new Set(schema.required || []);
+  const shape = {};
+  for (const [key, property] of Object.entries(schema.properties || {})) {
+    let validator;
+    switch (property.type) {
+      case 'string': validator = z.string(); break;
+      case 'number': validator = z.number(); break;
+      case 'boolean': validator = z.boolean(); break;
+      case 'object': validator = z.object({}).passthrough(); break;
+      default: throw new Error(`Unsupported Sentry MCP property type for ${name}.${key}`);
+    }
+    if (property.description) validator = validator.describe(property.description);
+    shape[key] = required.has(key) ? validator : validator.optional();
+  }
+  return { title: tool.title, description: tool.description, inputSchema: z.object(shape) };
+}
 
 const server = new McpServer(
   { name: 'zibby-sentry', version: '1.0.0' },
@@ -41,11 +64,7 @@ const server = new McpServer(
 // ── sentry_list_projects ────────────────────────────────────────────
 server.registerTool(
   'sentry_list_projects',
-  {
-    title: 'List Sentry Projects',
-    description: 'List Sentry projects in the connected organization.',
-    inputSchema: z.object({}),
-  },
+  configFor('sentry_list_projects'),
   async () => {
     try {
       const data = await sentryListProjects();
@@ -62,16 +81,7 @@ server.registerTool(
 // ── sentry_list_issues ──────────────────────────────────────────────
 server.registerTool(
   'sentry_list_issues',
-  {
-    title: 'List Sentry Issues',
-    description: 'List Sentry issues (errors). Supports Sentry search syntax in the query field (e.g. "is:unresolved level:error age:-1h").',
-    inputSchema: z.object({
-      project: z.string().optional().describe('Project slug (optional)'),
-      query: z.string().optional().describe('Sentry search query (default: is:unresolved)'),
-      sort: z.string().optional().describe('Sort order: date, new, priority, freq, user (default: date)'),
-      limit: z.number().optional().describe('Max issues to return (default 25)'),
-    }),
-  },
+  configFor('sentry_list_issues'),
   async (args = {}) => {
     try {
       const data = await sentryListIssues({
@@ -97,13 +107,7 @@ server.registerTool(
 // ── sentry_get_issue ────────────────────────────────────────────────
 server.registerTool(
   'sentry_get_issue',
-  {
-    title: 'Get Sentry Issue Details',
-    description: 'Get details of a specific Sentry issue (culprit, metadata, userCount, etc).',
-    inputSchema: z.object({
-      issueId: z.string().describe('Sentry issue ID'),
-    }),
-  },
+  configFor('sentry_get_issue'),
   async (args = {}) => {
     try {
       const data = await sentryGetIssue(args.issueId);
@@ -124,18 +128,7 @@ server.registerTool(
 // ── sentry_update_issue ─────────────────────────────────────────────
 server.registerTool(
   'sentry_update_issue',
-  {
-    title: 'Update Sentry Issue',
-    description: "Update a Sentry issue's status (resolved | resolvedInNextRelease | unresolved | ignored | muted), assignment, or bookmark. Requires the connected Sentry integration to have the event:write scope.",
-    inputSchema: z.object({
-      issueId: z.string().describe('Sentry issue ID'),
-      status: z.string().optional().describe('resolved | resolvedInNextRelease | unresolved | ignored | muted'),
-      statusDetails: z.object({}).passthrough().optional().describe('Optional status details, e.g. { "inRelease": "latest" }'),
-      assignedTo: z.string().optional().describe('Assignee actor id, e.g. "user:123" or "team:456"'),
-      isBookmarked: z.boolean().optional().describe('Bookmark/unbookmark the issue'),
-      hasSeen: z.boolean().optional().describe('Mark the issue seen/unseen'),
-    }),
-  },
+  configFor('sentry_update_issue'),
   async (args = {}) => {
     try {
       const data = await sentryUpdateIssue(args.issueId, {
@@ -159,14 +152,7 @@ server.registerTool(
 // ── sentry_add_comment ──────────────────────────────────────────────
 server.registerTool(
   'sentry_add_comment',
-  {
-    title: 'Comment on a Sentry Issue',
-    description: 'Post a comment/note on a Sentry issue. Requires the connected Sentry integration to have the event:write scope.',
-    inputSchema: z.object({
-      issueId: z.string().describe('Sentry issue ID'),
-      text: z.string().describe('Comment body (markdown)'),
-    }),
-  },
+  configFor('sentry_add_comment'),
   async (args = {}) => {
     try {
       const data = await sentryAddComment(args.issueId, args.text);

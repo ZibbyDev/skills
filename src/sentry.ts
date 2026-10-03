@@ -1,10 +1,10 @@
 /**
- * Sentry skill — list projects, list issues, get issue details.
+ * Sentry skill — list projects/issues, inspect, update and comment on issues.
  *
  * Architecture: mirrors `browserSkill`. Resolves to a self-contained
  * MCP stdio server binary at `@zibby/skills/bin/mcp-sentry.mjs`. Any
  * agent strategy that supports MCP servers (Claude Code, Cursor,
- * Codex, Gemini) can spawn it and immediately get the 3 Sentry tools.
+ * Codex, Gemini) can spawn it and immediately get the 5 Sentry tools.
  *
  * Auth flows through PROJECT_API_TOKEN + PROGRESS_API_URL (inherited
  * env vars on Fargate). The MCP binary calls resolveIntegrationToken
@@ -272,6 +272,14 @@ export async function sentryAddComment(issueId, text) {
   return res.json();
 }
 
+// The frozen run one-shot adapter copies envKeys, while stdio resolve copies
+// these same values into the child. One allowlist keeps both paths equivalent.
+const SENTRY_CHILD_ENV_KEYS = [
+  'PROJECT_API_TOKEN', 'ZIBBY_USER_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV',
+  'ZIBBY_PROD_ACCOUNT_API_URL', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID',
+  'STAGE', 'ZIBBY_SELF_HOST', 'SENTRY_URL', 'SENTRY_ORG', 'SENTRY_AUTH_TOKEN',
+];
+
 export const sentrySkill: any = {
   id: 'sentry',
   // Backend-calling: the MCP child talks to Zibby's own backend — the
@@ -287,8 +295,10 @@ export const sentrySkill: any = {
   // Accept a single string OR string[] for skills that span >1 provider.
   requiresIntegration: INTEGRATIONS.SENTRY,
   description: 'Sentry error tracking — projects, issues, events',
-  envKeys: [],
-  tools: [],                             // Empty: tools come from the spawned MCP server, not declared here
+  envKeys: SENTRY_CHILD_ENV_KEYS,
+  // Both the assistant and the stdio MCP server consume the one schema list
+  // below. The shared platform also reads this property from the frozen run.
+  get tools() { return this.toolsForAssistant; },
 
   promptFragment: `## Sentry
 You have access to the user's Sentry. Use these tools:
@@ -319,7 +329,7 @@ You have access to the user's Sentry. Use these tools:
     // expired" / wrong host). ZIBBY_SELF_HOST flips resolveIntegrationToken to
     // the env-token fast path; SENTRY_AUTH_TOKEN is that token (see SELF_HOST_ENV
     // in @zibby/core). Absent on cloud → the child behaves exactly as before.
-    for (const k of ['PROJECT_API_TOKEN', 'ZIBBY_USER_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'PROGRESS_API_URL', 'EXECUTION_ID', 'PROJECT_ID', 'STAGE', 'ZIBBY_SELF_HOST', 'SENTRY_URL', 'SENTRY_ORG', 'SENTRY_AUTH_TOKEN']) {
+    for (const k of SENTRY_CHILD_ENV_KEYS) {
       if (process.env[k]) env[k] = process.env[k];
     }
     return {
@@ -397,12 +407,12 @@ You have access to the user's Sentry. Use these tools:
     }
   },
 
-  // Mirror the MCP server's tool schemas so the `assistant` agent
-  // strategy advertises them to OpenAI. Kept in sync with bin/mcp-sentry.mjs.
+  // The one schema source for Assistant, stdio MCP, and shared platform MCP.
   toolsForAssistant: [
-    { name: 'sentry_list_projects', description: 'List Sentry projects', input_schema: { type: 'object', properties: {} } },
+    { name: 'sentry_list_projects', title: 'List Sentry Projects', description: 'List Sentry projects', input_schema: { type: 'object', properties: {} } },
     {
       name: 'sentry_list_issues',
+      title: 'List Sentry Issues',
       description: 'List Sentry issues (errors)',
       input_schema: {
         type: 'object',
@@ -416,6 +426,7 @@ You have access to the user's Sentry. Use these tools:
     },
     {
       name: 'sentry_get_issue',
+      title: 'Get Sentry Issue Details',
       description: 'Get details of a specific Sentry issue',
       input_schema: {
         type: 'object',
@@ -425,6 +436,7 @@ You have access to the user's Sentry. Use these tools:
     },
     {
       name: 'sentry_update_issue',
+      title: 'Update Sentry Issue',
       description: "Update a Sentry issue's status, assignment, or bookmark (needs event:write scope)",
       input_schema: {
         type: 'object',
@@ -441,6 +453,7 @@ You have access to the user's Sentry. Use these tools:
     },
     {
       name: 'sentry_add_comment',
+      title: 'Comment on a Sentry Issue',
       description: 'Post a comment/note on a Sentry issue (needs event:write scope)',
       input_schema: {
         type: 'object',
@@ -453,7 +466,3 @@ You have access to the user's Sentry. Use these tools:
     },
   ],
 };
-
-// `tools` is what assistant-strategy actually reads. Alias so the
-// in-process path keeps working without renaming throughout the codebase.
-sentrySkill.tools = sentrySkill.toolsForAssistant;
