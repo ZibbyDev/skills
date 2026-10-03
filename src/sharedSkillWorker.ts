@@ -1,6 +1,7 @@
 /** One isolated legacy skill call for the shared HTTP MCP service. */
 import { parentPort, workerData } from 'node:worker_threads';
-import { getSkill } from './index.js';
+import { SHARED_SKILL_MODULES } from './sharedSkillModules.js';
+import { withBackendSessionEnv } from './backendSession.js';
 
 interface WorkerInput {
   skillId: string;
@@ -12,7 +13,11 @@ interface WorkerInput {
 const input = workerData as WorkerInput;
 
 async function run() {
-  const skill: any = getSkill(input.skillId);
+  const entry = SHARED_SKILL_MODULES[input.skillId];
+  if (!entry) throw new Error('No direct shared module for this skill');
+  const module = await import(new URL(entry[0], import.meta.url).href);
+  const skill: any = withBackendSessionEnv(module[entry[1]]);
+  if (skill?.id !== input.skillId) throw new Error('Shared skill module identity mismatch');
   if (!skill || !Array.isArray(skill.tools) || typeof skill.handleToolCall !== 'function') {
     throw new Error('Skill is not a hand-written tool handler');
   }
