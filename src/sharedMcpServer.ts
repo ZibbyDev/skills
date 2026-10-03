@@ -13,6 +13,9 @@
 import { McpServer, createMcpHandler, fromJsonSchema } from '@modelcontextprotocol/server';
 import type { JsonSchemaType } from '@modelcontextprotocol/server';
 
+export { invokeSharedSkillWorker } from './sharedSkillInvoker.js';
+export type { SharedSkillWorkerCall } from './sharedSkillInvoker.js';
+
 export interface SharedSkillContext {
   executionId: string;
   projectId: string;
@@ -32,7 +35,7 @@ export interface SharedSkillTool {
 export interface SharedSkill {
   id?: string;
   tools: SharedSkillTool[];
-  handleToolCall: (
+  handleToolCall?: (
     name: string,
     args: Record<string, unknown>,
     context: SharedSkillContext,
@@ -45,6 +48,10 @@ export interface SharedSkillRequest {
   context: SharedSkillContext;
   allowedTools: readonly string[];
   skill: SharedSkill;
+  /** Optional isolated dispatcher for handlers that still read process.env. */
+  invokeTool?: (
+    name: string, args: Record<string, unknown>, context: SharedSkillContext,
+  ) => unknown | Promise<unknown>;
 }
 
 type VerifiedPayload = Omit<SharedSkillRequest, 'request'>;
@@ -53,7 +60,7 @@ const handler = createMcpHandler(({ authInfo }) => {
   const payload = authInfo?.extra?.zibbySharedSkill as VerifiedPayload | undefined;
   if (!payload) throw new Error('Missing verified Zibby run context');
 
-  const { serverName, context, skill } = payload;
+  const { serverName, context, skill, invokeTool } = payload;
   const allowed = new Set(payload.allowedTools);
   const server = new McpServer(
     { name: `zibby-${skill.id || serverName}`, version: '1.0.0' },
@@ -72,7 +79,9 @@ const handler = createMcpHandler(({ authInfo }) => {
       }) as JsonSchemaType),
     }, async (args = {}) => {
       try {
-        const out = await skill.handleToolCall(tool.name, args as Record<string, unknown>, context);
+        const out = await (invokeTool
+          ? invokeTool(tool.name, args as Record<string, unknown>, context)
+          : skill.handleToolCall!(tool.name, args as Record<string, unknown>, context));
         const text = typeof out === 'string' ? out : JSON.stringify(out);
         return { content: [{ type: 'text' as const, text }] };
       } catch (error) {
@@ -86,11 +95,11 @@ const handler = createMcpHandler(({ authInfo }) => {
 
 /** Return a streamable Web Response; the HTTP route must forward its body. */
 export function handleSharedSkillRequest({
-  serverName, request, context, allowedTools, skill,
+  serverName, request, context, allowedTools, skill, invokeTool,
 }: SharedSkillRequest): Promise<Response> {
   if (!serverName || !context?.executionId || !context?.projectId
     || !skill || !Array.isArray(skill.tools)
-    || typeof skill.handleToolCall !== 'function'
+    || (typeof skill.handleToolCall !== 'function' && typeof invokeTool !== 'function')
     || !Array.isArray(allowedTools)) {
     return Promise.resolve(new Response('Invalid shared skill request', { status: 400 }));
   }
@@ -103,7 +112,7 @@ export function handleSharedSkillRequest({
       clientId: context.executionId,
       scopes: [],
       extra: {
-        zibbySharedSkill: { serverName, context, allowedTools, skill },
+        zibbySharedSkill: { serverName, context, allowedTools, skill, invokeTool },
       },
     },
   });

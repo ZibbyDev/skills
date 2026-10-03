@@ -15,6 +15,10 @@
       "types": "./dist/sharedMcpServer.d.ts",
       "default": "./dist/sharedMcpServer.js"
     },
+    "./shared-skill-invoker": {
+      "types": "./dist/sharedSkillInvoker.d.ts",
+      "default": "./dist/sharedSkillInvoker.js"
+    },
     "./bin/mcp-sentry.mjs": "./bin/mcp-sentry.mjs",
     "./bin/mcp-lark.mjs": "./bin/mcp-lark.mjs",
     "./bin/mcp-slack.mjs": "./bin/mcp-slack.mjs",

@@ -119,4 +119,20 @@ describe('shared MCP v2 server', () => {
     expect(backend.mock.calls[0][0]).toBe('https://platform.example/projects/project-1/workflows/worker/trigger');
     expect(backend.mock.calls[0][1].headers.authorization).toBe('Bearer short-run-token');
   });
+
+  it('dispatches legacy handlers through the isolated invoker when supplied', async () => {
+    const invokeTool = vi.fn(async (_name, _args, context) => `isolated:${context.executionId}`);
+    const direct: SharedSkill = {
+      id: 'legacy', tools: [{ name: 'echo', input_schema: schema }],
+      handleToolCall: () => { throw new Error('shared process handler must not run'); },
+    };
+    const response = await handleSharedSkillRequest({
+      serverName: 'legacy',
+      request: request('tools/call', 8, { name: 'echo', arguments: { message: 'hi' } }),
+      context: { executionId: 'run-c', projectId: 'project-1' },
+      allowedTools: ['echo'], skill: direct, invokeTool,
+    });
+    expect((await result(response)).result.content[0].text).toBe('isolated:run-c');
+    expect(invokeTool).toHaveBeenCalledOnce();
+  });
 });
