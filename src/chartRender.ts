@@ -342,6 +342,10 @@ export const chartRenderSkill: any = {
   id: 'chart-render',
   serverName: 'chart_render',
   allowedTools: ['mcp__chart_render__*'],
+  // File outputs belong to the exact run's session volume, which is mounted
+  // in its container rather than in the shared platform process.
+  workspaceWorker: { tools: ['chart_render'] },
+  envKeys: ['ZIBBY_NODE_SESSION_PATH', 'ZIBBY_SESSION_PATH'],
   description: 'Chart render — local server-side chart rendering (Apache ECharts SVG SSR + resvg PNG); data never leaves the box',
 
   promptFragment: `## Chart Render (local, no external service)

@@ -363,6 +363,9 @@ export const socialCardSkill: any = {
   id: 'social-card',
   serverName: 'social_card',
   allowedTools: ['mcp__social_card__*'],
+  // Rendered files must be written under the exact run's artifact session.
+  workspaceWorker: { tools: ['social_card_render'] },
+  envKeys: ['ZIBBY_NODE_SESSION_PATH', 'ZIBBY_SESSION_PATH'],
   description: 'Social card — render a branded LinkedIn "concept card" PNG locally (bold headline + eyebrow + optional stat/footer/diagram); nothing leaves the box',
 
   promptFragment: `## Social Card (branded concept card, local)
