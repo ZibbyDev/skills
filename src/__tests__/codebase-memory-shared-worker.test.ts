@@ -32,6 +32,8 @@ exit 1
       expect(codebaseMemorySkill.workspaceWorker.tools).toEqual(names);
       expect(names).toContain('search_graph');
       expect(names).toContain('index_repository');
+      expect(codebaseMemorySkill.tools.find((tool: { name: string }) => tool.name === 'index_repository')
+        .input_schema.required).toContain('repo_path');
 
       expect(codebaseMemorySkill.handleToolCall('list_projects', {})).toEqual({
         content: [{ type: 'text', text: '{"projects":[]}' }],

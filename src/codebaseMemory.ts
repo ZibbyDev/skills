@@ -122,7 +122,7 @@ export const codebaseMemorySkill: any = {
   // binary's imperative CLI once per call against this run's private cache.
   // These schemas were captured from the pinned v0.9.0 MCP tools/list (all
   // pages) and are compared with the binary by the compatibility test.
-  tools: CODEBASE_MEMORY_TOOLS,
+  tools: CODEBASE_MEMORY_TOOLS.map(({ inputSchema, ...tool }) => ({ ...tool, input_schema: inputSchema })),
   workspaceWorker: { tools: CODEBASE_MEMORY_TOOLS.map((tool) => tool.name) },
 
   promptFragment: `## Codebase Memory (code-graph + semantic index over THIS repo)
