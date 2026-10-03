@@ -82,7 +82,19 @@ describe('a skill that declares tools serves them', () => {
   it.each(sources)('%s', async (file) => {
     const mod = await import(`../${file.replace(/\.ts$/, '')}`);
     for (const [exportName, skill] of skillExports(mod)) {
-      const resolved = skill.resolve();
+      // codebase-memory is optional and fetched into the run image on demand.
+      // This test host may have no Linux artifact; give resolve() an existing
+      // executable path so this tripwire still checks its served branch. The
+      // pinned binary's real 14-tool MCP catalogue is checked separately.
+      const originalCbmBin = process.env.CBM_BIN;
+      if (skill.id === 'codebase-memory') process.env.CBM_BIN = process.execPath;
+      let resolved;
+      try { resolved = skill.resolve(); } finally {
+        if (skill.id === 'codebase-memory') {
+          if (originalCbmBin === undefined) delete process.env.CBM_BIN;
+          else process.env.CBM_BIN = originalCbmBin;
+        }
+      }
       if (IN_PROCESS.has(skill.id)) {
         expect(
           resolved?.command,
