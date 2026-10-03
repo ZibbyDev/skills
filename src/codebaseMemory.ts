@@ -51,6 +51,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { SKILL_META } from '@zibby/skill-ids';
 import { cachedToolPath, ensureTool } from '@zibby/bin-registry';
+import { CODEBASE_MEMORY_TOOLS } from './codebaseMemoryTools.js';
 
 /** The current pin's private, verified binary (override for local dev/tests). */
 function binPath() {
@@ -117,6 +118,12 @@ export const codebaseMemorySkill: any = {
   allowedTools: ['mcp__codebase_memory__*'],
   description:
     'Codebase memory — code-graph + semantic index over the checked-out repo (architecture, graph search, dependency trace, change detection)',
+  // The platform serves MCP; the exact run container executes the pinned
+  // binary's imperative CLI once per call against this run's private cache.
+  // These schemas were captured from the pinned v0.9.0 MCP tools/list (all
+  // pages) and are compared with the binary by the compatibility test.
+  tools: CODEBASE_MEMORY_TOOLS,
+  workspaceWorker: { tools: CODEBASE_MEMORY_TOOLS.map((tool) => tool.name) },
 
   promptFragment: `## Codebase Memory (code-graph + semantic index over THIS repo)
 The checked-out repository can be indexed into a queryable code graph + semantic
@@ -160,6 +167,43 @@ unavailable, continue with file reads and search and state that limitation.`,
       // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
       // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
     };
+  },
+
+  handleToolCall(name: string, args: Record<string, unknown> = {}) {
+    if (!CODEBASE_MEMORY_TOOLS.some((tool) => tool.name === name)) {
+      return { content: [{ type: 'text', text: `Unknown codebase-memory tool: ${name}` }], isError: true };
+    }
+    const bin = binPath();
+    if (!bin || !existsSync(bin)) {
+      return { content: [{ type: 'text', text: 'Codebase-memory binary is unavailable in this run.' }], isError: true };
+    }
+    const dir = cacheDir();
+    try { mkdirSync(dir, { recursive: true }); } catch { /* the CLI reports a write failure */ }
+    const outcome = spawnSync(bin, ['cli', name], {
+      env: { ...process.env, CBM_CACHE_DIR: dir },
+      input: JSON.stringify(args || {}),
+      encoding: 'utf8',
+      timeout: 5 * 60 * 1000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    // The binary prints successful JSON to stdout, but validation failures
+    // exit nonzero and print their JSON after log lines on stderr. Keep the
+    // MCP result's JSON body in both cases; never turn a useful refusal into
+    // an empty-output error merely because it used stderr.
+    let output = String(outcome.stdout || '').trim();
+    if (!output) {
+      const lines = String(outcome.stderr || '').trim().split('\n');
+      output = lines.reverse().find((line) => {
+        try { JSON.parse(line); return true; } catch { return false; }
+      }) || '';
+    }
+    if (outcome.error) {
+      return { content: [{ type: 'text', text: `Codebase-memory ${name} failed: ${outcome.error.message}` }], isError: true };
+    }
+    if (!output) {
+      return { content: [{ type: 'text', text: `Codebase-memory ${name} returned no output (exit ${outcome.status}).` }], isError: true };
+    }
+    return { content: [{ type: 'text', text: output }], ...(outcome.status === 0 ? {} : { isError: true }) };
   },
 
   /**
