@@ -135,4 +135,30 @@ describe('shared MCP v2 server', () => {
     expect((await result(response)).result.content[0].text).toBe('isolated:run-c');
     expect(invokeTool).toHaveBeenCalledOnce();
   });
+
+  it('preserves a real MCP result including isError without double wrapping', async () => {
+    const native = { content: [{ type: 'text' as const, text: 'failed' }], isError: true };
+    const response = await handleSharedSkillRequest({
+      serverName: 'native',
+      request: request('tools/call', 9, { name: 'echo', arguments: { message: 'hi' } }),
+      context: { executionId: 'run-d', projectId: 'project-1' },
+      allowedTools: ['echo'],
+      skill: { id: 'native', tools: [{ name: 'echo', input_schema: schema }], handleToolCall: () => native },
+    });
+    expect((await result(response)).result).toMatchObject(native);
+  });
+
+  it('treats a malformed content field as ordinary handler data', async () => {
+    const malformed = { content: [{ type: 'text', text: 123 }], isError: true };
+    const response = await handleSharedSkillRequest({
+      serverName: 'data',
+      request: request('tools/call', 10, { name: 'echo', arguments: { message: 'hi' } }),
+      context: { executionId: 'run-d', projectId: 'project-1' },
+      allowedTools: ['echo'],
+      skill: { id: 'data', tools: [{ name: 'echo', input_schema: schema }], handleToolCall: () => malformed },
+    });
+    const actual = (await result(response)).result;
+    expect(actual.isError).toBeUndefined();
+    expect(JSON.parse(actual.content[0].text)).toEqual(malformed);
+  });
 });

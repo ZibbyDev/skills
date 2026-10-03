@@ -11,7 +11,7 @@
  * This entry point requires Node 20+; the base package still supports Node 18.
  */
 
-import { McpServer, createMcpHandler, fromJsonSchema } from '@modelcontextprotocol/server';
+import { McpServer, createMcpHandler, fromJsonSchema, isCallToolResult } from '@modelcontextprotocol/server';
 import type { JsonSchemaType } from '@modelcontextprotocol/server';
 
 export { invokeSharedSkillWorker } from './sharedSkillInvoker.js';
@@ -83,6 +83,7 @@ const handler = createMcpHandler(({ authInfo }) => {
         const out = await (invokeTool
           ? invokeTool(tool.name, args as Record<string, unknown>, context)
           : skill.handleToolCall!(tool.name, args as Record<string, unknown>, context));
+        if (isCallToolResult(out)) return out;
         const text = typeof out === 'string' ? out : JSON.stringify(out);
         return { content: [{ type: 'text' as const, text }] };
       } catch (error) {
