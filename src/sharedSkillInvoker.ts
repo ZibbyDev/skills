@@ -1,6 +1,12 @@
 /** A fresh Worker per legacy skill call: zero idle Worker memory per run. */
 import { Worker } from 'node:worker_threads';
 import type { SharedSkillContext } from './sharedMcpServer.js';
+import { SHARED_SKILL_MODULES } from './sharedSkillModules.js';
+
+/** True only for built-in public skills with an audited direct Worker module. */
+export function canInvokePublicSkill(skillId: string): boolean {
+  return Object.hasOwn(SHARED_SKILL_MODULES, skillId);
+}
 
 export interface SharedSkillWorkerCall {
   skillId: string;
@@ -42,6 +48,9 @@ export function invokeSharedSkillWorker({
   if (!skillId || !toolName || !context?.executionId || !context?.projectId || !runEnv
     || typeof runEnv !== 'object' || Array.isArray(runEnv)) {
     return Promise.reject(new TypeError('Invalid shared skill worker call'));
+  }
+  if (!canInvokePublicSkill(skillId)) {
+    return Promise.reject(new Error(`No public shared skill Worker for ${skillId}`));
   }
   if (signal?.aborted) return Promise.reject(new Error('Skill call cancelled'));
 
