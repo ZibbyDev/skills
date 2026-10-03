@@ -8,6 +8,7 @@
  *
  * This is a separate entry point from bin/mcp-skill.mjs. The local stdio
  * fallback remains on the smaller v1 SDK until shared serving is proven.
+ * This entry point requires Node 20+; the base package still supports Node 18.
  */
 
 import { McpServer, createMcpHandler, fromJsonSchema } from '@modelcontextprotocol/server';

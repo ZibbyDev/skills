@@ -124,7 +124,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@modelcontextprotocol/server": "2.2.0",
     "@resvg/resvg-js": "^2.6.2",
     "@zibby/agent-workflow": "2.0.28",
     "@zibby/bin-registry": "1.0.5",
@@ -145,6 +144,7 @@
     }
   },
   "optionalDependencies": {
+    "@modelcontextprotocol/server": "2.2.0",
     "@zibby/mcp-browser": "2.0.28",
     "@zibby/mcp-memory": "*"
   },
