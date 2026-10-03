@@ -29,6 +29,7 @@ describe('browser skill preview prompt fragment', () => {
     expect(browserSkill.tools).toEqual([]); // the live sidecar owns its schemas
     const spec = browserSkill.resolve({ sessionPath: '/tmp/browser-run', nodeName: 'execute_live', headless: true });
     expect(spec.command).toBe('node');
+    expect(spec.toolboxEligible).toBe(false);
     expect(spec.args).toContain('--isolated');
     expect(spec.args).toContain('--save-video=1280x720');
     expect(spec.args).toContain('--output-dir=/tmp/browser-run/execute_live');

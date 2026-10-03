@@ -130,6 +130,9 @@ export const browserSkill: any = {
 
     return {
       command: 'node',
+      // The shared Browser endpoint is sessionful. A stateless toolbox must
+      // leave this remote MCP server directly attached to the client.
+      toolboxEligible: false,
       args: withHeadlessArg(
         [
           bin,
