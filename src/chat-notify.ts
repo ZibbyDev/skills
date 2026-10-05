@@ -103,6 +103,11 @@ export const chatNotifySkill: any = {
   // cannot read them would list no tools and refuse every call.
   envKeys: [...new Set([...PROVIDERS.flatMap((p) => p.skill.envKeys || []), ...AVAILABILITY_ENV_KEYS])],
 
+  /** Pure preflight check; the same provider decision used by tools and resolve(). */
+  mcpAvailableForRun() {
+    return availableChatProviders().length > 0;
+  },
+
   /** Tool patterns for the permission allowlist — this skill's ONE server. */
   get allowedTools() {
     return availableChatProviders().length ? [`mcp__${SERVER_NAME}__*`] : [];

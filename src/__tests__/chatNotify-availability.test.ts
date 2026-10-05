@@ -36,6 +36,7 @@ describe('which providers a run has', () => {
   it('nothing connected: nothing mounted, nothing listed, nothing said', () => {
     run({});
     expect(availableChatProviders()).toEqual([]);
+    expect(chatNotifySkill.mcpAvailableForRun()).toBe(false);
     expect(chatNotifySkill.resolve({})).toBeNull();
     expect(chatNotifySkill.allowedTools).toEqual([]);
     expect(names()).toEqual([]);
@@ -47,6 +48,7 @@ describe('which providers a run has', () => {
   it('Lark connected, no chat id in the env: Lark is served — the destination is the agent\'s instructions', () => {
     run({ WORKFLOW_CONNECTED_INTEGRATIONS: 'github,lark' });
     expect(availableChatProviders().map((p) => p.label)).toEqual(['Lark']);
+    expect(chatNotifySkill.mcpAvailableForRun()).toBe(true);
     expect(names()).toEqual(larkTools);
     expect(chatNotifySkill.resolve({})?.command).toBe('node');
     const said = chatNotifySkill.promptFragment();
