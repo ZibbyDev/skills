@@ -30,10 +30,17 @@
 
 import { slackSkill } from './slack.js';
 import { larkSkill } from './lark.js';
+import { INTEGRATIONS } from './integrations.js';
 
 export const chatNotifySkill: any = {
   id: 'chat_notify',
   description: 'Chat notification meta-skill — routes to whichever messaging integration (Slack OR Lark) the user has configured for this project.',
+  // EITHER provider makes this skill real (the engine reads a list as "any
+  // one of"). Without it the prompt fragment below was injected off the node's
+  // declaration alone, so an agent that declares chat_notify as an OPTIONAL
+  // ability was told "you can post chat messages" on a project with no chat
+  // connected, where no tool is mounted (resolve() returns null).
+  requiresIntegration: [INTEGRATIONS.SLACK, INTEGRATIONS.LARK],
   // Pull in both providers' env keys so the agent strategy passes
   // them through to whichever MCP server resolve() selects.
   envKeys: [...(slackSkill.envKeys || []), ...(larkSkill.envKeys || [])],
