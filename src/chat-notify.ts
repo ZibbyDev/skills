@@ -1,142 +1,175 @@
 /**
- * chatNotifySkill — OR-group meta-skill over slack + lark.
+ * chatNotifySkill — "post to the team's chat", over every chat provider the
+ * run may use (Slack, Lark).
  *
- * Mirrors the `git` meta-skill pattern: lets a workflow declare
- * `skills: [SKILLS.CHAT_NOTIFY]` and have the marketplace card
- * render "Slack OR Lark" instead of demanding both. Backend's
- * REQUIRED_INTEGRATION_MAP entry (`chat_notify: { any: [...] }`)
- * does the OR-group routing for the integration gate.
+ * A workflow node declares `skills: [SKILLS.CHAT_NOTIFY]` and means "whatever
+ * chat this project connected". The marketplace card renders "Slack OR Lark"
+ * and the integration gate passes when EITHER is connected (backend
+ * REQUIRED_INTEGRATION_MAP `chat_notify: { any: [...] }`).
  *
- * Runtime — single funnel, no parallel paths:
+ * WHICH PROVIDERS, AND WHO DECIDES. The skill never picks a provider and never
+ * picks a destination:
  *
- *   - For in-process callers (custom-execute nodes): use
- *     handleToolCall(toolName, args). It routes to slack or lark
- *     by tool-name prefix.
+ *   - WHICH ONES EXIST for this run is the platform's answer, read by
+ *     `availableChatProviders()` below — the one decider for what is mounted,
+ *     what is listed and what the prompt says, so the three cannot disagree.
+ *   - EVERY available provider is served, by ONE MCP server named
+ *     `chat_notify`. A project that connected both gets both.
+ *   - WHERE a message goes is the agent's instructions (a per-node prompt:
+ *     "post the round summary to #release"). A default destination the operator
+ *     set (SLACK_CHANNEL / LARK_RECEIVE_ID) is told to the agent as a default,
+ *     nothing more.
  *
- *   - For MCP-backed agents (Claude Code SDK / Cursor): resolve()
- *     returns ONE MCP server config — slack's when SLACK_CHANNEL is
- *     set, lark's when LARK_RECEIVE_ID is set. The OR-group at
- *     marketplace integration-gate time is satisfied by EITHER
- *     connection; at runtime we commit to one. The LLM only sees
- *     the matching provider's tools, so there's no chance of it
- *     calling the wrong skill.
+ * It used to commit to one provider by a fixed order of env vars (explicit
+ * Slack channel, explicit Lark chat, Slack token), mounted under that
+ * provider's own server name. Two things followed that no operator chose: with
+ * both connected Slack always won, and Lark was only reachable when a fixed
+ * chat id had been set in the env — instructions alone could not send there.
  *
- * Skill declaration on a workflow node:
- *
- *   skills: [SKILLS.CHAT_NOTIFY]
- *
- * No need to also declare slack/lark — chat_notify subsumes them.
+ * In-process callers (custom-execute nodes) keep using
+ * `handleToolCall(toolName, args)`: it routes by tool-name prefix and the
+ * provider's own handler decides whether it can post.
  */
 
+import { existsSync } from 'node:fs';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { slackSkill } from './slack.js';
 import { larkSkill } from './lark.js';
 import { INTEGRATIONS } from './integrations.js';
 
+const SERVER_NAME = 'chat_notify';
+
+/**
+ * The providers this skill spans. `credential` is the env var the platform
+ * injects for a run that has the provider's credentials; `destination` is the
+ * operator's optional default place to post. Order is display order only.
+ */
+const PROVIDERS = Object.freeze([
+  { integration: INTEGRATIONS.SLACK, label: 'Slack', skill: slackSkill, prefix: 'slack_', credential: 'SLACK_BOT_TOKEN', destination: 'SLACK_CHANNEL' },
+  { integration: INTEGRATIONS.LARK, label: 'Lark', skill: larkSkill, prefix: 'lark_', credential: 'LARK_APP_ID', destination: 'LARK_RECEIVE_ID' },
+]);
+
+/** Run facts this skill reads to know which providers exist. None is a secret. */
+const AVAILABILITY_ENV_KEYS = Object.freeze([
+  'WORKFLOW_CONNECTED_INTEGRATIONS', 'WORKFLOW_ENABLED_INTEGRATIONS',
+  ...PROVIDERS.flatMap((p) => [p.credential, p.destination]),
+]);
+
+/** A comma-separated run fact as a set; null when the platform did not state it. */
+function stated(value: unknown): Set<string> | null {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  return new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean));
+}
+
+/**
+ * THE ONE DECIDER: the chat providers this run may post through.
+ *
+ * A provider exists for the run when the platform says so — it is on the
+ * account's connected list (WORKFLOW_CONNECTED_INTEGRATIONS), or the platform
+ * handed this run its credential or the operator gave it a destination. It is
+ * then kept only if the agent's own allowlist admits it
+ * (WORKFLOW_ENABLED_INTEGRATIONS; absent = every connected provider is
+ * allowed, the platform's own rule for that variable).
+ */
+export function availableChatProviders(env: Record<string, string | undefined> = process.env) {
+  const connected = stated(env.WORKFLOW_CONNECTED_INTEGRATIONS);
+  const enabled = stated(env.WORKFLOW_ENABLED_INTEGRATIONS);
+  return PROVIDERS.filter((p) => (connected?.has(p.integration) || !!env[p.credential] || !!env[p.destination])
+    && (!enabled || enabled.has(p.integration)));
+}
+
+/**
+ * bin/mcp-skill.mjs — the generic server that serves any skill's `tools` through
+ * its `handleToolCall`. Derived from `import.meta.url`, never a package
+ * self-reference (see github.ts `resolveSkillBin`).
+ */
+function resolveSkillBin() {
+  if (process.env.MCP_SKILL_PATH) return process.env.MCP_SKILL_PATH;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidate = resolvePath(here, '..', 'bin', 'mcp-skill.mjs');
+  return existsSync(candidate) ? candidate : null;
+}
+
 export const chatNotifySkill: any = {
   id: 'chat_notify',
-  description: 'Chat notification meta-skill — routes to whichever messaging integration (Slack OR Lark) the user has configured for this project.',
-  // EITHER provider makes this skill real (the engine reads a list as "any
-  // one of"). Without it the prompt fragment below was injected off the node's
-  // declaration alone, so an agent that declares chat_notify as an OPTIONAL
-  // ability was told "you can post chat messages" on a project with no chat
-  // connected, where no tool is mounted (resolve() returns null).
-  requiresIntegration: [INTEGRATIONS.SLACK, INTEGRATIONS.LARK],
-  // Pull in both providers' env keys so the agent strategy passes
-  // them through to whichever MCP server resolve() selects.
-  envKeys: [...(slackSkill.envKeys || []), ...(larkSkill.envKeys || [])],
+  serverName: SERVER_NAME,
+  description: 'Post to the team\'s chat — every chat provider (Slack, Lark) this project connected and this agent may use.',
+  // EITHER provider makes this skill real (the engine reads a list as "any one
+  // of") and withholds the prompt fragment when neither is connected.
+  requiresIntegration: PROVIDERS.map((p) => p.integration),
+  // What a spawned server (or a per-call worker) needs: each provider's own
+  // keys, plus the run facts `availableChatProviders` reads — a child that
+  // cannot read them would list no tools and refuse every call.
+  envKeys: [...new Set([...PROVIDERS.flatMap((p) => p.skill.envKeys || []), ...AVAILABILITY_ENV_KEYS])],
 
-  // ── serverName + allowedTools: dynamic, must match resolve()'s pick ──
-  //
-  // The MCP agent strategy (claude-strategy._resolveSkills) does:
-  //     if (skill.allowedTools) allowedTools.push(...skill.allowedTools);
-  //     mcpServers[skill.serverName] = skill.resolve(...);
-  //
-  // Without a `serverName`, `mcpServers[undefined]` registers the server
-  // under the literal key `undefined`, so its tools surface to the model
-  // as `mcp__undefined__slack_post_message`. The permission allowlist is
-  // built from `allowedTools` (`mcp__slack__*`), which never matches the
-  // `mcp__undefined__*` names — so EVERY tool call is silently denied at
-  // the Agent SDK permission gate. That's a hard break: any workflow
-  // using SKILLS.CHAT_NOTIFY (e.g. sentry-triage dispatch) could fetch +
-  // classify but never actually post to Slack/Lark.
-  //
-  // Both are getters because the active provider is only known at runtime
-  // (which env var is set). They evaluate during _resolveSkills, after
-  // the workflow's env is loaded, and stay in lockstep with resolve():
-  //   SLACK_CHANNEL set  → 'slack' + slack's allowedTools
-  //   LARK_RECEIVE_ID set → 'lark' + lark's allowedTools
-  // The agent only ever sees ONE provider's server, so its serverName +
-  // allowedTools + resolve() all agree.
-  // Provider pick — backward-compatible + a new "channel via instructions"
-  // path. Order:
-  //   1. explicit SLACK_CHANNEL  → slack (default channel baked in)
-  //   2. explicit LARK_RECEIVE_ID → lark
-  //   3. SLACK_BOT_TOKEN present (= Slack INTEGRATION connected, token
-  //      injected by the executor) → slack, EVEN WITHOUT SLACK_CHANNEL. The
-  //      agent supplies the channel in its slack_post_message call (e.g. from
-  //      a per-node custom prompt: "post the digest to #bla"). Lark has no
-  //      injected env signal (it resolves its token at resolve() time), so it
-  //      stays gated on the explicit LARK_RECEIVE_ID.
-  get serverName() {
-    if (process.env.SLACK_CHANNEL) return slackSkill.serverName;
-    if (process.env.LARK_RECEIVE_ID) return larkSkill.serverName;
-    if (process.env.SLACK_BOT_TOKEN) return slackSkill.serverName;
-    return undefined;
-  },
+  /** Tool patterns for the permission allowlist — this skill's ONE server. */
   get allowedTools() {
-    if (process.env.SLACK_CHANNEL) return slackSkill.allowedTools || [];
-    if (process.env.LARK_RECEIVE_ID) return larkSkill.allowedTools || [];
-    if (process.env.SLACK_BOT_TOKEN) return slackSkill.allowedTools || [];
-    return [];
+    return availableChatProviders().length ? [`mcp__${SERVER_NAME}__*`] : [];
   },
-
-  promptFragment: `## Chat notifications (Slack OR Lark — at least one connected)
-You can post chat messages via:
-- slack_post_message (channel, text[, blocks]) — Slack. The \`channel\` is REQUIRED on every call.
-- lark_send_message  (receive_id, text)        — Lark.
-Where to post:
-- If SLACK_CHANNEL / LARK_RECEIVE_ID is set, that is the default destination — use it.
-- If NO destination env var is set but your instructions name a channel (e.g. "post to #bla"), post to THAT channel — pass it as the \`channel\` arg (a "#name" or "C0123" id both work).
-- If neither an env var NOR an instruction gives you a channel, do NOT post — there is nowhere to send it.`,
 
   /**
-   * Runtime MCP server selection. Picks the provider whose env var
-   * the user actually set. Falls back to null when neither is
-   * configured (workflow code should already have errored on env
-   * validation before reaching this point).
+   * What the agent is told. Only the providers it actually has, and never where
+   * to post: that is its instructions. An operator's default is stated as one.
    */
-  resolve(ctx) {
-    if (process.env.SLACK_CHANNEL && typeof slackSkill.resolve === 'function') {
-      return slackSkill.resolve(ctx);
+  promptFragment() {
+    const providers = availableChatProviders();
+    if (!providers.length) return '';
+    const lines = [`## Chat messages (${providers.map((p) => p.label).join(', ')})`, 'You can post to the team\'s chat:'];
+    for (const p of providers) {
+      const fallback = process.env[p.destination];
+      if (p.integration === INTEGRATIONS.SLACK) {
+        lines.push(`- slack_post_message (channel, text[, blocks]) — Slack. \`channel\` is a "#name" or a channel id.${fallback ? ` Default channel: ${fallback}.` : ''}`);
+      } else {
+        lines.push(`- lark_send_message (receive_id, text) — Lark. \`receive_id\` is a chat id (oc_…), a user id or an email.${fallback ? ` Default chat: ${fallback}.` : ''}`);
+      }
     }
-    if (process.env.LARK_RECEIVE_ID && typeof larkSkill.resolve === 'function') {
-      return larkSkill.resolve(ctx);
-    }
-    // Slack connected (token injected) but no SLACK_CHANNEL — expose slack so
-    // the agent can post to a channel named in its instructions/custom prompt.
-    if (process.env.SLACK_BOT_TOKEN && typeof slackSkill.resolve === 'function') {
-      return slackSkill.resolve(ctx);
-    }
-    return null;
+    lines.push('Where a message goes comes from your instructions. With no destination in your instructions and no default above, do not post — there is nowhere to send it.');
+    return lines.join('\n');
   },
 
-  // In-process tool dispatch — delegates to the underlying skill by
-  // tool-name prefix. Used by custom-execute dispatchers that aren't
-  // going through MCP.
+  /**
+   * ONE server for every available provider: the generic skill server over
+   * this module, so the model gets `mcp__chat_notify__slack_*` and
+   * `mcp__chat_notify__lark_*` side by side. null when the run has no chat
+   * provider — nothing is mounted and nothing is promised.
+   */
+  resolve(ctx?: unknown) {
+    const providers = availableChatProviders();
+    if (!providers.length) return null;
+    const bin = resolveSkillBin();
+    if (!bin) return null;
+    // Each provider's own resolve() already allow-lists the env its handler
+    // needs; take exactly that, and add the facts the child decides by.
+    const env: Record<string, string> = {};
+    for (const p of providers) {
+      const own = typeof p.skill.resolve === 'function' ? p.skill.resolve(ctx) : null;
+      if (own && own.env && typeof own.env === 'object') Object.assign(env, own.env);
+    }
+    for (const key of this.envKeys) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
+    return {
+      type: 'stdio',
+      command: 'node',
+      args: [bin, '../dist/chat-notify.js', 'chatNotifySkill'],
+      env,
+      description: this.description,
+    };
+  },
+
+  // Routes by tool-name prefix; the provider's own handler is the authority on
+  // whether it can post. Deliberately NOT gated on availableChatProviders():
+  // a code node that calls a provider directly is told the truth by that
+  // provider, not by this skill's reading of the run.
   async handleToolCall(name, args, context) {
-    if (typeof name === 'string' && name.startsWith('slack_')) {
-      return slackSkill.handleToolCall(name, args, context);
-    }
-    if (typeof name === 'string' && name.startsWith('lark_')) {
-      return larkSkill.handleToolCall(name, args, context);
-    }
-    return JSON.stringify({ error: `chat_notify: unknown tool "${name}". Expected slack_* or lark_*.` });
+    const provider = typeof name === 'string' ? PROVIDERS.find((p) => name.startsWith(p.prefix)) : null;
+    if (provider) return provider.skill.handleToolCall(name, args, context);
+    return JSON.stringify({ error: `chat_notify: unknown tool "${name}". Expected ${PROVIDERS.map((p) => `${p.prefix}*`).join(' or ')}.` });
   },
 
-  // Surface every slack + lark tool so the assistant-agent strategy
-  // (which reads `.tools`) can advertise them all. The LLM picks the
-  // right one at runtime based on env / prompt context.
+  /** The tools of every provider this run has — what is listed is what can be called. */
   get tools() {
-    return [...(slackSkill.tools || []), ...(larkSkill.tools || [])];
+    return availableChatProviders().flatMap((p) => p.skill.tools || []);
   },
 };

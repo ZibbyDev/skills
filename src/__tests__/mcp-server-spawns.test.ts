@@ -56,7 +56,6 @@ function skillExports(mod: Record<string, any>): Array<[string, any]> {
  */
 const IN_PROCESS = new Map<string, string>([
   ['chat-memory', 'in-process store; the functionSkill registry dispatches it'],
-  ['chat_notify', 'aliases slack/lark handlers in-process, spawns nothing of its own'],
   ['core-tools', 'run_command / open_url / wait must run in the RUN process, not a child'],
   ['git', 'clones into the run workspace — a child process would clone somewhere else'],
   ['git-write', 'writes the run workspace, same reason as git'],
