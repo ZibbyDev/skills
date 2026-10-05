@@ -629,6 +629,7 @@ async function runScanner(scanner, baseDir, absFiles) {
 
 export const codeScanSkill: any = {
   id: 'code-scan',
+  workspaceWorker: { tools: ['scan_code'] },
   serverName: 'code_scan',
   // Static toggle metadata by REFERENCE to the single source of truth
   // (@zibby/skill-ids SKILL_META) — the engine's toggle gate reads

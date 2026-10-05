@@ -17,6 +17,7 @@ const MAX_OUTPUT = 64 * 1024;
 
 export const coreToolsSkill: any = {
   id: 'core-tools',
+  workspaceWorker: { tools: ['read_file', 'write_file', 'list_directory', 'run_command', 'open_url'] },
   description: 'File read/write, directory listing, shell commands, open URLs, wait for async operations',
   envKeys: [],
 

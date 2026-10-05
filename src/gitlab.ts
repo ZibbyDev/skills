@@ -1277,6 +1277,7 @@ export const gitlabSkill: any = {
   // (declare ONCE here; see backend-session-env-contract.test.ts).
   callsBackend: true,
   serverName: 'gitlab',
+  workspaceWorker: { tools: ['gitlab_clone'] },
   // No MCP server — tools are served directly via handleToolCall, same as
   // the sentry / linear skills. allowedTools still namespaces them.
   allowedTools: ['mcp__gitlab__*'],

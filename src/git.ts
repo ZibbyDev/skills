@@ -114,6 +114,7 @@ function exec(cmd, cwd, env: any = {}) {
 
 export const gitSkill: any = {
   id: 'git',
+  workspaceWorker: { tools: ['git_checkout', 'git_list_repos', 'git_explore'] },
   description: 'Clone and manage git repositories for codebase analysis',
   // REPO_ALLOWLIST: the project's repository selection — git_checkout refuses a
   // github/gitlab repository outside it (see handleCheckout).

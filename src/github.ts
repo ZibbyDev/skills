@@ -147,6 +147,7 @@ export const githubSkill: any = {
   // (declare ONCE here; see backend-session-env-contract.test.ts).
   callsBackend: true,
   serverName: 'github',
+  workspaceWorker: { tools: ['github_clone'] },
   allowedTools: ['mcp__github__*'],
   requiresIntegration: INTEGRATIONS.GITHUB, // see sentrySkill.requiresIntegration for semantics
   // GITHUB_TOKEN is the self-host fast path. The other three are what the

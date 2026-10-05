@@ -32,10 +32,12 @@ function validExecutionRevision(item: any) {
     : typeof item.revision === 'string' && EXECUTION_REVISION.test(item.revision);
 }
 
-function executionWorkspaces() {
-  if (!process.env.LOCAL_PROJECT_CONTEXT) return null;
-  const context = JSON.parse(process.env.LOCAL_PROJECT_CONTEXT);
+function executionWorkspaces(value?: string | object, expectedExecutionId?: string) {
+  const raw = value === undefined ? process.env.LOCAL_PROJECT_CONTEXT : value;
+  if (!raw) return null;
+  const context = typeof raw === 'string' ? JSON.parse(raw) : raw;
   if (!context.executionId) throw new Error('Invalid execution workspace context');
+  if (expectedExecutionId && context.executionId !== expectedExecutionId) throw new Error('Invalid execution workspace context');
   const workspaces = context.workspaces || [{ id: context.executionId, name: 'local-project',
     directory: context.path, revision: context.revision, branch: context.branch, status: 'ready' }];
   if (!Array.isArray(workspaces) || !workspaces.length || workspaces.length > 16
@@ -46,6 +48,8 @@ function executionWorkspaces() {
 }
 
 export const localWorkspaceSkill: any = {
+  sharedMcp: 'platform',
+  sharedContext: 'execution-workspaces',
   id: SKILL_IDS.LOCAL_WORKSPACE,
   callsBackend: true,
   // Claude SDK reserves/omits the bare "workspace" MCP server name. In a live
@@ -93,11 +97,21 @@ list_workspaces, open_workspace, refresh_workspace and close_workspace remain fo
       env: process.env.LOCAL_PROJECT_CONTEXT ? { LOCAL_PROJECT_CONTEXT: process.env.LOCAL_PROJECT_CONTEXT } : {},
       description: this.description, alwaysLoad: false };
   },
-  async handleToolCall(name: string, args: any = {}) {
+  async handleToolCall(name: string, args: any = {}, callContext: any = {}) {
     const operation = operations[name];
     if (!operation) return JSON.stringify({ ok: false, error: 'Unknown workspace tool.' });
+    // WHOSE RUN THIS IS. In the run's own process (or its stdio child) the run's
+    // identity IS the process env. Served by the shared platform — ONE process
+    // for every run on the box — the call carries the run's verified identity
+    // and manifest (backend handlers/shared-run-mcp.js: executionId, apiBase,
+    // bearerToken, localWorkspaceContext), and that is the ONLY one used. The
+    // serving process's own env is never a fallback there: it holds the
+    // platform's credentials, and `execute` / `publish` below would run as the
+    // platform instead of the run that asked (same rule as triggerAgent.ts).
+    const servedByPlatform = ['executionId', 'localWorkspaceContext', 'bearerToken', 'apiBase'].some((key) => Object.hasOwn(callContext, key));
     try {
-      const execution = executionWorkspaces();
+      const execution = executionWorkspaces(servedByPlatform ? (callContext.localWorkspaceContext ?? null) : undefined,
+        callContext.executionId);
       if (execution) {
         if (operation === 'list') return JSON.stringify({ ok: true, ...execution });
         if (operation === 'open') {
@@ -109,8 +123,8 @@ list_workspaces, open_workspace, refresh_workspace and close_workspace remain fo
           error: 'An execution uses its prepared, pinned input directories. Use native tools to work there; adding or refreshing sources requires a new execution input. The execution lifecycle owns cleanup.' });
       }
     } catch { return JSON.stringify({ ok: false, error: 'The execution workspace manifest is invalid; do not infer directories.' }); }
-    const base = (process.env.ZIBBY_ACCOUNT_API_URL || '').replace(/\/+$/, '');
-    const token = process.env.PROJECT_API_TOKEN;
+    const base = String((servedByPlatform ? callContext.apiBase : process.env.ZIBBY_ACCOUNT_API_URL) || '').replace(/\/+$/, '');
+    const token = servedByPlatform ? callContext.bearerToken : process.env.PROJECT_API_TOKEN;
     if (!base || !token) return JSON.stringify({ ok: false, error: 'Local workspaces are unavailable in this runtime session.' });
     try {
       const response = await fetchWithDeadline(`${base}/selfhost/workspaces/${operation}`, {
