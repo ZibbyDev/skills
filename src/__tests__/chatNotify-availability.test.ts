@@ -81,6 +81,16 @@ describe('which providers a run has', () => {
     expect(chatNotifySkill.resolve({})).toBeNull();
   });
 
+  it('does not mistake a Lark Docs app credential for a connected chat provider', () => {
+    run({ WORKFLOW_CONNECTED_INTEGRATIONS: 'github,gitlab,lark_docs,penpot,vikunja', LARK_APP_ID: 'cli_docs_only' });
+    expect(availableChatProviders()).toEqual([]);
+    expect(chatNotifySkill.mcpAvailableForRun()).toBe(false);
+    expect(chatNotifySkill.tools).toEqual([]);
+    expect(chatNotifySkill.resolve({})).toBeNull();
+    run({ WORKFLOW_CONNECTED_INTEGRATIONS: '', LARK_APP_ID: 'cli_docs_only' });
+    expect(availableChatProviders()).toEqual([]);
+  });
+
   it('a run the platform did not describe is read from what it was handed (existing deploys)', () => {
     run({ SLACK_BOT_TOKEN: 'xoxb-test-not-real' });
     expect(availableChatProviders().map((p) => p.label)).toEqual(['Slack']);

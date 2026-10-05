@@ -66,16 +66,19 @@ function stated(value: unknown): Set<string> | null {
  * THE ONE DECIDER: the chat providers this run may post through.
  *
  * A provider exists for the run when the platform says so — it is on the
- * account's connected list (WORKFLOW_CONNECTED_INTEGRATIONS), or the platform
- * handed this run its credential or the operator gave it a destination. It is
- * then kept only if the agent's own allowlist admits it
+ * account's connected list (WORKFLOW_CONNECTED_INTEGRATIONS). On older runs
+ * that have no connected-list fact, use the credential or operator destination
+ * as a fallback. A credential shared with another integration (for example
+ * Lark Docs) must not override an explicit list with no Lark chat. It is then
+ * kept only if the agent's own allowlist admits it
  * (WORKFLOW_ENABLED_INTEGRATIONS; absent = every connected provider is
  * allowed, the platform's own rule for that variable).
  */
 export function availableChatProviders(env: Record<string, string | undefined> = process.env) {
-  const connected = stated(env.WORKFLOW_CONNECTED_INTEGRATIONS);
+  const connected = typeof env.WORKFLOW_CONNECTED_INTEGRATIONS === 'string'
+    ? stated(env.WORKFLOW_CONNECTED_INTEGRATIONS) || new Set<string>() : null;
   const enabled = stated(env.WORKFLOW_ENABLED_INTEGRATIONS);
-  return PROVIDERS.filter((p) => (connected?.has(p.integration) || !!env[p.credential] || !!env[p.destination])
+  return PROVIDERS.filter((p) => (connected ? connected.has(p.integration) : !!env[p.credential] || !!env[p.destination])
     && (!enabled || enabled.has(p.integration)));
 }
 
