@@ -110,10 +110,10 @@ export const chatProgressSkill: any = {
   description: 'Tell the people watching what you are doing while you work — recorded as your run\'s own line (what an office view and your manager see) and posted to the triggering chat when there is one. Fire-and-forget.',
 
   promptFragment: [
-    '## What the people watching see of your work (report_progress)',
-    'People follow this work while it runs. Until you finish, what you post with report_progress is how they know what you are doing: it becomes your run\'s own line — what an office view shows over your head and what your manager reads — and, when this run was started from a chat, it is posted there too. Your final answer reaches them only at the end.',
-    'Keep them able to answer "what is it doing, where, and is it stuck?" the way a good colleague keeps a team channel current: an update when you take on a piece of work, when something you found changes the plan, when a piece that matters is done, and at once when you are blocked — saying what blocks you and what you need. Quiet stretches of routine work need no update.',
-    `Write each one for a person who has not read the code: one or two short sentences (at most ${PROGRESS_MAX_CHARS} characters) in the language of the work you were given. Name the ticket and say what the work means for the product — what now works, what you are checking, what is stuck and what you need. Leave out how the engineering is done: branches, commits, merges, rebases, test counts, file or component names and the team's own shorthand all need decoding, and the details are on the ticket for whoever wants them. When your \`notify\` input names the chat this run came from, pass its provider and chatId. A failed post never stops your work.`,
+    '## Progress updates (report_progress)',
+    'People watching your run see only what you post with report_progress — over your head in the office view, to your manager, and in the chat that started this run. Your final answer reaches them only at the end.',
+    'Post one as soon as you start, saying what job you took on. After that: when the plan changes, when something important is done, and at once when you are blocked (say what you need). Routine work needs no update.',
+    `One or two short sentences (at most ${PROGRESS_MAX_CHARS} characters), in the language of your task, for someone who has not read the code: name the ticket and what it means for the product — no branches, commits, file names or test counts. When your \`notify\` input names a chat, pass its provider and chatId. A failed post never stops your work.`,
   ].join('\n'),
 
   resolve() {
