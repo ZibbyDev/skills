@@ -10,7 +10,7 @@
  *
  *   /ingest  → `gbrain capture --file <md> --slug <slug>`  (put_page: chunk+embed+index)
  *              deleted:true → `gbrain call delete_page`     (soft-delete)
- *   /query   → `gbrain call query {query, limit}`           (hybrid search)
+ *   /query   → `gbrain call query {query, limit, expand}`   (hybrid search; expansion opt-in)
  *   /delete  → `gbrain call delete_page {slug}`             (soft-delete)
  *
  * MULTI-TENANCY — one sidecar, many tenants, ZERO cross-tenant reach:
@@ -222,6 +222,9 @@ function withBrainLock(brainDir, fn, opts = {}) {
 
   const st = lockStateFor(brainDir);
   const waiter = { label, since: Date.now(), abandoned: false, acquired: false };
+  // The request record (if this call runs inside one) — captured NOW, not in
+  // the chain link below, so the grant time lands on the right request.
+  const rec = _reqCtx.getStore();
   st.waiters.add(waiter);
 
   const prev = _locks.get(brainDir) || Promise.resolve();
@@ -238,6 +241,7 @@ function withBrainLock(brainDir, fn, opts = {}) {
     if (waiter.abandoned) return _ABANDONED;
 
     waiter.acquired = true;
+    if (rec && !rec.acquiredAt) rec.acquiredAt = Date.now();
     if (waiter.disarm) waiter.disarm();
     st.holder = waiter;
     st.since = Date.now();
@@ -332,6 +336,56 @@ export function withEmbedding(embedEnv, fn) {
   return _embedCtx.run(embedEnv, fn);
 }
 
+// ── one log line per request ────────────────────────────────────────────────
+// Where a slow answer's time went: waiting for the brain's lock, starting a
+// `gbrain serve` (Bun load + PGLite open), or the operation itself. Before this
+// line existed a 20-second query left nothing in `docker logs` at all, and the
+// only way to tell a cold start from a slow search was to reproduce it by hand.
+// Never logs the kbId, the question or a document — the hashed brain dir only.
+const _reqCtx = new AsyncLocalStorage();
+
+/** Short, non-reversible name of a brain for logs (its hashed dir, truncated). */
+function brainTag(brainDir) {
+  const base = String(brainDir).split('/').pop() || '';
+  return base.slice(0, 11);
+}
+
+/** Add serve start-up time to the current request's record (no-op outside one). */
+function noteServeStart(ms) {
+  const rec = _reqCtx.getStore();
+  if (rec) rec.serveStartMs += ms;
+}
+
+/** Attach op-specific facts (counts, mode) to the current request's log line. */
+function noteDetail(fields) {
+  const rec = _reqCtx.getStore();
+  if (rec) Object.assign(rec.detail, fields);
+}
+
+/**
+ * Run one public operation and log one line for it:
+ *   [gbrain] query kb-0ef5be68a ok lockWaitMs=3 serveStartMs=0 opMs=412 results=3 mode=vector expand=false
+ * `lockWaitMs` is set when the lock is granted (`withBrainLock` stamps
+ * `acquiredAt`); an op that never got the lock reports its whole time as wait.
+ */
+async function observed(op, brainDir, fn) {
+  const rec = { startedAt: Date.now(), acquiredAt: 0, serveStartMs: 0, detail: {} };
+  let outcome = 'ok';
+  try {
+    return await _reqCtx.run(rec, fn);
+  } catch (e) {
+    outcome = e && e.code === 'BRAIN_LOCK_ACQUIRE_TIMEOUT' ? 'lock-timeout' : 'failed';
+    throw e;
+  } finally {
+    const end = Date.now();
+    const lockWaitMs = (rec.acquiredAt || end) - rec.startedAt;
+    const opMs = rec.acquiredAt ? end - rec.acquiredAt : 0;
+    const extra = Object.entries(rec.detail).map(([k, v]) => ` ${k}=${v}`).join('');
+    // eslint-disable-next-line no-console
+    console.log(`[gbrain] ${op} ${brainTag(brainDir)} ${outcome} lockWaitMs=${lockWaitMs} serveStartMs=${rec.serveStartMs} opMs=${opMs}${extra}`);
+  }
+}
+
 function runGbrain(brainDir, args) {
   return new Promise((resolve) => {
     const child = spawn(GBRAIN_BIN, args, {
@@ -370,23 +424,55 @@ function runGbrain(brainDir, args) {
 // so bulk ingest cost scaled O(brain-size) per doc (quadratic). Instead keep ONE
 // long-running `gbrain serve` (its MCP stdio server mode — gbrain's intended
 // server usage) per brain, holding the brain OPEN, and send each op as an MCP
-// tools/call. Idle-reaped like the container's own warm/reap model. The embedding
-// env is baked at spawn — correct, since a brain's vector dimension (model) is
-// fixed for its lifetime; a rotated key is picked up on the next reap+relaunch.
+// tools/call. Idle-reaped like the container's own warm/reap model.
+//
+// The embedding env is baked at spawn, and it decides more than the vector
+// width: gbrain's `put_page` embeds INLINE exactly when the serve process has an
+// embedding provider (operations.ts put_page → importFromContent noEmbed), and
+// `query` embeds the question with it. So a serve runs with the embedding
+// settings of the requests it serves — `getServe` restarts one whose settings
+// differ from the current request's (a rotated key, or a serve first started by
+// a request that carried none). A request with NO embedding settings (the idle
+// sweep, an operator compact) never restarts a configured serve.
 const _serves = new Map(); // brainDir → serve session
-const SERVE_IDLE_MS = Number(process.env.GBRAIN_SERVE_IDLE_MS) || 300_000;
 
-function startServe(brainDir) {
+// HOW LONG A BRAIN STAYS WARM. A cold `gbrain serve` costs a Bun load plus a
+// PGLite open of the whole brain: measured 15–20 s for a 113 MB brain on a
+// loaded 1-CPU sidecar (2026-10-08), against a caller whose whole retrieval
+// budget was 10 s. A client that reads on a schedule — a manager agent's cron
+// tick, a person working through a chat — must find its brain warm on the next
+// visit, so the default covers two visits of a 15-minute schedule. The cost is
+// memory, not CPU: ~340 MiB resident per loaded brain (measured 2026-08-07)
+// inside the sidecar's declared 2 GiB, and only brains used inside the window
+// stay loaded. An operator with many active KBs and little memory lowers it
+// (GBRAIN_SERVE_IDLE_MS, forwarded by the sidecar registry).
+const SERVE_IDLE_DEFAULT_MS = 30 * 60_000;
+const SERVE_IDLE_MS = Number(process.env.GBRAIN_SERVE_IDLE_MS) || SERVE_IDLE_DEFAULT_MS;
+
+/** A stable fingerprint of embedding settings — compared, never logged (it
+ * covers the key). Empty settings fingerprint as ''. */
+function embedSignature(embedEnv) {
+  const keys = Object.keys(embedEnv || {}).sort();
+  if (!keys.length) return '';
+  return sha256(JSON.stringify(keys.map((k) => [k, String(embedEnv[k])])));
+}
+
+function startServe(brainDir, embedEnv = _embedCtx.getStore() || {}) {
   const proc = spawn(GBRAIN_BIN, ['serve'], {
     env: {
       ...process.env,
-      ...(_embedCtx.getStore() || {}),
+      ...embedEnv,
       GBRAIN_HOME: brainDir,
       GBRAIN_NO_UPDATE_CHECK: '1',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  const s = { proc, pending: new Map(), buf: '', seq: 1, lastUsed: Date.now() };
+  const s = {
+    proc, pending: new Map(), buf: '', seq: 1, lastUsed: Date.now(),
+    // Kept so a serve this adapter had to stop (an embed pass, a vacuum) can be
+    // brought back with the SAME settings, by a caller that carries none.
+    embedEnv, embedSig: embedSignature(embedEnv),
+  };
   proc.stdout.on('data', (d) => {
     s.buf += d;
     let idx;
@@ -404,6 +490,10 @@ function startServe(brainDir) {
     }
   });
   proc.stderr.on('data', () => {}); // gbrain logs to stderr; ignore
+  // A write into a serve that is exiting surfaces as EPIPE on its stdin; the
+  // 'exit' handler below rejects whatever was pending, so this only keeps the
+  // error from becoming an uncaught exception.
+  proc.stdin.on('error', () => {});
   const fail = (e) => { for (const { reject, timer } of s.pending.values()) { clearTimeout(timer); reject(e); } s.pending.clear(); if (_serves.get(brainDir) === s) _serves.delete(brainDir); };
   proc.on('exit', () => fail(new Error('gbrain serve exited')));
   proc.on('error', (e) => fail(new Error(`gbrain serve error: ${e.message}`)));
@@ -422,12 +512,71 @@ function rpc(s, method, params) {
   });
 }
 
+function serveAlive(s) {
+  return !!s && s.proc.exitCode == null && !s.proc.killed;
+}
+
 async function getServe(brainDir) {
   let s = _serves.get(brainDir);
-  if (!s || s.proc.exitCode != null || s.proc.killed) { s = startServe(brainDir); _serves.set(brainDir, s); }
-  await s.initialized;
+  const want = _embedCtx.getStore();
+  if (serveAlive(s) && want && Object.keys(want).length && s.embedSig !== embedSignature(want)) {
+    // This request's embedding settings differ from the serve's: restart it, or
+    // its writes are stored without vectors and its queries searched without
+    // them. Caller holds the brain lock (every serveCall does).
+    await stopServe(brainDir);
+    s = null;
+  }
+  if (!serveAlive(s)) { s = startServe(brainDir); _serves.set(brainDir, s); }
+  if (!s.ready) {
+    // A serve that is not answering yet — its Bun load and PGLite open are this
+    // request's cost, and the request log says so (`serveStartMs`).
+    const t0 = Date.now();
+    await s.initialized;
+    s.ready = true;
+    noteServeStart(Date.now() - t0);
+  }
   s.lastUsed = Date.now();
   return s;
+}
+
+/**
+ * Run `fn` with this brain's serve released — for the steps that need the
+ * single-writer PGLite file to themselves (a CLI embed pass, a direct-store
+ * vacuum) — and, if a serve was running, BRING IT BACK before returning, with
+ * the settings it had. Without the second half every such step left the brain
+ * cold, and the NEXT reader paid the whole restart inside its own budget: an
+ * agent that writes at the end of every tick met a cold brain at the start of
+ * every tick (2026-10-08). The restart happens here, inside the same lock and
+ * on the writer's time, where nobody is waiting on an answer.
+ *
+ * PRECONDITION: the caller holds this brain's lock.
+ */
+async function withServeReleased(brainDir, fn) {
+  const before = _serves.get(brainDir);
+  const restoreEnv = serveAlive(before) ? before.embedEnv : null;
+  await stopServe(brainDir);
+  try {
+    return await fn();
+  } finally {
+    if (restoreEnv) await bringServeBack(brainDir, restoreEnv);
+  }
+}
+
+/** Start this brain's serve with `embedEnv` and wait until it answers. Never
+ * throws: a serve that will not come back is started lazily by the next
+ * request, as it always could be. PRECONDITION: the caller holds the lock. */
+async function bringServeBack(brainDir, embedEnv) {
+  try {
+    const s = startServe(brainDir, embedEnv);
+    _serves.set(brainDir, s);
+    const t0 = Date.now();
+    await s.initialized;
+    s.ready = true;
+    noteServeStart(Date.now() - t0);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[gbrain] could not bring serve back for ${brainTag(brainDir)}: ${String((e && e.message) || e).slice(0, 200)}`);
+  }
 }
 
 // How long to let `gbrain serve` shut down cleanly before SIGKILL.
@@ -475,7 +624,14 @@ function stopServe(brainDir) {
 // Call a gbrain MCP tool on the brain's persistent serve process. Returns the
 // tool's JSON payload (MCP wraps it as content[0].text). Throws on tool error.
 async function serveCall(brainDir, tool, args) {
-  const s = await getServe(brainDir);
+  return callOnServe(await getServe(brainDir), tool, args);
+}
+
+/** The same call on a serve session already in hand (see `query`, which takes
+ * its session under the lock and searches after releasing it). A session that
+ * has already exited fails at once rather than writing into a dead pipe. */
+async function callOnServe(s, tool, args) {
+  if (!serveAlive(s)) throw new Error('gbrain serve exited');
   s.lastUsed = Date.now();
   const res = await rpc(s, 'tools/call', { name: tool, arguments: args || {} });
   const text = res && res.content && res.content[0] && res.content[0].text;
@@ -620,6 +776,9 @@ function parseGbrainJson(stdout) {
 
 // ── brain lifecycle ──────────────────────────────────────────────────────────
 const _initialized = new Set();
+// Brains whose pre-existing embedding debt this process has already swept (see
+// `ingest`). Per process on purpose: a restarted sidecar sweeps once again.
+const _embedDebtSwept = new Set();
 
 async function pathExists(p) {
   try { await access(p); return true; } catch { return false; }
@@ -820,7 +979,7 @@ async function narrowNewBrainToHalfvec(brainDir) {
  */
 export async function drop(kbId) {
   const brainDir = brainDirFor(kbId);
-  return withBrainLock(brainDir, async () => {
+  return observed('drop', brainDir, () => withBrainLock(brainDir, async () => {
     const existed = await pathExists(brainDir);
     // RELEASE THE PERSISTENT SERVE FIRST. `gbrain serve` holds the whole PGLite
     // brain OPEN, and unlinking a file an fd is still on does not take the data
@@ -834,10 +993,11 @@ export async function drop(kbId) {
     if (existed) await rm(brainDir, { recursive: true, force: true });
     _initialized.delete(brainDir);
     _dirty.delete(brainDir);
+    _embedDebtSwept.delete(brainDir);
     // eslint-disable-next-line no-console
     console.log(`[gbrain] drop ${existed ? 'removed' : 'no-op (absent)'}: ${brainDir}`);
     return { dropped: existed };
-  }, { label: 'drop' });
+  }, { label: 'drop' }));
 }
 
 /**
@@ -907,11 +1067,11 @@ export async function compact(kbId, { olderThanHours = 72, vacuum = 'light', hal
   }
   const brainDir = brainDirFor(kbId);
   if (!(await pathExists(brainDir))) return { exists: false, reclaimedBytes: 0 };
-  return withBrainLock(
+  return observed('compact', brainDir, () => withBrainLock(
     brainDir,
-    () => reclaim(brainDir, { olderThanHours, mode, halfvec, label: 'compact' }),
+    () => reclaim(brainDir, { olderThanHours, mode, halfvec, label: 'compact', keepWarm: true }),
     { label: 'compact' },
-  );
+  ));
 }
 
 /**
@@ -922,9 +1082,15 @@ export async function compact(kbId, { olderThanHours = 72, vacuum = 'light', hal
  * PRECONDITION: the caller holds this brain's lock and has verified the brain
  * exists. Both callers do; nothing else may call it.
  */
-async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label }) {
+async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label, keepWarm = false }) {
   {
     const beforeBytes = await dirSizeBytes(brainDir);
+    // An operator's compact leaves a brain that was being used as warm as it
+    // found it (`keepWarm`); the idle sweep does not — releasing the brain is
+    // the point of that pass. Judged BEFORE the purge, which itself starts a
+    // serve when none is running.
+    const warmBefore = keepWarm ? _serves.get(brainDir) : null;
+    const restoreEnv = serveAlive(warmBefore) ? warmBefore.embedEnv : null;
 
     // 1. Hard-delete through gbrain itself. purge_deleted_pages is marked
     //    admin+localOnly, but BOTH of those filters live in serve-http.ts —
@@ -936,7 +1102,8 @@ async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label 
 
     // 2. VACUUM needs the single-writer PGLite lock, which the persistent serve
     //    holds. Drop it first — AWAITED, so the lock is genuinely released before
-    //    we open the store ourselves — and the next serveCall starts a fresh one.
+    //    we open the store ourselves — and it comes back below when it was
+    //    running before (`keepWarm`), or the next serveCall starts a fresh one.
     await stopServe(brainDir);
 
     // The work below IS the debt this brain owed. Clearing the marker here (not
@@ -961,6 +1128,7 @@ async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label 
         vacuumError = String((e && e.message) || e).slice(0, 300);
       }
     }
+    if (restoreEnv) await bringServeBack(brainDir, restoreEnv);
 
     const afterBytes = await dirSizeBytes(brainDir);
     // Signed on purpose, and measured over the whole DIRECTORY rather than the
@@ -1225,7 +1393,7 @@ async function upsertDoc(brainDir, slug, markdown) {
 /** POST /ingest → { upserted, deleted, chunks } */
 export async function ingest(kbId, docs) {
   const brainDir = brainDirFor(kbId);
-  return withBrainLock(brainDir, async () => {
+  return observed('ingest', brainDir, () => withBrainLock(brainDir, async () => {
     await ensureBrain(brainDir);
     const map = await loadMap(brainDir);
     let upserted = 0;
@@ -1247,28 +1415,37 @@ export async function ingest(kbId, docs) {
     }
     await saveMap(brainDir, map);
 
-    // EMBED. `put_page` writes the page and its keyword index — it does NOT
-    // generate vectors; in GBrain that is a separate `gbrain embed` pass. Skip
-    // it and a brain with embeddings ON and a live key still holds ZERO vectors,
-    // so every search silently degrades to keyword-only: the exact words in the
-    // document hit, a paraphrase of them returns nothing. That is precisely how
-    // an 80-document corpus ended up unsearchable by meaning while looking fine.
-    // Once per BATCH (not per doc) and over --stale, so it costs one pass over
-    // what this batch actually changed. `serve` holds the single-writer PGLite
-    // lock, so it has to stand down for the CLI — the next query restarts it.
-    if (upserted > 0 && embeddingsEnabled()) {
-      await stopServe(brainDir);
-      const r = await runGbrain(brainDir, ['embed', '--stale']);
+    // EMBED. The documents of THIS batch were embedded inline: `put_page` runs
+    // on a serve that carries this request's embedding settings (getServe
+    // restarts one that does not), and gbrain embeds a page inside put_page
+    // whenever its process has a provider — an embedding failure THROWS out of
+    // put_page rather than storing the page without vectors. Measured on a copy
+    // of a real 113 MB brain (2026-10-08): `embed --stale --dry-run` found 0
+    // stale chunks after every inline write.
+    //
+    // What the inline path cannot cover is DEBT from before it: chunks stored by
+    // an older adapter, or by a serve that had no key. Without vectors they are
+    // found by exact words and never by meaning — which is how an 80-document
+    // corpus once ended up unsearchable by meaning while looking fine. So the
+    // first write to a brain in this process still runs gbrain's own `embed
+    // --stale` sweep, once; later writes skip it. That pass needs the
+    // single-writer PGLite file, so the serve stands down for it and comes back
+    // warm afterwards (withServeReleased) — it used to stay down until the next
+    // reader paid ~15 s to restart it inside its own budget.
+    if (upserted > 0 && embeddingsEnabled() && !_embedDebtSwept.has(brainDir)) {
+      const r = await withServeReleased(brainDir, () => runGbrain(brainDir, ['embed', '--stale']));
       if (r.code !== 0) {
         // Non-fatal: the documents ARE stored and keyword-searchable. Say so
         // loudly rather than failing the ingest — but never pretend it worked.
+        // Not marked swept, so the next write tries again.
         // eslint-disable-next-line no-console
-        console.warn(`[gbrain] embed pass FAILED (code ${r.code}) — documents are stored but NOT vector-searchable: ${(r.stderr || r.stdout || '').slice(0, 300)}`);
+        console.warn(`[gbrain] embed --stale sweep FAILED (code ${r.code}) — older chunks may lack vectors: ${(r.stderr || r.stdout || '').slice(0, 300)}`);
       } else {
-        // eslint-disable-next-line no-console
-        console.log(`[gbrain] embed --stale done for ${upserted} upserted doc(s)`);
+        _embedDebtSwept.add(brainDir);
+        noteDetail({ embedSweep: 'done' });
       }
     }
+    noteDetail({ upserted, deleted });
 
     // Every upsert leaves the old row version behind and every delete leaves the
     // whole page behind, so this batch is exactly the debt the idle sweep pays.
@@ -1281,24 +1458,58 @@ export async function ingest(kbId, docs) {
     // — the old contract gave no way to tell vector from lexical, which is how a
     // whole corpus got indexed the wrong way without a single warning.
     return { upserted, deleted, chunks, ...(await embeddingState(brainDir)) };
-  }, { label: 'ingest' });
+  }, { label: 'ingest' }));
 }
 
-/** POST /query → { results: [{ sourceId, chunk, score }] } */
-export async function query(kbId, queryText, topK) {
+/**
+ * POST /query → { results: [{ sourceId, chunk, score }] }
+ *
+ * `expand` — gbrain's multi-query expansion — is OFF unless the caller asks
+ * for it. gbrain defaults it ON (operations.ts `query`: `p.expand !== false`),
+ * and expansion is a remote chat-model call plus extra embeddings on EVERY
+ * query: measured 1.5–3 s per warm query, against a manager that asks one
+ * question per ticket on its board (11 on the tick that timed out) inside a 10 s
+ * budget. Without it the query is still gbrain's full hybrid retrieval (vector
+ * + BM25 + fusion) over the caller's own words; the retrieval eval behind that
+ * caller measured the query's phrasing irrelevant to accuracy
+ * (board-runner/evals/results/context-strategies-2026-08-24.md). A caller that
+ * wants the paraphrases pays for them by asking: `expand: true`.
+ */
+export async function query(kbId, queryText, topK, { expand = false } = {}) {
   const brainDir = brainDirFor(kbId);
-  return withBrainLock(brainDir, async () => {
-    // A READ NEVER PROVISIONS. A brain that was never written has nothing to
-    // retrieve, so answer empty at once instead of paying `gbrain init --pglite`
-    // (tens of seconds cold) inside the caller's retrieval budget — MAGNUM's
-    // first tick after deploy timed out its 10s KB window exactly here, on a
-    // brain its own `ingest` created seconds later. Creation stays with the
-    // writers (ingest/delete).
-    if (!(await brainExists(brainDir))) {
-      return { results: [], mode: embeddingsEnabled() ? 'vector' : 'lexical', stale: false };
-    }
-    await ensureBrain(brainDir);
-    const map = await loadMap(brainDir);
+  const expandOn = expand === true;
+  return observed('query', brainDir, async () => {
+    noteDetail({ expand: expandOn });
+    // UNDER THE LOCK: everything that decides WHICH process answers — whether
+    // the brain exists, its slug map, and a live serve with this request's
+    // embedding settings (getServe may start or restart one). Writers, the
+    // embed sweep, compact, drop and the idle sweep all hold this lock while
+    // they stop or replace the serve, so a reader never picks up a serve that
+    // is being taken away from it.
+    const prep = await withBrainLock(brainDir, async () => {
+      // A READ NEVER PROVISIONS. A brain that was never written has nothing to
+      // retrieve, so answer empty at once instead of paying `gbrain init --pglite`
+      // (tens of seconds cold) inside the caller's retrieval budget — MAGNUM's
+      // first tick after deploy timed out its 10s KB window exactly here, on a
+      // brain its own `ingest` created seconds later. Creation stays with the
+      // writers (ingest/delete).
+      if (!(await brainExists(brainDir))) {
+        return { empty: { results: [], mode: embeddingsEnabled() ? 'vector' : 'lexical', stale: false } };
+      }
+      await ensureBrain(brainDir);
+      return { map: await loadMap(brainDir), serve: await getServe(brainDir) };
+    }, { label: 'query' });
+    if (prep.empty) return prep.empty;
+
+    // OUTSIDE THE LOCK: the search itself, on the serve chosen above. Reads of
+    // one brain therefore overlap — a caller asking one question per ticket on
+    // its board waits for the slowest, not for the sum (each query spends most
+    // of its time on the embedding provider's round trip). It stays inside ONE
+    // process, so PGLite's single-writer rule is untouched: the CLI and the
+    // direct-store opens only ever run after `stopServe` has awaited this
+    // process's exit, and a search in flight at that moment fails ('gbrain
+    // serve exited') rather than racing them.
+    //
     // FLOOR THE FETCH DEPTH. GBrain's `limit` is not "top-N of one ranking" —
     // it also sets each retrieval lane's candidate depth before RRF fusion, so
     // a small limit LOSES documents outright: the same doc that ranks #1 at
@@ -1307,23 +1518,26 @@ export async function query(kbId, queryText, topK) {
     // at a depth where fusion behaves, then slice to what the caller asked for:
     // same contract, recall restored.
     const fetchK = Math.max(Number(topK) || 8, 8);
-    const out = await serveCall(brainDir, 'query', { query: queryText, limit: fetchK });
+    const out = await callOnServe(prep.serve, 'query', { query: queryText, limit: fetchK, expand: expandOn });
     const arr = Array.isArray(out) ? out
       : (out && Array.isArray(out.results) ? out.results
         : (out && Array.isArray(out.hits) ? out.hits : []));
+    const { map } = prep;
     const results = arr.slice(0, Number(topK) || fetchK).map((hit) => ({
       sourceId: map[hit.slug] || hit.slug,
       chunk: hit.chunk_text || hit.chunk || hit.text || '',
       score: typeof hit.score === 'number' ? hit.score : 0,
     }));
-    return { results, ...(await embeddingState(brainDir)) };
-  }, { label: 'query' });
+    const state = await embeddingState(brainDir);
+    noteDetail({ results: results.length, mode: state.mode });
+    return { results, ...state };
+  });
 }
 
 /** POST /delete → { deleted } */
 export async function del(kbId, sourceIds) {
   const brainDir = brainDirFor(kbId);
-  return withBrainLock(brainDir, async () => {
+  return observed('delete', brainDir, () => withBrainLock(brainDir, async () => {
     await ensureBrain(brainDir);
     const map = await loadMap(brainDir);
     let deleted = 0;
@@ -1337,8 +1551,9 @@ export async function del(kbId, sourceIds) {
     // A soft-deleted page keeps its chunks, vectors and index entries until
     // something hard-purges it — this is the write that most needs the sweep.
     markDirty(brainDir, deleted);
+    noteDetail({ deleted });
     return { deleted };
-  }, { label: 'delete' });
+  }, { label: 'delete' }));
 }
 
 /**

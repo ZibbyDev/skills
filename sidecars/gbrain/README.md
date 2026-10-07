@@ -22,11 +22,31 @@ adapter (`brain.js`) translates each REST call into a real GBrain CLI operation:
 |---|---|---|
 | `POST /ingest` (upsert) | `put_page` (chunk + embed + index) | `gbrain capture --file <md> --slug <slug>` |
 | `POST /ingest` (`deleted:true`) | `delete_page` (soft-delete) | `gbrain call delete_page {slug}` |
-| `POST /query` | hybrid search | `gbrain call query {query,limit}` |
+| `POST /query` | hybrid search (query expansion only with `expand:true`) | `gbrain call query {query,limit,expand}` |
 | `POST /delete` | `delete_page` (soft-delete) | `gbrain call delete_page {slug}` |
 
 The adapter also issues `restore_page` before an upsert so a previously deleted
 `sourceId` comes back live when re-ingested.
+
+### Staying warm
+
+All of the above runs on ONE long-lived `gbrain serve` per brain (a cold one
+costs a Bun load + a PGLite open of the whole brain — 15–20 s for a 113 MB brain
+on a loaded 1-CPU sidecar). The adapter keeps it warm for its readers:
+
+- `put_page` embeds inline on that serve (the serve runs with the request's
+  embedding settings and is restarted when they differ), so a write no longer
+  stops it for a CLI `embed` pass. The CLI `embed --stale` sweep runs once per
+  brain per process, for chunks stored before, and the serve comes back warm
+  after it. An operator `compact` also brings back a serve that was running.
+- A brain stays loaded for `GBRAIN_SERVE_IDLE_MS` (30 min) after its last use.
+- `/query` searches OUTSIDE the brain lock, on the serve picked under it, so
+  questions about one brain overlap; writes still have the brain to themselves.
+- `/query` does not run gbrain's query expansion (a remote chat-model call per
+  query) unless the body says `expand: true`.
+
+Every request logs one line — `[gbrain] <op> <brain> ok lockWaitMs= serveStartMs= opMs= …`
+— naming the hashed brain dir, never the kbId, question or content.
 
 ### Multi-tenant isolation
 
@@ -213,7 +233,7 @@ cheerfully while every other op on the brain was wedged.
 | `SIDECAR_AUTH_TOKEN` | *(unset)* | If set, Bearer token required on POST routes |
 | `GBRAIN_DATA_ROOT` | `/data` | Root under which per-kbId brains live |
 | `GBRAIN_OP_TIMEOUT_MS` | `120000` | Per-operation subprocess timeout |
-| `GBRAIN_SERVE_IDLE_MS` | `300000` | How long a brain must be untouched before it is reclaimed + released |
+| `GBRAIN_SERVE_IDLE_MS` | `1800000` | How long a brain stays loaded (warm) after its last use before it is reclaimed + released. Default covers two visits of a 15-minute schedule; ~340 MiB per loaded brain |
 | `GBRAIN_SERVE_STOP_TIMEOUT_MS` | `5000` | Grace period before a `gbrain serve` that won't stop is SIGKILLed |
 | `LOCK_ACQUIRE_TIMEOUT_MS` | `120000` | How long a request will WAIT for a turn on a brain's single-writer lock before giving up. Bounds the QUEUE only — an operation that has already started is never cut short |
 | `LOCK_HOLD_WARN_MS` | `300000` | A lock held longer than this logs one warn naming the brain, the op and the queue depth, and counts toward `GET /health`'s `stuckBrains` |

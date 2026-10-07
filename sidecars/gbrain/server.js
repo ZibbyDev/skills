@@ -8,7 +8,7 @@
  *
  *   POST /ingest  { kbId, docs:[{ sourceId, markdown, deleted? }] }
  *                 → { ok, upserted, deleted, chunks }
- *   POST /query   { kbId, query, topK }  → { ok, results:[{ sourceId, chunk, score }] }
+ *   POST /query   { kbId, query, topK, expand? } → { ok, results:[{ sourceId, chunk, score }] }  (expand: opt-in query expansion, default off)
  *   POST /delete  { kbId, sourceIds:[...] } → { ok, deleted }
  *   POST /stat    { kbId } → { ok, exists, sizeBytes, docs, lock }
  *   POST /drop    { kbId, confirm:true } → { ok, dropped }
@@ -172,7 +172,10 @@ async function handleQuery(body) {
   if (!kbId) return { status: 400, body: { ok: false, error: 'kbId is required' } };
   if (!q) return { status: 400, body: { ok: false, error: 'query is required' } };
   const topK = Number.isInteger(body?.topK) && body.topK > 0 ? Math.min(body.topK, 50) : 8;
-  const r = await withEmbedding(embedEnvFrom(body), () => query(kbId, q, topK));
+  // Query expansion (a remote model call per query) only when asked — see
+  // brain.js `query`. Anything but a literal `true` is the default: off.
+  const expand = body?.expand === true;
+  const r = await withEmbedding(embedEnvFrom(body), () => query(kbId, q, topK, { expand }));
   // `mode` says how this request actually searched ('vector' = hybrid
   // vector+BM25, 'lexical' = keyword only). A vector brain without a key still
   // has its BM25 index, so it serves lexical results without being stale.
