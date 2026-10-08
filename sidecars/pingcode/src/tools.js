@@ -1,5 +1,8 @@
 import fs from 'node:fs';
 import { z } from 'zod';
+// Same package as the fetch in pingcode.js: that fetch only recognises ITS OWN
+// FormData and sends Node's global one as plain text with no multipart header.
+import { FormData } from 'undici';
 import { getPingCodeOAuth } from './pingcode.js';
 
 // Generated from PingCode's REST API docs (scripts/parse-api.mjs). Each entry is
@@ -14,8 +17,32 @@ const API_SPEC = JSON.parse(
 // and the MCP client serializes structured values to a JSON *string* — so e.g.
 // `properties` arrives as "{...}" and PingCode rejects it ("必须是一个 object").
 // Contents stay permissive (z.any()) since the docs only describe sub-fields.
+// A PingCode `File` parameter is a real upload (multipart). An MCP call can only
+// carry JSON, so the file travels as base64 and is turned into a multipart part
+// in buildForm().
+const FILE_SCHEMA = z.object({
+  filename: z.string().describe('File name including extension, e.g. "screen.png"'),
+  content_base64: z.string().describe('The file bytes, base64-encoded'),
+  content_type: z.string().optional().describe('MIME type, e.g. "image/png"; inferred by PingCode when omitted'),
+}).describe('File to upload');
+
+export function buildForm(fields, files) {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined || v === null) continue;
+    form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  }
+  for (const [k, f] of Object.entries(files)) {
+    const bytes = Buffer.from(String(f.content_base64 || ''), 'base64');
+    if (!bytes.length) throw Object.assign(new Error(`${k}.content_base64 is empty or not valid base64`), { status: 400 });
+    form.append(k, new Blob([bytes], { type: f.content_type || 'application/octet-stream' }), f.filename);
+  }
+  return form;
+}
+
 const zodFor = (type) => {
   const t = String(type || '').toLowerCase();
+  if (t === 'file') return FILE_SCHEMA;
   if (t.endsWith('[]') || t.startsWith('array')) return z.array(z.any()); // String[], Object[]
   if (t === 'object') return z.record(z.any());                           // nested JSON object
   if (/(number|int|float|timestamp)/.test(t)) return z.number();
@@ -170,7 +197,9 @@ export function registerTools(server, ctx) {
     if (groupFilter.length && !groupFilter.includes(spec.group)) continue;
 
     const shape = {};
+    const isUpload = spec.params.some((q) => String(q.type).toLowerCase() === 'file');
     for (const p of spec.params) {
+      if (isUpload && p.name === 'content-type') continue; // header, set by the multipart body
       let v = zodFor(p.type);
       if (p.desc) v = v.describe(p.desc);
       if (!p.required) v = v.optional();
@@ -196,9 +225,14 @@ export function registerTools(server, ctx) {
       let path = spec.path;
       const query = {};
       const body = {};
+      const files = {};
       for (const p of spec.params) {
         const val = args[p.name];
         if (val === undefined) continue;
+        if (String(p.type).toLowerCase() === 'file') { files[p.name] = val; continue; }
+        // "content-type" in the docs is a request header, not a field; for an
+        // upload fetch sets it (with the boundary) itself.
+        if (p.name === 'content-type' && spec.params.some((q) => String(q.type).toLowerCase() === 'file')) continue;
         if (p.in === 'path') path = path.replace(`{${p.name}}`, encodeURIComponent(String(val)));
         else if (p.in === 'query') query[p.name] = val;
         else body[p.name] = val;
@@ -210,7 +244,8 @@ export function registerTools(server, ctx) {
       }
       const opts = {};
       if (Object.keys(query).length) opts.query = query;
-      if (Object.keys(body).length) opts.body = body;
+      if (Object.keys(files).length) opts.form = buildForm(body, files);
+      else if (Object.keys(body).length) opts.body = body;
       return call(spec.method, path, opts);
     }, ctx));
     registered++;

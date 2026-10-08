@@ -365,7 +365,7 @@ export class PingCodeOAuth {
     return (await this.slotFor(mcpToken)).ok;
   }
 
-  async request(mcpToken, method, p, { query, body } = {}) {
+  async request(mcpToken, method, p, { query, body, form } = {}) {
     const accessToken = await this.getValidAccessToken(mcpToken);
     if (!accessToken) {
       const err = new Error('PingCode authorization required');
@@ -385,9 +385,10 @@ export class PingCodeOAuth {
       method,
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        // A multipart body sets its own Content-Type (with the boundary).
+        ...(body && !form ? { 'Content-Type': 'application/json' } : {}),
       },
-      ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(form ? { body: form } : body ? { body: JSON.stringify(body) } : {}),
     });
     const text = await res.text();
     let parsed;
