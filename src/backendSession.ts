@@ -29,6 +29,29 @@ export const BACKEND_SESSION_KEYS = Object.freeze([
   'ZIBBY_ENV',
 ] as const);
 
+/**
+ * Every environment key a skill's declaration entitles ITS OWN CODE to,
+ * however that code is run: its declared envKeys plus, for a backend-calling
+ * skill, the session keys.
+ *
+ * The MCP-child path gets the session keys through the wrapped resolve()
+ * below, so a resolve()-only skill (agent-messaging, artifact, kv-memory,
+ * graph-memory, …) carries NO envKeys array at all. A caller that runs the
+ * skill's handler in a process of its own and hands it only declared keys (the
+ * self-host run tool worker) must read THIS, never `envKeys` alone — read on
+ * its own, a missing list looks like "needs nothing" and the handler starts
+ * with no backend credential (2026-10-08: every such tool in a run answered
+ * "No backend credential (PROJECT_API_TOKEN)").
+ */
+export function declaredEnvKeys(skill: any): string[] {
+  const keys: string[] = Array.isArray(skill?.envKeys)
+    ? skill.envKeys.filter((key: unknown) => typeof key === 'string') : [];
+  if (skill?.callsBackend === true) {
+    for (const key of BACKEND_SESSION_KEYS) if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
 // Wrap-state tracked OUT-OF-BAND (a WeakMap, never a property write) so a
 // FROZEN skill object (some skills Object.freeze their export) neither throws
 // nor double-wraps; original → its enforced version, so a repeat call returns

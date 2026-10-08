@@ -53,7 +53,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { withBackendSessionEnv } from '../backendSession';
+import { withBackendSessionEnv, declaredEnvKeys, BACKEND_SESSION_KEYS } from '../backendSession';
 
 const SESSION_KEYS = ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'] as const;
 
@@ -248,6 +248,30 @@ describe('backend-calling skills forward the session env to their MCP child', ()
       }
       // Neither resolve() nor command → in-process only → full run env → exempt.
     }
+  });
+
+  // The THIRD way a skill's code runs: its handler called in a process of its
+  // own that is handed only declared keys (the self-host run tool worker, which
+  // clears the environment first). A resolve()-only skill has no envKeys array,
+  // so that caller reads declaredEnvKeys — and it must name the session keys for
+  // every backend-calling skill, list or no list.
+  it.each(backendCalling)('%s: declaredEnvKeys names the session keys for a handler run on its own', async (file) => {
+    const mod = await import(`../${file.replace(/\.ts$/, '')}`);
+    for (const [exportName, skill] of skillExports(mod)) {
+      if (typeof skill.handleToolCall !== 'function') continue;
+      const keys = declaredEnvKeys(withBackendSessionEnv(skill));
+      for (const key of BACKEND_SESSION_KEYS) {
+        expect(keys, `${file} ${exportName}: a handler run outside its MCP child must be handed ${key}`).toContain(key);
+      }
+      for (const key of (Array.isArray(skill.envKeys) ? skill.envKeys : [])) expect(keys).toContain(key);
+    }
+  });
+
+  it('declaredEnvKeys adds nothing to a skill that does not call the backend', () => {
+    expect(declaredEnvKeys({ id: 'x', envKeys: ['A'] })).toEqual(['A']);
+    expect(declaredEnvKeys({ id: 'x' })).toEqual([]);
+    expect(declaredEnvKeys({ id: 'x', callsBackend: true })).toEqual([...BACKEND_SESSION_KEYS]);
+    expect(SESSION_KEYS).toEqual([...BACKEND_SESSION_KEYS]);
   });
 
   it('known child-spawning positives actually spawn a child here (probe check)', () => {

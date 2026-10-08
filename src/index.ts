@@ -152,5 +152,8 @@ export {
 // lets that call site exist without a second copy of the rules.
 export { checkRenderedReport, REPORT_CODES } from './reportCheck.js';
 export { skill, functionSkill } from './function-skill.js';
+// The backend-session contract, for callers that run a skill's handler in a
+// process of their own (see backendSession.ts declaredEnvKeys).
+export { BACKEND_SESSION_KEYS, declaredEnvKeys } from './backendSession.js';
 export { registerSkill, getSkill, hasSkill, getAllSkills, listSkillIds } from '@zibby/agent-workflow';
 export { INTEGRATIONS, INTEGRATION_REGISTRY } from './integrations.js';
