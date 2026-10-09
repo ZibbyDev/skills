@@ -12,6 +12,15 @@ describe('local workspace in the shared MCP process', () => {
     expect(answer.workspaces[0].directory).toBe(`/workspace/local-project/${executionId}`);
   });
 
+  it('hands the agent the platform notice about its workspace list (e.g. more repositories exist than are listed)', async () => {
+    const notice = 'w holds more than 16 repositories; the first 16 are listed.';
+    const answer = JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces', {},
+      { executionId, localWorkspaceContext: { ...localWorkspaceContext, notice } }));
+    expect(answer.notice).toBe(notice);
+    const plain = JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces', {}, { executionId, localWorkspaceContext }));
+    expect(plain.notice).toBeUndefined();
+  });
+
   it('rejects a context for another execution', async () => {
     const answer = JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces', {},
       { executionId: '22222222-2222-4222-8222-222222222222', localWorkspaceContext }));

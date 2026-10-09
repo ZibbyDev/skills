@@ -44,6 +44,8 @@ function executionWorkspaces(value?: string | object, expectedExecutionId?: stri
     || workspaces.some(item => !EXECUTION_DIRECTORY.test(item.directory || '')
       || !validExecutionRevision(item))) throw new Error('Invalid execution workspace context');
   return { workspaces, executionId: context.executionId, accessMode: 'native-tools',
+    // A fact the platform tells the agent about this run's list (e.g. more repositories exist than are listed).
+    ...(typeof context.notice === 'string' && context.notice ? { notice: context.notice } : {}),
     instruction: 'These directories are already in YOUR execution container. Use your existing file, search and command tools directly. No additional clone, remote sandbox or model delegation is needed.' };
 }
 
