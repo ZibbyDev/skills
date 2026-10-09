@@ -726,7 +726,12 @@ export async function sweepIdleBrains(now = Date.now()) {
       // brain's idleness. Stand down rather than reaching into a live store.
       if (s.lastUsed !== lastUsedAtQueue) return { action: 'skipped', reason: 'became-active' };
       if (!(await pathExists(brainDir))) { await stopServe(brainDir); return { action: 'skipped', reason: 'gone' }; }
-      const res = await reclaim(brainDir, { olderThanHours, mode: 'light', label: 'auto-reclaim' });
+      // keepWarm: a brain that was open stays open. The pass used to release it,
+      // so the reader's next visit paid the 15-20 s cold start inside its 10 s
+      // budget. The restored serve gets a fresh idle window and is reaped by
+      // the next sweep if nobody comes (`unchanged`), so memory is only held
+      // one more window.
+      const res = await reclaim(brainDir, { olderThanHours, mode: 'light', label: 'auto-reclaim', keepWarm: true });
       return { action: 'reclaimed', purgedCount: res.purgedCount, vacuumMode: res.vacuumMode, reclaimedBytes: res.reclaimedBytes };
     }, {
       label: 'auto-reclaim',
@@ -737,10 +742,10 @@ export async function sweepIdleBrains(now = Date.now()) {
       // other brain too — one wedged tenant froze all housekeeping.
       acquireTimeoutMs: Math.min(LOCK_ACQUIRE_TIMEOUT_MS, 10_000),
     }).catch((e) => ({ action: 'failed', reason: String((e && e.message) || e).slice(0, 200) }));
-    // `reclaim` already released the serve (the vacuum needs the lock it holds);
-    // this settles the skip/fail paths, and is a resolved no-op otherwise.
+    // `reclaim` brought the serve back (keepWarm); the skip/fail paths still
+    // settle here. A reclaimed brain keeps its fresh serve.
     // eslint-disable-next-line no-await-in-loop
-    await stopServe(brainDir);
+    if (r.action !== 'reclaimed') await stopServe(brainDir);
     out.push({ brainDir, ...r });
   }
   return out;
@@ -1085,10 +1090,9 @@ export async function compact(kbId, { olderThanHours = 72, vacuum = 'light', hal
 async function reclaim(brainDir, { olderThanHours, mode, halfvec = false, label, keepWarm = false }) {
   {
     const beforeBytes = await dirSizeBytes(brainDir);
-    // An operator's compact leaves a brain that was being used as warm as it
-    // found it (`keepWarm`); the idle sweep does not — releasing the brain is
-    // the point of that pass. Judged BEFORE the purge, which itself starts a
-    // serve when none is running.
+    // `keepWarm` (the operator's compact AND the idle sweep) leaves a brain that
+    // was open as open as it found it. Judged BEFORE the purge, which itself
+    // starts a serve when none is running.
     const warmBefore = keepWarm ? _serves.get(brainDir) : null;
     const restoreEnv = serveAlive(warmBefore) ? warmBefore.embedEnv : null;
 

@@ -31,7 +31,7 @@ delete process.env.GBRAIN_SERVE_IDLE_MS;
 delete process.env.OPENAI_API_KEY;
 
 const {
-  ingest, query, compact, drop, withEmbedding, _internal,
+  ingest, query, compact, drop, withEmbedding, sweepIdleBrains, _internal,
 } = await import('../brain.js');
 
 const KEYED = { OPENAI_API_KEY: 'sk-test-not-a-real-key', GBRAIN_EMBEDDING: '1' };
@@ -182,4 +182,17 @@ test('a read still never runs while a write holds the brain', async (t) => {
   const putDone = after.findIndex((l) => /^done \d+ put_page$/.test(l));
   const queryAt = after.findIndex((l) => / query /.test(l));
   assert.ok(putDone >= 0 && queryAt > putDone, `the read reached the serve before the write finished:\n${after.join('\n')}`);
+});
+
+test('the idle sweep recycles a dirty brain but leaves it open — the next read starts no serve', async (t) => {
+  const kb = nextKb();
+  t.after(() => drop(kb));
+  await withEmbedding(KEYED, () => ingest(kb, [doc(1)]));
+  const res = await sweepIdleBrains(Date.now() + _internal.SERVE_IDLE_MS + 60_000);
+  assert.ok(res.some((r) => r.action === 'reclaimed'), `the sweep did not reclaim: ${JSON.stringify(res)}`);
+  const mark = (await events()).length;
+  const out = await withEmbedding(KEYED, () => query(kb, 'after the sweep', 3));
+  assert.equal(out.results.length, 1);
+  const after = await events(mark);
+  assert.equal(count(after, /^serve-start /), 0, `the read after the sweep had to start a serve:\n${after.join('\n')}`);
 });
