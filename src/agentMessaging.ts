@@ -56,8 +56,8 @@
  * ONE CONTRACT, TWO READERS (🔗 TWO-PLACES)
  * ─────────────────────────────────────────
  * The message shape `{id, at, from:{kind,name,workflowType?,executionId?},
- * about:{ticketKey?, executionId?}, text, needsAck, notBefore?, ackedAt?,
- * ackedBy?}` is declared ONCE, in
+ * about:{ticketKey?, executionId?}, text, answerTo?, needsAck, notBefore?,
+ * ackedAt?, ackedBy?}` is declared ONCE, in
  * backend/src/services/agent-inbox.js. This module cannot import that file (a
  * published skill ships alone), so `__tests__/agentMessaging.test.ts` reads it
  * from the sibling checkout and pins every field name `parseInboxNote` relies
@@ -559,6 +559,11 @@ export function parseInboxNote(row: KvRow | null | undefined) {
     ackedAt: typeof parsed.ackedAt === 'string' && parsed.ackedAt ? parsed.ackedAt : null,
     ackedBy: parsed.ackedBy && typeof parsed.ackedBy === 'object' ? parsed.ackedBy : null,
     text: parsed.text,
+    // THE CARD A PERSON'S ANSWER BELONGS TO (agent-inbox.js ANSWER_TO_FIELDS):
+    // its question, the choices it offered and what they chose. Written by the
+    // platform from the card's own row, so it is handed on whole — without it
+    // an answer is a bare "Yes" with nothing saying what was asked.
+    ...(parsed.answerTo && typeof parsed.answerTo === 'object' && !Array.isArray(parsed.answerTo) ? { answerTo: parsed.answerTo } : {}),
   };
 }
 

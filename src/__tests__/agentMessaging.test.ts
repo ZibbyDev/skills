@@ -490,7 +490,7 @@ describe('contract pin: agent-inbox.js message shape', () => {
   it.skipIf(!present)('the platform declares exactly the fields this skill reads', () => {
     const src = readFileSync(backendFile, 'utf-8');
     // The header's one-line contract.
-    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name,\s*workflowType\?,\s*executionId\?\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*relayNote\?,\s*personWordsCheck\?,\s*needsAck,\s*notBefore\?,\s*ackedAt\?,\s*ackedBy\?,\s*replyTo\?\s*\}/);
+    expect(src).toMatch(/\{\s*id,\s*at,\s*from:\s*\{kind:\s*'human'\|'member'\|'platform',\s*name,\s*workflowType\?,\s*executionId\?\s*\},?\s*\n?\s*\*?\s*about:\s*\{ticketKey\?,\s*executionId\?\},\s*text,\s*relayNote\?,\s*personWordsCheck\?,\s*answerTo\?,\s*needsAck,\s*notBefore\?,\s*ackedAt\?,\s*ackedBy\?,\s*replyTo\?\s*\}/);
     // Every key of the message, declared once — a field this skill reads that
     // the platform no longer writes is drift.
     const list = (name: string) => {
@@ -498,7 +498,7 @@ describe('contract pin: agent-inbox.js message shape', () => {
       expect(m, `${name} must be declared in agent-inbox.js`).toBeTruthy();
       return m![1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
     };
-    expect(list('MESSAGE_FIELDS')).toEqual(['id', 'at', 'from', 'about', 'text', 'relayNote', 'personWordsCheck', 'needsAck', 'notBefore', 'afterExecutionId', 'ackedAt', 'ackedBy', 'replyTo']);
+    expect(list('MESSAGE_FIELDS')).toEqual(['id', 'at', 'from', 'about', 'text', 'relayNote', 'personWordsCheck', 'answerTo', 'needsAck', 'notBefore', 'afterExecutionId', 'ackedAt', 'ackedBy', 'replyTo']);
     // A person's reply to a verification card is marked with this field, and the
     // drain below leaves such a row to the person_verification call waiting for it.
     expect(src).toMatch(/const REPLY_TO_FIELD = 'replyTo';/);
@@ -575,6 +575,17 @@ describe('contract pin: agent-inbox.js message shape', () => {
     expect(withIdentity).toMatchObject({ from: { kind: 'member', name: 'project-manager', workflowType: 'project-manager', executionId: 'run-pm-1' }, ackedAt: '2026-09-13T10:00:05.000Z', ackedBy: { kind: 'member', workflowType: 'developer' } });
     // A platform note (parent-bell child_done) is NOT an inbox message.
     expect(parsedNull({ why: 'child_done', worker: 'developer' })).toBeNull();
+  });
+
+  it('a person\'s answer to a card arrives with the card it answers (agent-inbox.js answerTo)', () => {
+    // What the platform writes from the card's own row when a person clicks or types on it.
+    const answerTo = { cardId: 'events:9-c', question: 'Use the app you have running?', options: ['Yes, use it', 'No'], chosen: ['Yes, use it'], ticketKey: '460', askedByRun: SELF, askedByAgent: 'developer' };
+    const answer = { id: '000001757757600000-cd34', at: '2026-09-13T09:05:00.000Z', from: { kind: 'human', name: 'Lee' }, about: { ticketKey: '460', executionId: SELF }, text: 'Yes, use it', answerTo, needsAck: true };
+    expect(parseInboxNote({ scope: 'x', content: JSON.stringify(answer) })).toMatchObject({ text: 'Yes, use it', answerTo });
+    // A message that answers no card carries no such field; a malformed one is not passed on.
+    expect(parseInboxNote({ scope: 'x', content: JSON.stringify({ ...answer, answerTo: undefined }) })).not.toHaveProperty('answerTo');
+    expect(parseInboxNote({ scope: 'x', content: JSON.stringify({ ...answer, answerTo: 'events:9-c' }) })).not.toHaveProperty('answerTo');
+    expect(parseInboxNote({ scope: 'x', content: JSON.stringify({ ...answer, answerTo: ['events:9-c'] }) })).not.toHaveProperty('answerTo');
   });
 
   const parsedNull = (obj: any) => parseInboxNote({ scope: 'x', content: JSON.stringify(obj) });
