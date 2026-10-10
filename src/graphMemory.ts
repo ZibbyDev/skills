@@ -18,8 +18,8 @@
  *   POST {ZIBBY_ACCOUNT_API_URL}/datasets/stores/{storeId}/<op>
  *   op ∈ put | link | recall_many | subgraph | trace   (the ops this skill exposes)
  *      | relation_add | relation_remove | relation_replace | relation_confirm
- *      | relation_adopt | relation_withdraw | relation_list | relation_dependents
- *      | relation_history
+ *      | relation_adopt | relation_withdraw | relation_rebuild | relation_list
+ *      | relation_dependents | relation_history
  *        (maintained relations — saved by the control-plane before they are
  *        applied to the graph, so a graph that is down answers `pending` /
  *        `available: false`, never an error to retry)
@@ -220,6 +220,7 @@ export const TOOL_OP: Readonly<Record<string, string>> = Object.freeze({
   relation_confirm: 'relation_confirm',
   relation_adopt: 'relation_adopt',
   relation_withdraw: 'relation_withdraw',
+  relation_rebuild: 'relation_rebuild',
   relation_list: 'relation_list',
   relation_dependents: 'relation_dependents',
   relation_history: 'relation_history',
@@ -265,9 +266,13 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
 - relation_confirm({ assertion, decision, why }) and relation_adopt({ relation, why }): maintainers only.
 - relation_withdraw({ op, why }): withdraw a write that is still WAITING (e.g. one the graph keeps failing), so the writes
   behind it can proceed — a maintainer any, you your own. Nothing gives up on a waiting write by itself.
+- relation_rebuild({ why }): maintainers only — carry the platform's whole record of relation writes out again on a
+  graph that was replaced or emptied. (A graph that merely fell behind is caught up without being asked.)
 - relation_list({ subjects, relations?, asOf? }): per subject and kind — coverage ('not_recorded' | 'partial' | 'known'),
   relations with every assertion, disagreements, waiting and refused writes. \`available: false\` means the graph did
-  not answer: that is NOT "none".
+  not answer: that is NOT "none". \`catchingUp\` means the graph is being put back in step with the record: the kinds
+  marked 'partial' are not whole yet. Every answer with a \`version\` carries \`generation\` — versions are only
+  comparable inside one generation (it changes when the box is restored from a backup).
 - relation_dependents({ objects, relation }): the same, read from the other end ("what waits on this").
 - relation_history({ subject, relation?, object? }): every operation in order — who, why, standing, version.`,
 
@@ -761,6 +766,27 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
         },
         "required": [
           "op",
+          "why"
+        ]
+      },
+    },
+    {
+      name: 'relation_rebuild',
+      description: "Put the graph back in step with the platform's own record of relation writes: every write ever applied is carried out again, in the order it first went in, as the agent that made it — nothing lands twice, and what the graph already has is left alone. For a graph that was replaced, emptied outside the platform, or cannot be trusted any more. (A graph that merely fell behind — restored to an older state — is caught up without being asked, on the next relation call.) Only relations recorded through these tools come back; whatever else the graph held is not in the record. Maintainers only.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "why": {
+            "type": "string",
+            "description": "Why, in plain words. Kept with the operation and shown in the history."
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
           "why"
         ]
       },
