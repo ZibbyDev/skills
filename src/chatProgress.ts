@@ -113,7 +113,7 @@ export const chatProgressSkill: any = {
     '## Progress updates (report_progress)',
     'People watching your run see only what you post with report_progress — over your head in the office view, to your manager, and in the chat that started this run. Your final answer reaches them only at the end.',
     'Post one as soon as you start, saying what job you took on. After that: when the plan changes, when something important is done, and at once when you are blocked (say what you need). Routine work needs no update.',
-    `One or two short sentences (at most ${PROGRESS_MAX_CHARS} characters), in the language of your task, for someone who has not read the code: name the ticket and what it means for the product — no branches, commits, file names or test counts. When your \`notify\` input names a chat, pass its provider and chatId. A failed post never stops your work.`,
+    `One or two short sentences (at most ${PROGRESS_MAX_CHARS} characters), in the language of your task, said the way you would tell a coworker who walks past your desk. They have read neither the code nor the ticket, the plan or any document you are working from, so a heading or a term taken from those means nothing to them: say in everyday words what you are doing and what it will change for the people who use the product, and name the ticket. No branches, commits, file names or test counts. When your \`notify\` input names a chat, pass its provider and chatId. A failed post never stops your work.`,
   ].join('\n'),
 
   resolve() {
@@ -187,7 +187,7 @@ export const chatProgressSkill: any = {
   tools: [
     {
       name: 'report_progress',
-      description: 'Post a short update for the people watching this work: it becomes your run\'s own line (shown over you in an office view and read by your manager) and is posted to the chat that triggered this run when there is one. One or two plain sentences — what you are doing now and where, or what is blocking you and what you need. Not for every step. Never put a credential in it. Fire-and-forget — never fails the run. The chat target resolves from your notify input (provider + chatId) or the runtime; you usually just pass the message.',
+      description: 'Post a short update for the people watching this work: it becomes your run\'s own line (shown over you in an office view and read by your manager) and is posted to the chat that triggered this run when there is one. One or two plain sentences — what you are doing now and where, or what is blocking you and what you need — in everyday words a coworker who has read neither the code nor the ticket and its documents would follow. Not for every step. Never put a credential in it. Fire-and-forget — never fails the run. The chat target resolves from your notify input (provider + chatId) or the runtime; you usually just pass the message.',
       input_schema: {
         type: 'object',
         properties: {
