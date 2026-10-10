@@ -159,3 +159,40 @@ describe('resolve() — the MCP child env', () => {
     expect(r.env.ZIBBY_STORE__memory).toBe('store_mem123');
   });
 });
+
+describe('relation tools — the maintained relations on the same store', () => {
+  const RELATION = ['relation_add', 'relation_remove', 'relation_replace', 'relation_confirm', 'relation_adopt', 'relation_list', 'relation_dependents', 'relation_history'];
+
+  it('offers the eight tools; a tool\'s name is its op on the store route', () => {
+    const names = graphMemorySkill.tools.map((t: any) => t.name).filter((n: string) => n.startsWith('relation_'));
+    expect(names).toEqual(RELATION);
+    for (const n of RELATION) expect(TOOL_OP[n]).toBe(n);
+    for (const t of graphMemorySkill.tools.filter((x: any) => x.name.startsWith('relation_'))) {
+      // Standing, origin and author are the platform's: no argument offers them.
+      for (const k of ['standing', 'origin', 'trusted', 'privileged', 'author', 'provenance']) expect(t.input_schema.properties).not.toHaveProperty(k);
+    }
+  });
+
+  it('POSTs /relation_add with the arguments minus the store selector, and hands back a pending answer as an answer', async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ state: 'pending', op: 'k1', changed: null, version: 1 }));
+    const out = await call('relation_add', { store: 'memory', subject: 'ticket:b/1', relation: 'depends_on', object: 'ticket:b/2', why: '1 needs 2', key: 'k1' });
+    expect(out).toMatchObject({ state: 'pending', op: 'k1', store: 'memory', storeId: 'store_mem123' });
+    expect(out.error).toBeUndefined();
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://cp.local/datasets/stores/store_mem123/relation_add');
+    expect(JSON.parse(opts.body)).toEqual({ subject: 'ticket:b/1', relation: 'depends_on', object: 'ticket:b/2', why: '1 needs 2', key: 'k1' });
+  });
+
+  it('"the graph did not answer" from relation_list is a result, not an error', async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ available: false, reason: 'the sidecar is not running', subjects: { 'ticket:b/1': { pending: [] } } }));
+    const out = await call('relation_list', { subjects: ['ticket:b/1'] });
+    expect(out).toMatchObject({ available: false, reason: 'the sidecar is not running' });
+    expect(fetchMock.mock.calls[0][0]).toBe('http://cp.local/datasets/stores/store_mem123/relation_list');
+  });
+
+  it('the platform\'s refusal (a missing input, maintainers only) comes back as the tool\'s error text', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 403, text: async () => JSON.stringify({ error: 'relation_confirm is for maintainers of this graph' }) });
+    const out = await call('relation_confirm', { assertion: 'a1', decision: 'accept', why: 'x' });
+    expect(out.error).toMatch(/relation_confirm failed \(403\).*maintainers of this graph/);
+  });
+});

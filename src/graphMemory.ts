@@ -17,6 +17,11 @@
  *
  *   POST {ZIBBY_ACCOUNT_API_URL}/datasets/stores/{storeId}/<op>
  *   op ∈ put | link | recall_many | subgraph | trace   (the ops this skill exposes)
+ *      | relation_add | relation_remove | relation_replace | relation_confirm
+ *      | relation_adopt | relation_list | relation_dependents | relation_history
+ *        (maintained relations — saved by the control-plane before they are
+ *        applied to the graph, so a graph that is down answers `pending` /
+ *        `available: false`, never an error to retry)
  *
  * with the run's PROJECT_API_TOKEN (Bearer). The control-plane resolves +
  * authorizes the tenant from the token, derives the sidecar's `graphId`
@@ -204,6 +209,18 @@ export const TOOL_OP: Readonly<Record<string, string>> = Object.freeze({
   graph_recall: 'recall_many',
   graph_subgraph: 'subgraph',
   graph_trace: 'trace',
+  // The maintained RELATION tools: a tool's name is its op on the store route
+  // (the platform's one definition is backend/src/services/relation-tools.js;
+  // backend/src/handlers/__tests__/relation-tools-parity.test.js holds this
+  // file to it).
+  relation_add: 'relation_add',
+  relation_remove: 'relation_remove',
+  relation_replace: 'relation_replace',
+  relation_confirm: 'relation_confirm',
+  relation_adopt: 'relation_adopt',
+  relation_list: 'relation_list',
+  relation_dependents: 'relation_dependents',
+  relation_history: 'relation_history',
 });
 
 export const graphMemorySkill: any = {
@@ -234,7 +251,21 @@ Tools:
 - graph_recall({ queries: [{ seeds?, match?, rels?, kinds?, maxCost?, direction?, validAt?, asOf? }], store? }):
   batched traversal; each hit carries its cost and the exact path of edges.
 - graph_subgraph({ seeds?, match?, rels?, kinds?, maxCost?, store? }): the induced subgraph (nodes + all live edges) for visualisation/hand-off.
-- graph_trace({ id, store? }): a node's full history — every version and every edge, superseded ones included.`,
+- graph_trace({ id, store? }): a node's full history — every version and every edge, superseded ones included.
+
+RELATIONS — a maintained set on the same graph: who says that <subject> —<relation>→ <object>, on what source, at
+what standing. A write is saved by the platform first and applied after: \`state: 'applied'\`, or \`'pending'\` when the
+graph did not take it yet — the platform applies it later, once, as you; do NOT call again to retry. Your write is a
+FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL (a maintainer accepts or declines it).
+- relation_add({ subject, relation, object, why, source?, external?, quote?, key?, nodes? }): one assertion.
+- relation_replace({ subject, relation, objects, why, source?, nodes? }): one source's WHOLE set (may be empty = "none").
+- relation_remove({ why, assertions | subject+relation+object(+source) }): retire; answers retired / overruled / left.
+- relation_confirm({ assertion, decision, why }) and relation_adopt({ relation, why }): maintainers only.
+- relation_list({ subjects, relations?, asOf? }): per subject and kind — coverage ('not_recorded' | 'partial' | 'known'),
+  relations with every assertion, disagreements, waiting and refused writes. \`available: false\` means the graph did
+  not answer: that is NOT "none".
+- relation_dependents({ objects, relation }): the same, read from the other end ("what waits on this").
+- relation_history({ subject, relation?, object? }): every operation in order — who, why, standing, version.`,
 
   /**
    * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -381,6 +412,412 @@ Tools:
           store: STORE_PARAM,
         },
         required: ['id'],
+      },
+    },
+    // ── RELATION tools — generated from the platform's one definition
+    //    (backend/src/services/relation-tools.js); names, descriptions and
+    //    required fields are held to it by the backend's parity test. ────────
+    {
+      name: 'relation_add',
+      description: "Record that <subject> —<relation>→ <object>, with what it rests on and why. It is saved first and applied to the graph after: the answer says state 'applied', or 'pending' when the graph did not take it yet (it is applied later, once, as you — never call again to retry). It lands as a FACT when the platform trusts your agent for this graph, else as your PROPOSAL. Adding what the same source already asserts changes nothing (changed: false).",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "The node the relation starts at."
+          },
+          "relation": {
+            "type": "string",
+            "description": "The relation name — a free string, snake_case by convention. The platform recognises no specific value."
+          },
+          "object": {
+            "type": "string",
+            "description": "The node the relation points at."
+          },
+          "why": {
+            "type": "string",
+            "description": "Why, in plain words. Kept with the operation and shown in the history."
+          },
+          "source": {
+            "type": "object",
+            "description": "What the assertion rests on: { kind, ref? } — a label you give (a plan, a person, a board link with its id, an agent). It never decides standing. Default: { kind: 'agent', ref: <your agent> }.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "The kind of source, a free string."
+              },
+              "ref": {
+                "type": "string",
+                "description": "Which one (a link id, a document, a name). Optional."
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "external": {
+            "type": "boolean",
+            "description": "true when the source is kept outside the team (a link on a board): such an assertion cannot be made to disappear by a maintainer, only marked overruled until its source removes it."
+          },
+          "quote": {
+            "type": "string",
+            "description": "The words this rests on, verbatim (a person's sentence, a line of a plan). Optional."
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key ([A-Za-z0-9._:-], up to 120): the same key always means the same operation, so a repeat lands once."
+          },
+          "nodes": {
+            "type": "object",
+            "description": "{ subject?, object? } — how to create either end if the graph does not have it yet.",
+            "properties": {
+              "subject": {
+                "type": "object",
+                "description": "{ kind, label, attrs? } — used ONLY to create the node when the graph does not have it yet. An existing node is never changed.",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "attrs": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              "object": {
+                "type": "object",
+                "description": "{ kind, label, attrs? } — used ONLY to create the node when the graph does not have it yet. An existing node is never changed.",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "attrs": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              }
+            }
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "subject",
+          "relation",
+          "object",
+          "why"
+        ]
+      },
+    },
+    {
+      name: 'relation_remove',
+      description: "Retire assertions — nothing is deleted, the history keeps who and why. Say WHICH in one of three ways: `assertions` (exactly those ids); `subject, relation, object, source` (that source's assertions only — how a link that left the board retires the board's assertion and leaves the others); or `subject, relation, object` alone (\"this relation no longer holds\": every assertion the team owns is retired, one whose source is external is marked overruled). A maintainer may retire any assertion; anyone else only proposals their own agent made. The answer lists retired, overruled and left (with who still asserts it).",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "why": {
+            "type": "string",
+            "description": "Why, in plain words. Kept with the operation and shown in the history."
+          },
+          "quote": {
+            "type": "string",
+            "description": "The words this rests on, verbatim (a person's sentence, a line of a plan). Optional."
+          },
+          "assertions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Assertion ids, as relation_add / relation_list returned them."
+          },
+          "subject": {
+            "type": "string",
+            "description": "A node id of the memory graph (`kind:namespace/key`), exactly as the graph tools spell it."
+          },
+          "relation": {
+            "type": "string",
+            "description": "The relation name — a free string, snake_case by convention. The platform recognises no specific value."
+          },
+          "object": {
+            "type": "string",
+            "description": "A node id of the memory graph (`kind:namespace/key`), exactly as the graph tools spell it."
+          },
+          "source": {
+            "type": "object",
+            "description": "What the assertion rests on: { kind, ref? } — a label you give (a plan, a person, a board link with its id, an agent). It never decides standing. Default: { kind: 'agent', ref: <your agent> }.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "The kind of source, a free string."
+              },
+              "ref": {
+                "type": "string",
+                "description": "Which one (a link id, a document, a name). Optional."
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "why"
+        ]
+      },
+    },
+    {
+      name: 'relation_replace',
+      description: "State ONE source's whole set of objects for one relation of a subject, in one step (default: your own source). Adds what is new, retires what that source no longer says, leaves every other source's assertions alone, and answers added / removed / kept plus which removed objects another source still asserts. An empty list is a statement too: \"this source has none\". A finished replace is what makes that kind of relation KNOWN for the subject.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "A node id of the memory graph (`kind:namespace/key`), exactly as the graph tools spell it."
+          },
+          "relation": {
+            "type": "string",
+            "description": "The relation name — a free string, snake_case by convention. The platform recognises no specific value."
+          },
+          "objects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The node ids this source asserts — the whole set. May be empty."
+          },
+          "why": {
+            "type": "string",
+            "description": "Why, in plain words. Kept with the operation and shown in the history."
+          },
+          "source": {
+            "type": "object",
+            "description": "What the assertion rests on: { kind, ref? } — a label you give (a plan, a person, a board link with its id, an agent). It never decides standing. Default: { kind: 'agent', ref: <your agent> }.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "The kind of source, a free string."
+              },
+              "ref": {
+                "type": "string",
+                "description": "Which one (a link id, a document, a name). Optional."
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "external": {
+            "type": "boolean",
+            "description": "true when the source is kept outside the team (a link on a board): such an assertion cannot be made to disappear by a maintainer, only marked overruled until its source removes it."
+          },
+          "quote": {
+            "type": "string",
+            "description": "The words this rests on, verbatim (a person's sentence, a line of a plan). Optional."
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key."
+          },
+          "nodes": {
+            "type": "object",
+            "description": "{ subject?, objects?: { <node id>: { kind, label, attrs? } } } — how to create a node the graph does not have yet.",
+            "properties": {
+              "subject": {
+                "type": "object",
+                "description": "{ kind, label, attrs? } — used ONLY to create the node when the graph does not have it yet. An existing node is never changed.",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "attrs": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              "objects": {
+                "type": "object"
+              }
+            }
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "subject",
+          "relation",
+          "objects",
+          "why"
+        ]
+      },
+    },
+    {
+      name: 'relation_confirm',
+      description: "Decide a PROPOSAL: accept makes it a fact (the proposer stays its author, you are recorded as the one who confirmed it), decline retires it with your reason. Maintainers only.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "assertion": {
+            "type": "string",
+            "description": "The assertion id."
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "decline"
+            ]
+          },
+          "why": {
+            "type": "string",
+            "description": "Why, in plain words. Kept with the operation and shown in the history."
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "assertion",
+          "decision",
+          "why"
+        ]
+      },
+    },
+    {
+      name: 'relation_adopt',
+      description: "Set aside every live edge of one relation name that was NOT recorded through the relation tools (it has no source), so relations recorded before they were maintained never read as current. Nothing is deleted. Running it again finds nothing. Maintainers only.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "relation": {
+            "type": "string",
+            "description": "The relation name — a free string, snake_case by convention. The platform recognises no specific value."
+          },
+          "why": {
+            "type": "string",
+            "description": "Why, in plain words. Kept with the operation and shown in the history."
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "relation",
+          "why"
+        ]
+      },
+    },
+    {
+      name: 'relation_list',
+      description: "The relations of many subjects in one call. Per subject and per kind of relation: coverage ('not_recorded' = no source ever stated the whole set; 'partial' = a statement is under way or writes are still waiting; 'known' = a source stated its whole set — an empty one included), who established it, every relation with each assertion on it (standing, state, source, author, when, why), disagreements between sources, and writes still waiting. When the graph does not answer the result is { available: false, reason, … } with the waiting writes — an ANSWER, never an empty list: unavailable is not \"none\".",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The node ids to read."
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only these relation names. Every one named is present in the answer, 'not_recorded' included. Omit for every kind the subject has."
+          },
+          "asOf": {
+            "type": "integer",
+            "description": "Knowledge time (ms epoch): the relations as they were recorded then. Defaults to now."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "subjects"
+        ]
+      },
+    },
+    {
+      name: 'relation_dependents',
+      description: "The same relations read from the other end: for each object, the subjects that assert <relation> to it (\"what waits on this\"). Same three answers as relation_list.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "objects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The node ids pointed at."
+          },
+          "relation": {
+            "type": "string",
+            "description": "The relation name — a free string, snake_case by convention. The platform recognises no specific value."
+          },
+          "asOf": {
+            "type": "integer",
+            "description": "Knowledge time (ms epoch). Defaults to now."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "objects",
+          "relation"
+        ]
+      },
+    },
+    {
+      name: 'relation_history',
+      description: "Every relation operation accepted for a subject, in order: who, at what standing, why, what it changed and the version it produced. Read from the platform's own record, so it answers while the graph is down.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "A node id of the memory graph (`kind:namespace/key`), exactly as the graph tools spell it."
+          },
+          "relation": {
+            "type": "string",
+            "description": "Only operations on this relation. Optional."
+          },
+          "object": {
+            "type": "string",
+            "description": "Only operations that name this object. Optional."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "subject"
+        ]
       },
     },
   ],

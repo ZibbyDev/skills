@@ -57,6 +57,7 @@ Every op body:
 |---|---|---|
 | `/mcp/agent/<uuid>` graph tools reached THROUGH THE BROKER by a run whose agent holds the `requires` link DIRECTLY (its own `{ ref: 'endpoint:graph-memory/mcp', as: 'memory', use: 'code' }` — the fleet manager's reconcile recording what it observed) | `run:<executionId>` | `true` |
 | `/mcp/agent/<uuid>` graph tools reached THROUGH THE BROKER by a run whose agent INHERITS the link (`inherit: 'parent'` — a fleet member writing its own judgement) | `run:<executionId>` (its own run, not the owner's name) | `false` |
+| the same, when the link HOLDER's own declaration names that member (`requires[].trust: ['workflow:<slug>']` on the holder's entry; the broker decides it from the holder's row and its `childBindings`, and signs `granted` into the caller stamp — a member's own declaration is never read) | `run:<executionId>` | `true` |
 | `/mcp/agent/<uuid>` graph tools from a PAT / the endpoint's own bearer (a model's editor, a human), or any broker hop that is not a run | `agent:<owning workflowType>` | `false` |
 | `/datasets/stores/:id/<op>` from a RUN OF THE OWNING AGENT (its run-scoped token carries a signed `executionId`; the execution row is read under the caller's project and matched to the owner row by deployment uuid) | `run:<executionId>` | `true` |
 | `/datasets/stores/:id/<op>` from anyone else (another agent's run, a project/console token that names no run) | `agent:<owning workflowType>` (resolved from the store's owner row) | `false` |
@@ -76,6 +77,29 @@ and every member's write over an inherited link, can only write `provenance:
 PermissionError` naming the fix — while the owning agent's own runtime and the
 direct link holder (the fleet manager's reconcile recording what it saw) may
 write `observed`.
+
+## `privileged`, and the relation tools
+
+`privileged` never comes from a caller and is never set for a plain graph op.
+Its one user is the control plane's relation module
+(`backend/src/services/graph-relations.js` — the `relation_*` tools of
+`backend/src/services/relation-tools.js`, on both doors): retiring or restating
+an assertion is decided THERE (a maintainer may retire any; anyone else only a
+proposal their own agent made), and because a later run of the same agent is
+another origin to the engine, that module asks for a privileged handle for
+exactly those `supersede` calls.
+
+The relation tools add NO route and NO field to this contract: a relation is a
+set of assertions, each one live edge whose `attrs.relation` carries
+`{ v, assertion, op, name, source: { kind, ref? }, external, standing, state,
+author: { agent, run }, at, why, quote?, confirmed?, overruled? }`, written with
+`link` / `supersede` and read with `trace` / `subgraph` / `get` / `stats`. An
+overruled assertion is restated under the engine relation name
+`overruled:<relation>`. Every write is saved in the control plane's own storage
+before it is applied here, and re-applied after a failure with the SAME
+`origin` / `trusted` the control plane established the first time — so this
+server may see the same logical write attempted again; the module looks for
+the assertion id on the subject's `trace` first and does not write it twice.
 
 ## Data
 
