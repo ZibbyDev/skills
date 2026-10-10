@@ -806,6 +806,15 @@ describe('needs_you — a card the agent writes for a person', () => {
       },
     });
   });
+  it('a card that asks the person to approve an app on their computer records the address and which button means yes', async () => {
+    mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: 'events:1-b', routed: 'person' } })]]);
+    await call('needs_you', { text: 'Use the app you have running?', options: ['Yes, use it', 'No'], address: ' http://localhost:5173 ', approve: 'Yes, use it', ticketKey: '460' });
+    expect(seen[0].body.data).toMatchObject({ address: 'http://localhost:5173', approve: 'Yes, use it', options: ['Yes, use it', 'No'], ticketKey: '460' });
+    seen = [];
+    await call('needs_you', { text: 'x', options: ['Yes', 'No'] });
+    expect(seen[0].body.data).not.toHaveProperty('address');
+    expect(seen[0].body.data).not.toHaveProperty('approve');
+  });
   it('a run with a manager is told its card went to the manager, not a person', async () => {
     mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: null, routed: 'supervisor' } })]]);
     const out = await call('needs_you', { text: 'x', options: ['Yes', 'No'] });

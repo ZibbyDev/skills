@@ -440,6 +440,11 @@ async function needsYou(args: any = {}) {
   if (typeof args.multi === 'boolean') data.multi = args.multi;
   if (typeof args.ticketKey === 'string' && args.ticketKey.trim()) data.ticketKey = args.ticketKey.trim();
   if (typeof args.ticketNumber === 'string' && args.ticketNumber.trim()) data.ticketNumber = args.ticketNumber.trim();
+  // The address of an app on the person's computer this card asks them to approve, and which of the card's own
+  // buttons means yes. RECORDED fields: the platform adds the app only against them, never against the card's words
+  // (backend services/local-app-person-grant.js). Checked at the one door, like the choices.
+  if (typeof args.address === 'string' && args.address.trim()) data.address = args.address.trim();
+  if (typeof args.approve === 'string' && args.approve.trim()) data.approve = args.approve.trim();
   const res = await fetchWithDeadline(`${getAccountApiUrl()}/projects/${encodeURIComponent(projectId)}/events`, {
     method: 'POST',
     headers: authHeaders(token, true),
@@ -995,6 +1000,8 @@ refused; credentials belong on the agent's Env tab.`,
           chatLabel: { type: 'string', description: 'Optional: the words on the Chat button, in the card\'s language (up to 16 characters; default "Chat").' },
           ticketKey: { type: 'string', description: 'Optional: the ticket the card is about, as the board keys it.' },
           ticketNumber: { type: 'string', description: 'Optional: the ticket as a person reads it (e.g. "#40").' },
+          address: { type: 'string', description: 'Optional: when the card asks the person to approve an app already running on their computer, the one address you ask about (e.g. http://localhost:5173). It is recorded on the card; the app can be added only against that record.' },
+          approve: { type: 'string', description: 'Optional, with `address`: which of your options means yes to that address (exactly as written in options).' },
         },
         required: ['text', 'options'],
       },
