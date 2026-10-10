@@ -168,38 +168,11 @@ export const figmaSkill: any = {
   envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
   description: 'Figma — read files, nodes and comments; extract dev-handoff specs (sizes/colors/fonts/auto-layout); list versions and image fills; render frames to PNG/JPG/SVG/PDF; browse team projects/files; and post comments',
 
+  // WHAT THIS PAGE CARRIES: that the skill is there and what it covers. What a
+  // tool does, and how a file or a node is named (on the fields that take
+  // them), is read when the tool is reached for, not sent with every request.
   promptFragment: `## Figma
-You have access to the user's Figma files via the Figma REST API. Every tool that takes a file accepts EITHER the raw file key OR a full figma.com URL (figma.com/file|design/<key>/...). Node ids accept URL form \`1-23\` or API form \`1:23\` interchangeably. Tools:
-
-### Identity
-- figma_get_me: Get the authenticated Figma user (handle, email, id) — confirms the token works.
-
-### Files & nodes
-- figma_get_file: Get a file's document tree by key or URL. Optional depth (1-2) limits how deep the tree is returned — usually enough to find pages/frames.
-- figma_get_nodes: Get specific nodes by id (comma-separated or array). Use after figma_get_file to drill into a frame/component without re-fetching the whole file.
-
-### Dev handoff (build UI from a design)
-- figma_get_node_specs: THE dev-mode tool. For the given node ids returns a compact spec computed from the REST tree — size, position, colors (hex), fonts/text-style, spacing/auto-layout, corner radius, strokes and effects — recursing depth levels (default 2). Prefer this over raw figma_get_nodes when your job is to reproduce a design in code.
-- figma_get_image_fills: Map of imageRef → download URL for every image fill in a file.
-
-### Rendering
-- figma_render_png: Render nodes to PNG/JPG/SVG/PDF and return image URLs (a map of nodeId → URL). Optional format (default png), scale 0.01–4 (raster only), svg_include_id, version. Despite the name it renders any of the four formats.
-
-### Comments
-- figma_get_comments: Read the comments on a file.
-- figma_post_comment: Post a comment (WRITE — needs a PAT with comment-write scope). Optionally reply (comment_id) or pin to a node (node_id[+x/y]) or a canvas point (x/y).
-
-### Browse
-- figma_get_file_versions: List a file's saved version history; a version id can be passed to render a past version.
-- figma_get_team_projects: List the projects in a team (team_id from a team URL …/files/team/<TEAM_ID>/…).
-- figma_get_project_files: List the files in a project (from figma_get_team_projects).
-
-### Local helper
-- figma_parse_url: Extract { file_key, node_id } from a figma.com URL — no API call.
-
-### Notes
-- The file key is NOT the file name — it's the opaque id segment in the URL (or just paste the URL).
-- Node ids look like "1:23" and come from figma_get_file / figma_get_nodes / figma_parse_url output.`,
+You have access to the user's Figma files via the Figma REST API — identity, files & nodes, dev handoff (build UI from a design), rendering, comments, browse. Each tool's description says what it does.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it
@@ -435,7 +408,7 @@ You have access to the user's Figma files via the Figma REST API. Every tool tha
   tools: [
     {
       name: 'figma_get_me',
-      description: 'Get the authenticated Figma user profile (handle, email, id)',
+      description: 'Get the authenticated Figma user profile (handle, email, id) — confirms the token works.',
       input_schema: { type: 'object', properties: {} },
     },
     {
@@ -452,7 +425,7 @@ You have access to the user's Figma files via the Figma REST API. Every tool tha
     },
     {
       name: 'figma_get_nodes',
-      description: 'Get specific nodes from a Figma file by their node ids. Use after figma_get_file to inspect a particular frame/component without re-fetching the whole file.',
+      description: 'Get specific nodes from a Figma file by their node ids. Use after figma_get_file to inspect a particular frame/component without re-fetching the whole file. Node ids look like "1:23" and come from figma_get_file / figma_get_nodes / figma_parse_url output.',
       input_schema: {
         type: 'object',
         properties: {

@@ -190,7 +190,7 @@ function indexScope(id) {
 
 /**
  * What the model is told the markdown path CAN and CANNOT express. Kept as data
- * so the tool description, the prompt fragment and the retry advice all quote the
+ * so the tool description, its fields and the retry advice all quote the
  * SAME list — and so a test can assert the description actually carries it.
  *
  * ⚠️ The authority for these strings is `backend/src/utils/markdown-lite.js`,
@@ -212,9 +212,10 @@ const MARKDOWN_LACKS =
 /**
  * HOW TO NAME AND CAPTION AN ARTIFACT — the platform's ONE statement of it.
  *
- * Same reason as the pair above: the prompt fragment and the tool schemas must
- * quote the SAME words, or the model reads two different rules depending on
- * which surface it happened to look at.
+ * Same reason as the pair above: every surface that asks for a title or a
+ * caption must quote the SAME words, or the model reads two different rules
+ * depending on which surface it happened to look at. (The prompt fragment no
+ * longer restates them: they are read on the fields, when the tool is used.)
  *
  * ⚠️ THESE TWO ARE ALSO QUOTED OUTSIDE THIS REPO. The browser sidecar creates
  * artifacts on an agent's behalf (a screenshot, a recording) and declares
@@ -241,6 +242,24 @@ export const ARTIFACT_DESCRIPTION_RULE =
   + 'prose or short bullets; (3) ONE closing sentence — what the reader should conclude. Complete sentences, '
   + 'Markdown formatting (short paragraphs, bullets) welcome. NEVER compressed arrow-chains ("A → B → C"), '
   + 'bare procedure logs, or unexplained jargon — a step list with no goal and no conclusion explains nothing.';
+
+/**
+ * WHAT TO DO WITH A PAGE PASSWORD — quoted by the two tools that hand one back
+ * (artifact_publish with `share`, artifact_share), so the words are in front of
+ * the model at the moment it holds a password and nowhere else.
+ */
+const PAGE_PASSWORD_COPY_RULE =
+  'Post the url AND the password together, in the same reply, formatted so both are easy to copy. '
+  + 'Copy the password character for character — it is case-sensitive, it is shown exactly once, and nothing '
+  + 'can look it up afterwards (you can only issue a new one, which kills the old). Do not paraphrase it, do not '
+  + '"tidy" it, and do not split it across lines.';
+const PAGE_PASSWORD_SCOPE_RULE =
+  'This password is a page-viewing password and nothing else — it is not an account password, it grants no '
+  + 'access to Zibby, this project, or any other artifact, and it is revocable with `artifact_unshare`. Treat it '
+  + 'as the ordinary contents of the message you are writing. That is the ONLY kind of secret you may ever put in '
+  + 'a message: never paste a token, key, or credential into chat, a prompt, or a page. '
+  + 'Sharing is per page and opt-in — publishing alone never exposes anything. If the page is sensitive and the '
+  + 'channel is wide, say so and let them decide rather than sharing it silently.';
 
 /**
  * How many REJECTED publishes the model may make before the tool stops it.
@@ -805,121 +824,23 @@ export const artifactSkill: any = {
   allowedTools: ['mcp__artifact__*'],
   description: 'Artifacts — publish a self-contained, shareable HTML/Markdown page to Zibby and get back a URL; the index of what you published is your memory.',
 
+  // WHAT THIS PAGE CARRIES: what the skill is for and one line per tool. HOW a
+  // page is written, named, checked and shared lives in each tool's own
+  // description below (and in its fields), which the model reads when it
+  // reaches for the tool — this page is sent with every model request of every
+  // agent that declares the skill, whether or not the turn publishes anything.
   promptFragment: `## Artifacts (publish a shareable page, remember what you made)
 You can PUBLISH a standalone page — a status report, a plan, a comparison table,
 a dashboard-y summary, a diagram, a "here's what I found" write-up — and get back
 a shareable URL.
 
-### WRITE IT AS MARKDOWN. That is the default, and it is not a stylistic hint.
-Pass \`markdown\` and Zibby generates the whole document for you — doctype, head,
-CSS, typography, dark mode, table styling. You supply only the CONTENT. Markdown
-supports ${MARKDOWN_SUPPORTS}. It does NOT support ${MARKDOWN_LACKS}.
-
-Pass \`html\` ONLY when the page genuinely needs a visual layout Markdown cannot
-express — a bar chart, a gauge, a custom grid, an SVG diagram. On the html path
-YOU author the entire document and every mistake ships: a table left in Markdown
-syntax, an escaped \`&lt;!doctype\`, a bar with no width. If the page is a report,
-a plan, a list, a table or a write-up, it is markdown. No exceptions worth taking.
-
-Whichever path: the page is sandboxed when viewed (no network at all, no ambient
-credentials), so on the html path keep ALL CSS/JS/images INLINE (inline
-<style>/<script>, data: URIs) — every external URL is blocked and will simply not
-load. NEVER escape the document: send real tags, not \`&lt;div&gt;\`.
-
-### NAME IT FOR SOMEONE SCROLLING A LIST OF FIFTY, and CAPTION IT.
-The \`title\`: ${ARTIFACT_TITLE_RULE}
-
-Then pass \`description\`: ${ARTIFACT_DESCRIPTION_RULE} Headings, bullets and
-tables are all fine. Write one for every artifact a human will open.
-
-The SAME two rules govern an artifact a TOOL creates for you — a browser
-screenshot or recording carries \`artifactTitle\` / \`artifactDescription\` for
-exactly this reason. A tool cannot know what the capture was for; you do. Left
-blank, the row is named after a file and the page explains nothing.
-
-### Every number on the page must come from a tool result or this transcript.
-Do not do arithmetic in prose and then print the answer — that is how a page ends
-up saying 42 in one place and 45 in another. If you need a total, compute it with
-a tool (or restate the figures exactly as your tools returned them) and cite the
-same figure everywhere it appears.
-
-### If an html page RENDERS DATA, pass \`data\` too.
-A table of records, a bar chart, a row of meters — pass the raw tool results the
-page was built from as \`data\`, unchanged and unsummarised. The page is then
-compared against them before anything is sent, which catches the failures nobody
-sees until a human opens the link: a table short of rows, a bar drawn at a length
-that is not its value, a leftover \`\${…}\` or \`[object Object]\`. Do not write
-your own expectations — the check derives them from the data. Prose pages don't
-need it, and it is an error on the \`markdown\` path.
-
-### The page is validated BEFORE a URL exists.
-If the content is broken you get back the exact defects and their line numbers,
-and no page is created. You get ONE retry — and the \`data\` check and the server
-check SHARE those two attempts, so a locally refused page costs an attempt just
-like a rejected one. After that the tool STOPS you — at which point say plainly
-that you could not produce a clean page and put the content in the chat instead.
-Do not keep trying.
-
-THE CONTENT COMES FROM THIS CONVERSATION — NEVER FROM YOUR IMAGINATION.
-When someone says "make me a page / an artifact / a report", they mean THE THING
-YOU WERE JUST TALKING ABOUT. Build the page from what is actually in this
-transcript (or from data you fetch with your tools THIS turn for that specific
-subject). The page is about the USER'S subject matter — their tickets, their
-repos, their incidents, their data.
-
-If you do NOT know what the page should be about — the request is vague and the
-transcript does not tell you — then ASK ONE SHORT QUESTION ("which part should I
-turn into a page?") and publish NOTHING. Do NOT fall back on a demo, a sample, a
-placeholder, or a "here's an overview of your account" page, and do NOT go
-inventory the account (projects / agents / integrations) just to have something to
-render. A page the user did not ask for is worse than a question: it wastes the
-link, buries the real answer, and reads as if you ignored them. There is no
-situation in which "示例 / sample / demo" belongs in a title you publish.
-
 Tools:
-- artifact_publish: Publish a NEW page. Pass a \`title\` and EITHER \`markdown\`
-  (the default — prefer this) OR \`html\` (never both). Pass \`data\` when the html
-  page renders a dataset (see above). Optional \`kind\` (e.g. "report", "plan",
-  "dashboard"), \`favicon\` (an emoji), and \`summary\` (one line for your own
-  index). Returns { id, url }. Share the url; keep the id if you'll update it
-  later. To publish RAW SOURCE instead of a page — code, a script, logs, JSON
-  data, CSV — pass \`text\` + \`contentType\` (text/plain | application/json |
-  text/csv): it is stored verbatim and shown in a read-only code viewer. For
-  code, make the \`title\` the filename (e.g. "deploy.sh") and set kind "code".
-- artifact_update: Revise an EXISTING page by \`id\` (same url, new version). Pass
-  the fields to change (\`title\`, \`markdown\`|\`html\`|\`text\` — text only onto a
-  text artifact, same type).
+- artifact_publish: Publish a NEW page.
+- artifact_update: Revise an EXISTING page by \`id\` (same url, new version).
 - artifact_get: Fetch one artifact by \`id\` → { metadata, content } so you can
   reuse / edit / re-publish it.
 - artifact_share: Make a page readable WITHOUT a Zibby login → { url, password }.
-- artifact_unshare: Revoke that, immediately and for everyone.
-
-### If the people you are answering have no Zibby account, SHARE the page.
-A published url only opens for logged-in members of this project. When you are
-talking to a Lark or Slack channel, most of the people there are not Zibby users —
-so the link you just posted is, for them, a login screen they cannot get past.
-
-So: when you publish a page for a chat channel, call \`artifact_share\` and post
-the url AND the password together, in the same reply, formatted so both are easy
-to copy. Copy the password character for character — it is case-sensitive, it is
-shown exactly once, and nothing can look it up afterwards (you can only issue a
-new one, which kills the old). Do not paraphrase it, do not "tidy" it, and do not
-split it across lines.
-
-This password is a page-viewing password and nothing else — it is not an account
-password, it grants no access to Zibby, this project, or any other artifact, and
-it is revocable with \`artifact_unshare\`. Treat it as the ordinary contents of the
-message you are writing. That is the ONLY kind of secret you may ever put in a
-message: never paste a token, key, or credential into chat, a prompt, or a page.
-
-Sharing is per page and opt-in — publishing alone never exposes anything. If the
-page is sensitive and the channel is wide, say so and let them decide rather than
-sharing it silently.
-
-To recall WHAT YOU HAVE ALREADY PUBLISHED, use your kv-memory tool
-kv_recall_prefix with keyPrefix "artifact:" — each entry is the index record
-{ id, title, url, kind, createdAt, summary } for a page you made. (Publishing
-records this automatically; you don't store it yourself.)`,
+- artifact_unshare: Revoke that, immediately and for everyone.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -1175,13 +1096,15 @@ records this automatically; you don't store it yourself.)`,
         + `Markdown supports ${MARKDOWN_SUPPORTS}; it does NOT support ${MARKDOWN_LACKS}. `
         + 'Use `html` ONLY when the page needs a visual layout Markdown cannot express (a bar chart, a gauge, a custom grid, an SVG diagram) — on that path you author the whole document and every mistake ships verbatim. Never pass both. '
         + 'Use `text` (+ required `contentType`) to publish RAW SOURCE as-is — code, a script, logs, JSON data, CSV. It is stored verbatim, never rendered as a page, and shown in a read-only code viewer with a download link. contentType: text/plain for code/logs/scripts, application/json for JSON data, text/csv for CSV. For code, put the FILENAME in `title` (e.g. "deploy.sh") — viewers derive the language label from the extension — and set kind: "code". Exactly one of markdown|html|text per call. '
-        + 'Every figure on the page must come from a tool result or this conversation — do not do arithmetic in prose and print the result, and use the same number everywhere it appears. '
+        + 'NAME IT FOR SOMEONE SCROLLING A LIST OF FIFTY, and CAPTION IT: the `title` and `description` fields say how. Write a `description` for every artifact a human will open. '
+        + 'Every figure on the page must come from a tool result or this conversation — do not do arithmetic in prose and print the result, and use the same number everywhere it appears. If you need a total, compute it with a tool (or restate the figures exactly as your tools returned them). '
         + 'The content MUST come from the current conversation or data you fetched this turn; if you are not sure what the page should be about, ASK instead of calling this tool, and never publish a demo/sample/placeholder or an account-overview page as a stand-in. '
         + 'On the html path keep all CSS/JS/images INLINE (inline <style>/<script>, data: URIs) and send real tags (never &lt;escaped&gt; markup) — the page is sandboxed on view with no network at all, so every external URL is dead. '
         + 'On the html path also CENTRE THE PAGE: give the content a reading measure (about 860px) with `margin-inline: auto`, and let only the things that need the room — a wide table, a chart, a full-width image — break out of it. A viewer window is far wider than a line of text, so a document that pins its content to the left edge reads as a broken layout with half a screen of dead space beside it. '
         + 'PASS `data` WHENEVER THE HTML PAGE RENDERS A DATASET — a table of records, a bar chart, a row of meters. Give it the raw tool results the page was built from, unchanged; the page is then checked AGAINST that data before anything is sent, catching a table short of rows, a bar drawn at the wrong length, and leftover ${…} or [object Object]. It costs you nothing when the page is right. Skip it for prose pages, and never pass it with `markdown` (that is an error, not a no-op). '
-        + 'The content is VALIDATED before any URL exists: if it is broken — by that data check or by the server — you get the exact defects and line numbers back, you get ONE retry, and then the tool stops you. Both kinds of rejection share the SAME two attempts. Returns { id, url }. '
-        + 'PASS `share: true` WHEN THE READERS HAVE NO ZIBBY ACCOUNT — you get back { shareUrl, password } in this same call, instead of publishing a link they cannot open and then having to call artifact_share. The password is GENERATED; you never invent one. Without `share` the page is member-only, which is the default and is correct for anything internal.',
+        + 'The content is VALIDATED before any URL exists: if it is broken — by that data check or by the server — you get the exact defects and line numbers back, you get ONE retry, and then the tool stops you. Both kinds of rejection share the SAME two attempts. Once it has stopped you, say plainly that you could not produce a clean page and put the content in the chat instead. Do not keep trying. Returns { id, url }. Share the url; keep the id if you\'ll update it later. '
+        + 'PASS `share: true` WHEN THE READERS HAVE NO ZIBBY ACCOUNT — you get back { shareUrl, password } in this same call, instead of publishing a link they cannot open and then having to call artifact_share. The password is GENERATED; you never invent one. Without `share` the page is member-only, which is the default and is correct for anything internal. '
+        + `${PAGE_PASSWORD_COPY_RULE} ${PAGE_PASSWORD_SCOPE_RULE}`,
       input_schema: {
         type: 'object',
         properties: {
@@ -1225,7 +1148,7 @@ records this automatically; you don't store it yourself.)`,
     },
     {
       name: 'artifact_get',
-      description: 'Fetch ONE artifact you published, by id → { metadata, content }. Use to reuse / edit / re-publish a page. To LIST what you have published, use your kv-memory tool kv_recall_prefix with keyPrefix "artifact:".',
+      description: 'Fetch ONE artifact you published, by id → { metadata, content }. Use to reuse / edit / re-publish a page. To LIST what you have published, use your kv-memory tool kv_recall_prefix with keyPrefix "artifact:" — each entry is the index record { id, title, url, kind, createdAt, summary } for a page you made. (Publishing records this automatically; you don\'t store it yourself.)',
       input_schema: {
         type: 'object',
         properties: {
@@ -1241,6 +1164,8 @@ records this automatically; you don't store it yourself.)`,
         + 'USE THIS when the people who need to read the page do not have Zibby accounts — the usual case is a Lark or Slack channel where you were asked for something and the channel members are not Zibby users. '
         + 'The normal artifact url only opens for logged-in members of this project, so for those recipients it is a dead link; this is what makes it readable. '
         + 'You MUST then send BOTH the url and the password in your reply, and copy the password EXACTLY (it is case-sensitive). It is shown ONCE and cannot be looked up afterwards — if it is lost, call this again to issue a new one, which also stops the old one working. '
+        + 'Format the two so both are easy to copy; do not paraphrase the password, do not "tidy" it, and do not split it across lines. '
+        + `${PAGE_PASSWORD_SCOPE_RULE} `
         + 'Works on any artifact you published, old or new. Calling it again on an already-shared artifact replaces the password. Use artifact_unshare to revoke.',
       input_schema: {
         type: 'object',

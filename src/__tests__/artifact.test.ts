@@ -451,27 +451,33 @@ describe('the tool contract makes markdown the default', () => {
     expect(publish().description).toMatch(/ONE retry/);
   });
 
-  it('the prompt fragment carries the same defaults', () => {
-    expect(artifactSkill.promptFragment).toMatch(/WRITE IT AS MARKDOWN/);
-    expect(artifactSkill.promptFragment).toMatch(/pipe tables/);
-    expect(artifactSkill.promptFragment).toMatch(/must come from a tool result/);
+  // These three defaults used to be restated in the prompt fragment; they now
+  // live only where the model reads them when it publishes — the tool's own
+  // description. The assertions follow the sentences to that home.
+  it('the tool description carries the defaults the prompt fragment used to repeat', () => {
+    expect(publish().description).toMatch(/USE `markdown` — it is the default path/);
+    expect(publish().description).toMatch(/pipe tables/);
+    expect(publish().description).toMatch(/must come from a tool result/);
   });
 
   // ONE statement of how to name/caption an artifact, quoted by every surface
-  // that asks for one — the prompt AND both schema properties. A rule that
+  // that asks for one — both schema properties (the prompt fragment no longer
+  // restates it; the tool description points at the fields). A rule that
   // lives in the prompt only is a rule the tool-schema reader never sees, and
   // the browser sidecar quotes these same two constants for the artifacts it
   // creates on the agent's behalf (its caption-guidance-parity test reads this
   // file). Substring equality, so a reword cannot leave one surface behind.
-  it('the title + description RULES are one source, quoted by the prompt and by both schemas', () => {
+  it('the title + description RULES are one source, quoted by both schemas, and the description points at them', () => {
     for (const [rule, prop] of [
       [ARTIFACT_TITLE_RULE, 'title'],
       [ARTIFACT_DESCRIPTION_RULE, 'description'],
     ] as const) {
       expect(rule.length).toBeGreaterThan(80);
-      expect(artifactSkill.promptFragment).toContain(rule);
       expect(publish().input_schema.properties[prop].description).toContain(rule);
     }
+    // Was: the prompt fragment contains both rules. The fragment's sentence
+    // that sent the model to them now lives in the tool description.
+    expect(publish().description).toContain('the `title` and `description` fields say how');
   });
 });
 

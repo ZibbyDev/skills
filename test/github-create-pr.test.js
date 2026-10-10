@@ -36,8 +36,11 @@ describe('github_create_pr — registration', () => {
       .toEqual(['base', 'body', 'draft', 'head', 'owner', 'repo', 'title'].sort());
   });
 
-  it('is documented in the prompt fragment', () => {
-    expect(githubSkill.promptFragment).toContain('github_create_pr');
+  // Was: the prompt fragment names the tool. The fragment's line about it said
+  // the same thing as the tool's own description, which is where it is read now.
+  it('is documented in its own description', () => {
+    const tool = githubSkill.tools.find((t) => t.name === 'github_create_pr');
+    expect(tool.description).toContain('POST /repos/{owner}/{repo}/pulls');
   });
 });
 

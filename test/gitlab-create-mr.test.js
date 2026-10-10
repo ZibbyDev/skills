@@ -36,8 +36,11 @@ describe('gitlab_create_mr — registration', () => {
       .toEqual(['description', 'project', 'source_branch', 'target_branch', 'title'].sort());
   });
 
-  it('is documented in the prompt fragment', () => {
-    expect(gitlabSkill.promptFragment).toContain('gitlab_create_mr');
+  // Was: the prompt fragment names the tool. The fragment's line about it said
+  // the same thing as the tool's own description, which is where it is read now.
+  it('is documented in its own description', () => {
+    const tool = gitlabSkill.tools.find((t) => t.name === 'gitlab_create_mr');
+    expect(tool.description).toContain('POST /projects/{id}/merge_requests');
   });
 });
 

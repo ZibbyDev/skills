@@ -34,7 +34,9 @@ test.each(['/fixtures/notes.txt', '~/Notes/fixture.txt', 'Desktop/sample-app'])(
 test('local access instructions do not impose a path-spelling allowlist', () => {
   expect(localWorkspaceSkill.promptFragment).toContain('no per-path allowlist');
   expect(localWorkspaceSkill.promptFragment).toContain('Attempt the tool before claiming access is unavailable');
-  expect(localWorkspaceSkill.promptFragment).toContain('Desktop/example');
+  // Was asserted on the prompt fragment: how a path may be spelled is read on
+  // the `path` field of the tool that takes it.
+  expect(localWorkspaceSkill.tools.find((t: any) => t.name === 'run_workspace_command').input_schema.properties.path.description).toContain('Desktop/example');
 });
 test('execution manifest reuses native file tools and never calls a chat API or clones again', async () => {
   vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', workspaces: [

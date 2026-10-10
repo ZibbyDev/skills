@@ -408,8 +408,11 @@ describe('the tool contract advertises `data`', () => {
     expect(publish().description).toMatch(/SAME two attempts/);
   });
 
-  it('the prompt fragment tells the model to pass the data unchanged', () => {
-    expect(artifactSkill.promptFragment).toMatch(/unchanged and unsummarised/);
-    expect(artifactSkill.promptFragment).toMatch(/Do not write\s+your own expectations/);
+  // Was asserted on the prompt fragment; the same instruction is read on the
+  // `data` field (and in the description) when the tool is used.
+  it('the `data` field tells the model to pass the data unchanged', () => {
+    expect(publish().description).toMatch(/raw tool results the page was built from, unchanged/);
+    expect(publish().input_schema.properties.data.description).toMatch(/UNCHANGED — do not summarise it/);
+    expect(publish().input_schema.properties.data.description).toMatch(/do not write your own expectations/);
   });
 });

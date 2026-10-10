@@ -36,8 +36,11 @@ describe('github_merge_pr — registration', () => {
       .toEqual(['commitMessage', 'commitTitle', 'mergeMethod', 'number', 'owner', 'repo'].sort());
   });
 
-  it('is documented in the prompt fragment', () => {
-    expect(githubSkill.promptFragment).toContain('github_merge_pr');
+  // Was: the prompt fragment names the tool. The fragment's line about it said
+  // the same thing as the tool's own description, which is where it is read now.
+  it('is documented in its own description', () => {
+    const tool = githubSkill.tools.find((t) => t.name === 'github_merge_pr');
+    expect(tool.description).toContain('PUT /repos/{owner}/{repo}/pulls/{number}/merge');
   });
 });
 

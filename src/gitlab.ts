@@ -1309,33 +1309,12 @@ export const gitlabSkill: any = {
   ],
   description: 'GitLab — merge requests, diffs, MR reviews/discussions, issues',
 
+  // WHAT THIS PAGE CARRIES: that the skill is there, what it covers, and how a
+  // project / merge request is addressed (every tool takes those two). What a
+  // tool does and how to use it is that tool's own description below — read
+  // when the tool is reached for, not sent with every request.
   promptFragment: `## GitLab
-You have access to the user's GitLab projects via the REST API (cloud gitlab.com OR self-hosted). A "merge request" (MR) is GitLab's pull request. An MR is addressed by a PROJECT (numeric id OR full path like "group/repo") and an \`iid\` (the per-project MR number shown in the URL). For projects, prefer the full path form ("group/subgroup/repo") — it's what users have. Available tools:
-
-### Discovery
-- gitlab_list_projects: List the projects available to this Zibby project, optionally filtered by a search query. Use to find a RELATED project worth cloning for cross-repo context. A project's repos may live on SEVERAL connected GitLab servers; the list is merged across all of them, and each entry then carries the \`host\` it lives on. Address a project by its full path either way — the right server is chosen for you.
-- gitlab_clone: Clone a project locally (shallow, auto-authenticated) to read code OUTSIDE the MR diff — callers, shared types, an existing util, or a cross-repo dependency. After cloning, use Grep/Glob/Read on the returned path. Clone SPARINGLY (only when correctness needs context beyond the diff).
-
-### Merge requests
-- gitlab_create_mr: OPEN a merge request (POST /projects/{id}/merge_requests). The source_branch must already be pushed. Returns the REAL pr_url (the MR's web_url) from GitLab — never fabricate it. Expected business errors (no changes between branches, an MR already exists, source==target) come back as { success:false, skippedReason } — not a hard failure.
-- gitlab_accept_mr: ACCEPT (merge) an MR (PUT /projects/{id}/merge_requests/{iid}/merge). Optional squash, mergeCommitMessage, mergeWhenPipelineSucceeds. Returns { success:true, merged:true, sha (merge_commit_sha) } on a real merge. Expected non-mergeable cases (405/406 = not mergeable / WIP / conflicts / pipeline not done, 404) come back as { success:false, skippedReason } — not a hard failure.
-- gitlab_get_mr: Get an MR's details (title, description, author, source/target branch, state, web url, diff_refs)
-- gitlab_get_mr_changes: Get the MR's changed files with per-file diffs — THIS is the code to review
-- gitlab_list_mrs: List a project's merge requests (filter by state: opened|closed|merged|all)
-- gitlab_list_mr_notes: Get the discussion/notes thread on an MR
-- gitlab_get_discussion: Read a single MR discussion (thread) by id — all its notes + the file/line it is anchored to
-- gitlab_reply_discussion: Reply IN-THREAD to an existing MR discussion (conversational reply, not a new review)
-- gitlab_post_mr_note: Post a general (non-inline) comment on an MR
-- gitlab_post_mr_discussion: Post an INLINE review comment anchored to a file + line in the MR diff. Needs diff_refs (pass them from gitlab_get_mr / gitlab_get_mr_changes, or omit and the tool fetches them). Provide newLine for added/changed lines (or oldLine for removed/context lines).
-
-### Issues
-- gitlab_get_issue: Get a single issue (by project + issue iid) — title, description, state, labels, assignee, web url
-- gitlab_list_issues: List a project's issues (filter by state: opened|closed|all, labels, updatedAfter cursor)
-- gitlab_add_issue_comment: Add a comment to an issue (also the way to record an MR link on a ticket)
-
-### Notes
-- A code-review flow is: gitlab_get_mr (context + diff_refs) → gitlab_get_mr_changes (the diff) → gitlab_post_mr_discussion per inline finding → gitlab_post_mr_note for the summary.
-- If an inline position is rejected by GitLab (bad line anchor), fall back to gitlab_post_mr_note with the file/line in the text.`,
+You have access to the user's GitLab projects via the REST API (cloud gitlab.com OR self-hosted) — discovery and clone, merge requests, issues. A "merge request" (MR) is GitLab's pull request. An MR is addressed by a PROJECT (numeric id OR full path like "group/repo") and an \`iid\` (the per-project MR number shown in the URL). For projects, prefer the full path form ("group/subgroup/repo") — it's what users have. Each tool's description says what it does.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it at
@@ -1405,7 +1384,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
   tools: [
     {
       name: 'gitlab_list_projects',
-      description: 'List the GitLab projects this token can access (the projects you are a member of), optionally filtered by a search query. Use this to discover a RELATED project worth cloning when a change\'s correctness depends on another accessible repo. Returns a normalized list of { fullPath, name, webUrl, defaultBranch, visibility } and a truncated flag.',
+      description: 'List the GitLab projects this token can access (the projects you are a member of), optionally filtered by a search query. Use this to discover a RELATED project worth cloning when a change\'s correctness depends on another accessible repo. Returns a normalized list of { fullPath, name, webUrl, defaultBranch, visibility } and a truncated flag. A project\'s repos may live on SEVERAL connected GitLab servers; the list is merged across all of them, and each entry then carries the `host` it lives on. Address a project by its full path either way — the right server is chosen for you.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1459,7 +1438,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
     },
     {
       name: 'gitlab_get_mr',
-      description: 'Get a GitLab merge request — title, description, branches, state, author, web url, and diff_refs (needed to anchor inline review comments).',
+      description: 'Get a GitLab merge request — title, description, branches, state, author, web url, and diff_refs (needed to anchor inline review comments). A code-review flow is: gitlab_get_mr (context + diff_refs) → gitlab_get_mr_changes (the diff) → gitlab_post_mr_discussion per inline finding → gitlab_post_mr_note for the summary.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1560,7 +1539,7 @@ You have access to the user's GitLab projects via the REST API (cloud gitlab.com
     },
     {
       name: 'gitlab_post_mr_discussion',
-      description: 'Post an INLINE review comment anchored to a file + line in a GitLab merge request diff. Provide newLine (added/changed line) or oldLine (removed/context line). Pass diffRefs from gitlab_get_mr/gitlab_get_mr_changes, or omit to have the tool fetch them. If the line anchor is rejected, fall back to gitlab_post_mr_note.',
+      description: 'Post an INLINE review comment anchored to a file + line in a GitLab merge request diff. Provide newLine (added/changed line) or oldLine (removed/context line). Pass diffRefs from gitlab_get_mr/gitlab_get_mr_changes, or omit to have the tool fetch them. If the line anchor is rejected, fall back to gitlab_post_mr_note with the file/line in the text.',
       input_schema: {
         type: 'object',
         properties: {

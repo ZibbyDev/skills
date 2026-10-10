@@ -165,50 +165,11 @@ export const githubSkill: any = {
   envKeys: ['GITHUB_TOKEN', 'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'REPO_ALLOWLIST'],
   description: 'GitHub — issues, PRs, commits, code search, file reading',
 
+  // WHAT THIS PAGE CARRIES: that the skill is there and what it covers. What a
+  // tool does, what it takes and how to use it is that tool's own description
+  // below — read when the tool is reached for, not sent with every request.
   promptFragment: `## GitHub
-You have access to the user's GitHub repositories. Available tools:
-
-### Discovery
-- github_list_repos: Lists ALL accessible repos (personal + orgs, private + public, up to 200 repos). Use to find a RELATED repo worth cloning for cross-repo context.
-- github_search_repos: Search for a specific repo by name (e.g., "electron", "my-app")
-- github_get_user: Get authenticated user's profile
-- github_list_orgs: List organizations with accessible repos
-
-### Clone & Code Reading
-- github_clone: Clone a repo locally. If the user specifies a destination (e.g. "to my Desktop", "to ~/Downloads"), pass that as the destination param. Otherwise it defaults to ~/zibby-repos/. ALWAYS show the contents field in the response.
-- github_get_file: Read a file's content from a repo (without cloning)
-- github_list_commits: List recent commits
-- github_get_commit: Get commit details and diff
-
-### Issues & PRs
-- github_search_issues: Search issues and PRs
-- github_search_code: Search code across repos
-- github_get_pr: Get PR details
-- github_get_pr_diff: Get PR diff
-- github_list_pr_files: List PR changed files
-- github_list_pr_comments: Get PR comments
-- github_get_review_thread: Read a review-comment THREAD (root + replies) with its diff context, given any comment id in it
-- github_reply_review_thread: Reply IN-THREAD to an existing review-comment thread (conversational reply, not a new review)
-- github_reply_issue_comment: Reply on the PR's top-level conversation (for non-inline/summary comments)
-- github_create_review: Post a review on a PR — a summary body plus optional inline comments on specific file/line positions, with an event (COMMENT, APPROVE, or REQUEST_CHANGES)
-- github_create_pr: OPEN a pull request (POST /repos/{owner}/{repo}/pulls). The branch must already be pushed. Returns the REAL pr_url from GitHub (never fabricate a PR url). Expected business errors (no commits between base and head, a PR already exists, base==head) come back as { success:false, skippedReason } — not a hard failure.
-- github_merge_pr: MERGE a pull request (PUT /repos/{owner}/{repo}/pulls/{number}/merge). mergeMethod is 'merge'|'squash'|'rebase' (default 'squash'). Returns { success:true, merged:true, sha } on a real merge. Expected non-mergeable cases (405 = draft / failing checks / not mergeable, 409 = head sha moved / conflict, 404) come back as { success:false, skippedReason } — not a hard failure.
-- github_create_issue: Create new issue
-- github_list_issues: List issues in a repo (filter by state/labels/since cursor) — excludes PRs
-- github_get_issue: Get a single issue's full detail (title, body, state, labels, assignee, url)
-- github_get_issue_comments: Get the comment thread on an issue
-- github_add_issue_comment: Add a comment to an issue (also used to record a PR link)
-- github_close_issue / github_reopen_issue: Close (optionally completed/not_planned) or reopen an issue
-- github_label_issue: Add / set / remove labels on an issue
-
-### Important: "Check out" / "Clone"
-When user says "check out repo-name" or "clone repo-name":
-1. Call github_clone. Pass the user's requested destination if given (e.g. "~/Downloads", "/Users/me/Desktop"). The tool handles ~ expansion and absolute paths.
-2. Display the path and contents field (directory listing)
-3. STOP. Do not offer to inspect files or ask what to do next.
-
-When user just wants to "look at" or "read" files (not clone):
-- Use github_get_file to read individual files via API`,
+You have access to the user's GitHub repositories — discovery, clone & code reading, issues & PRs. Each tool's description says what it does.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it
@@ -1326,7 +1287,10 @@ When user just wants to "look at" or "read" files (not clone):
     },
     {
       name: 'github_clone',
-      description: 'Clone a GitHub repository to the local filesystem. Use when user says "check out" or "clone" a repo.',
+      description: 'Clone a GitHub repository to the local filesystem. Use when user says "check out" or "clone" a repo. '
+        + 'Pass the user\'s requested destination if given (e.g. "~/Downloads", "/Users/me/Desktop"); the tool handles ~ expansion and absolute paths. '
+        + 'Then display the path and the contents field (directory listing) — ALWAYS show the contents field — and STOP: do not offer to inspect files or ask what to do next. '
+        + 'When the user just wants to "look at" or "read" files (not clone), use github_get_file to read individual files via API instead.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1537,7 +1501,7 @@ When user just wants to "look at" or "read" files (not clone):
     },
     {
       name: 'github_get_file',
-      description: 'Read a file (or list a directory) from a GitHub repo. Works on any branch/ref.',
+      description: 'Read a file (or list a directory) from a GitHub repo, without cloning. Works on any branch/ref.',
       input_schema: {
         type: 'object',
         properties: {

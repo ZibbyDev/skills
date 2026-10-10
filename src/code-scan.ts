@@ -639,17 +639,13 @@ export const codeScanSkill: any = {
   description:
     'Code scan — run the RIGHT deterministic linter/analyzer for a checked-out repo (auto-detects the stack: JS/TS→oxlint; Java/Python/Go/Ruby/PHP→semgrep) and return structured findings. Fully local; the code never leaves the box.',
 
+  // WHAT THIS PAGE CARRIES: when to reach for the one tool, and the rule that
+  // holds around it. What to pass, what comes back and how to read it are on
+  // scan_code's own description below.
   promptFragment: `## Code Scan (deterministic linter, auto-detects the stack)
 After you've cloned the repo, call \`scan_code\` to get DETERMINISTIC linter
-findings for WHATEVER stack this repo is — it auto-detects (JS/TS→oxlint;
-Java/Python/Go/Ruby/PHP→semgrep) and runs the matching tool. Pass \`files\` (the changed files, ideal for
-a review) or \`dir\` (a directory to scan). Findings are GROUND-TRUTH CANDIDATES:
-triage them for THIS change, verify each in context (false positives exist —
-trace before asserting), fold noise, and turn the real ones into inline
-suggestions. Don't hand-lint what the tool already covers, and don't re-run it.
-If the result has a \`degraded\` array, an engine failed to DOWNLOAD — those files
-were not scanned at all. Say so in your review; never let a delivery failure read
-as a clean bill of health.`,
+findings for WHATEVER stack this repo is. Don't hand-lint what the tool already
+covers, and don't re-run it.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -740,7 +736,7 @@ as a clean bill of health.`,
         + 'Auto-detects the stack (JS/TS → oxlint; Java/Python/Go/Ruby/PHP → semgrep OSS) and runs each matching tool, '
         + 'scoped to files in its languages. Pass `files` (e.g. the changed files of the PR — recommended for a review) '
         + 'OR `dir` (a directory to scan). Returns { scanners: [ { scanner, findings: [ { file, line, severity, rule, message } ] } ] }. '
-        + 'Findings are CANDIDATES — verify each in context before asserting. Best-effort: a stack whose linter is not installed is skipped with a note. '
+        + 'Findings are CANDIDATES — verify each in context before asserting. Triage them for THIS change (false positives exist — trace before asserting), fold noise, and turn the real ones into inline suggestions. Best-effort: a stack whose linter is not installed is skipped with a note. '
         + 'If the result carries a `degraded` array, an engine that SHOULD have run could not be delivered — those languages were not analysed at all, so say the review is incomplete for them rather than implying they came back clean.',
       input_schema: {
         type: 'object',

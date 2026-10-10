@@ -579,57 +579,12 @@ export const jiraSkill: any = {
   envKeys: ['ATLASSIAN_ACCESS_TOKEN', 'ATLASSIAN_CLOUD_ID'],
   description: 'Zibby Jira MCP Server (OAuth Bearer)',
 
+  // WHAT THIS PAGE CARRIES: that the skill is there and what it covers. The
+  // search strategy, the sprint and transition procedures and every "when the
+  // user asks…" line live in the description of the tool they are about (below)
+  // — read when that tool is reached for, not sent with every request.
   promptFragment: `## Jira
-You have direct access to the user's Jira. Use these tools proactively:
-
-### Issue tools
-- jira_search: Search issues with JQL (e.g. "project = PROJ AND status != Done ORDER BY updated DESC")
-- jira_get_issue: Get full details of a ticket by key (e.g. PROJ-123)
-- jira_list_statuses: List available Jira statuses (global or project-specific)
-- jira_list_issue_types: List issue types allowed for issue creation in a project
-- jira_create_issue: Create a new ticket (requires projectKey + summary)
-- jira_get_comments: Get comments on a ticket (newest first) — use this to find testing steps, notes, etc.
-- jira_add_comment: Add a comment to a ticket
-- jira_edit_issue: Update fields (summary, labels, priority, story points)
-- jira_transition_issue: Move a ticket to a different status (pass transitionId or toStatus)
-
-### Project & sprint tools
-- jira_list_projects: List all projects
-- jira_list_sprints: List sprints for a project (filter by state: active/closed/future)
-- jira_get_sprint_issues: Get all issues in a sprint — filter by status name (e.g. "进行中", "测试", "In Progress"). Returns status breakdown.
-- jira_move_issue_to_sprint: Move an issue to a sprint (current/active/latest/by-id/by-name) and verify membership.
-
-### Sprint membership updates
-- To move an issue into a sprint, use jira_edit_issue with fields.customfield_10020 set to sprint numeric id.
-- Example: jira_edit_issue({ issueKey: "PROJ-123", fields: { customfield_10020: 10 } })
-- Always verify by calling jira_get_sprint_issues(sprintId, projectKey) and checking the issue key is present.
-- For "create and place into current sprint" requests, use a generic atomic flow:
-  - Prefer jira_create_issue with moveToSprint=true (optionally sprintId/sprintName/target)
-  - Or create first, then use jira_move_issue_to_sprint
-  - Always report verified sprint membership result (not just status transition)
-
-### Search strategy (important!)
-1. **Board/sprint first**: When the user asks about "my board", "testing tickets", or "what's in progress", ALWAYS use the sprint path: jira_list_sprints (state: active) → jira_get_sprint_issues. This finds ALL tickets regardless of age.
-2. **Project-scoped search**: If you know the project key, use "project = KEY AND status != Done ORDER BY updated DESC" — no date filter needed when scoped to a project.
-3. **Global search (last resort)**: Only use broad JQL like "created >= -365d" when you genuinely don't know the project. Never use -90d — it misses older tickets still in testing.
-4. **Remember the board**: After finding the user's project/board, store it in memory (memory_store) so you go straight there next time.
-5. **Status discovery**: NEVER use jira_search with guessed status keywords to determine whether a status exists. Use jira_list_statuses (project-scoped when possible) and/or jira_transition_issue(issueKey) without transitionId.
-
-When the user asks about "my tickets" or "my board" and you know their project from memory, go directly to that project's active sprint.
-When the user asks about projects or boards, call jira_list_projects.
-When the user asks about sprints: jira_list_sprints → jira_get_sprint_issues.
-When user asks to move ticket into a sprint, do NOT use status transition. Use jira_move_issue_to_sprint(issueKey, projectKey?, sprintId|sprintName|target) and report verified result.
-When the user asks about testing steps, test cases, or wants to run tests for a ticket: call jira_get_comments — testing steps are typically written in the ticket's comments, not the description.
-JQL must be bounded (Jira rejects unbounded queries). Use "project = KEY AND status != Done" for project queries. Use "created >= -365d ORDER BY updated DESC" for global queries.
-
-### Transition workflow (MANDATORY)
-When user asks to move/transition ticket status:
-1. If user explicitly gives a target status (e.g. "move to 进行中", "move that in progress", "move to AI 验收"), call jira_transition_issue with issueKey + toStatus directly. Do NOT call list-only mode first.
-2. If target is ambiguous or missing, call jira_transition_issue({ issueKey }) with no transitionId to list available transitions.
-3. Pick the correct transition from returned list (match by "to" status name, not guesswork), then call jira_transition_issue with transitionId.
-4. Call jira_get_issue(issueKey) to verify final status before claiming success.
-5. If target wording differs (e.g. 已经验收 vs 已验收), try toStatus first; only ask user to confirm when no reasonable match exists.
-6. IMPORTANT: When target is clear, complete transition + verification in SAME turn. Do NOT stop after listing options.`,
+You have direct access to the user's Jira — issue tools, project & sprint tools. Use these tools proactively; each tool's description says what it does and how to use it.`,
 
   resolve() {
     // NEVER `return null` on a missing bin — that is exactly the silent
@@ -994,7 +949,7 @@ When user asks to move/transition ticket status:
   tools: [
     {
       name: 'jira_list_projects',
-      description: 'List all Jira projects accessible to the user',
+      description: 'List all Jira projects accessible to the user. Call this when the user asks about projects or boards.',
       input_schema: { type: 'object', properties: {} },
     },
     {
@@ -1020,7 +975,13 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_search',
-      description: 'Search Jira issues using JQL',
+      description: 'Search Jira issues using JQL. '
+        + 'JQL must be bounded (Jira rejects unbounded queries). Search strategy (important!): '
+        + '(1) Board/sprint first: when the user asks about "my board", "testing tickets", or "what\'s in progress", ALWAYS use the sprint path instead of this tool: jira_list_sprints (state: active) → jira_get_sprint_issues. This finds ALL tickets regardless of age. When the user asks about "my tickets" or "my board" and you know their project from memory, go directly to that project\'s active sprint. '
+        + '(2) Project-scoped search: if you know the project key, use "project = KEY AND status != Done ORDER BY updated DESC" — no date filter needed when scoped to a project. '
+        + '(3) Global search (last resort): only use broad JQL like "created >= -365d ORDER BY updated DESC" when you genuinely don\'t know the project. Never use -90d — it misses older tickets still in testing. '
+        + '(4) Remember the board: after finding the user\'s project/board, store it in memory (memory_store) so you go straight there next time. '
+        + '(5) Status discovery: NEVER use jira_search with guessed status keywords to determine whether a status exists. Use jira_list_statuses (project-scoped when possible) and/or jira_transition_issue(issueKey) without transitionId.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1041,7 +1002,7 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_create_issue',
-      description: 'Create a new Jira issue',
+      description: 'Create a new Jira issue. For "create and place into current sprint" requests, use a generic atomic flow: prefer this tool with moveToSprint=true (optionally sprintId/sprintName/target), or create first, then use jira_move_issue_to_sprint. Always report verified sprint membership result (not just status transition).',
       input_schema: {
         type: 'object',
         properties: {
@@ -1063,7 +1024,7 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_list_sprints',
-      description: 'List sprints for a Jira project (returns sprint names, IDs, states, dates)',
+      description: 'List sprints for a Jira project (returns sprint names, IDs, states, dates). When the user asks about sprints: jira_list_sprints → jira_get_sprint_issues.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1075,7 +1036,7 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_get_sprint_issues',
-      description: 'Get all issues in a sprint, optionally filtered by status column name',
+      description: 'Get all issues in a sprint, optionally filtered by status column name. Returns status breakdown.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1104,7 +1065,7 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_move_issue_to_sprint',
-      description: 'Move an issue to a sprint by id/name/target and verify membership.',
+      description: 'Move an issue to a sprint by id/name/target and verify membership. When user asks to move ticket into a sprint, do NOT use status transition: use this tool (issueKey, projectKey?, sprintId|sprintName|target) and report verified result.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1119,7 +1080,7 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_get_comments',
-      description: 'Get comments on a Jira issue (newest first)',
+      description: 'Get comments on a Jira issue (newest first) — use this to find testing steps, notes, etc. When the user asks about testing steps, test cases, or wants to run tests for a ticket, call this: testing steps are typically written in the ticket\'s comments, not the description.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1143,7 +1104,8 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_edit_issue',
-      description: 'Update fields on a Jira issue (summary, description, story points, labels, priority). A string `description` is Markdown and is rendered.',
+      description: 'Update fields on a Jira issue (summary, description, story points, labels, priority). A string `description` is Markdown and is rendered. '
+        + 'Sprint membership: to move an issue into a sprint with this tool, set fields.customfield_10020 to the sprint numeric id — e.g. jira_edit_issue({ issueKey: "PROJ-123", fields: { customfield_10020: 10 } }) — and always verify by calling jira_get_sprint_issues(sprintId, projectKey) and checking the issue key is present.',
       input_schema: {
         type: 'object',
         properties: {
@@ -1155,7 +1117,14 @@ When user asks to move/transition ticket status:
     },
     {
       name: 'jira_transition_issue',
-      description: 'Move a Jira issue to a different status. Always pass toStatus when user gave a target; only pass issueKey alone when you explicitly need to list transitions.',
+      description: 'Move a Jira issue to a different status. Always pass toStatus when user gave a target; only pass issueKey alone when you explicitly need to list transitions. '
+        + 'Transition workflow (MANDATORY) when the user asks to move/transition ticket status: '
+        + '(1) If user explicitly gives a target status (e.g. "move to 进行中", "move that in progress", "move to AI 验收"), call jira_transition_issue with issueKey + toStatus directly. Do NOT call list-only mode first. '
+        + '(2) If target is ambiguous or missing, call jira_transition_issue({ issueKey }) with no transitionId to list available transitions. '
+        + '(3) Pick the correct transition from returned list (match by "to" status name, not guesswork), then call jira_transition_issue with transitionId. '
+        + '(4) Call jira_get_issue(issueKey) to verify final status before claiming success. '
+        + '(5) If target wording differs (e.g. 已经验收 vs 已验收), try toStatus first; only ask user to confirm when no reasonable match exists. '
+        + '(6) IMPORTANT: When target is clear, complete transition + verification in SAME turn. Do NOT stop after listing options.',
       input_schema: {
         type: 'object',
         properties: {

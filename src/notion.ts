@@ -501,15 +501,11 @@ export const notionSkill: any = {
   envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV'],
   description: 'Notion — read pages/databases as context + create pages, append blocks, and insert images',
 
+  // WHAT THIS PAGE CARRIES: that the skill is there, what it covers, and the
+  // one rule that holds whichever tool is used (a Notion failure never blocks
+  // the task). What a tool takes and returns is its own description below.
   promptFragment: `## Notion
-You can read Notion content as context AND write to Notion (create pages, append blocks, insert images).
-- notion_get_page: pass a Notion page id OR a full Notion URL; returns { id, title, url, text } where text is the page flattened to markdown (truncated to ~20k chars). Use the text as reference context.
-- notion_query_database: pass a database id/URL; returns a small list of rows ({ id, title, url, props }). Use to find a specific page, then notion_get_page it.
-- notion_create_page: create a page under a parent page ({ parentPageId, title, markdown }) or in a database ({ databaseId, title, markdown }) — one parent is required. Body from markdown (#/##/### headings, - bullets, 1. ordered) or raw Notion blocks. Returns { ok, pageId, url } — share the url.
-- notion_append_blocks: append markdown (or raw blocks) to the end of an existing page — pass { pageId, markdown }. Returns { ok, pageId, url }.
-- notion_insert_image: append an image block to a page. Pass { pageId, imagePath } for a LOCAL png/jpg file (≤20MB, uploaded via Notion's File Upload API) or { pageId, imageUrl } for an external, publicly reachable image URL. Optional caption. Returns { ok, pageId, url }.
-- notion_list_comments: pass a page/block id OR URL; returns the open comment discussions on it ({ id, discussionId, text, author }). Use to read the comment thread you are replying to.
-- notion_add_comment: post a comment. To REPLY in an existing discussion pass { discussionId, text }; to start a NEW top-level comment on a page pass { pageId, text }. Returns { ok, id, discussionId }. Use this to answer a user who @mentioned Zibby in a Notion comment — reply in the SAME discussionId.
+You can read Notion content as context AND write to Notion (create pages, append blocks, insert images), and read or post comments. Each tool's description says what it does.
 Do not block the task if Notion is unavailable — these tools return { ok:false, error } on failure; treat a missing page as "no extra context" / "cannot deliver to Notion" and continue.`,
 
   /**
@@ -748,7 +744,7 @@ Do not block the task if Notion is unavailable — these tools return { ok:false
     },
     {
       name: 'notion_query_database',
-      description: 'Query a Notion database and return a bounded list of rows (id, title, url, key props). Accepts a database id OR full Notion URL. Optional Notion filter object. Returns at most 25 rows.',
+      description: 'Query a Notion database and return a bounded list of rows (id, title, url, key props). Accepts a database id OR full Notion URL. Optional Notion filter object. Returns at most 25 rows. Use to find a specific page, then notion_get_page it.',
       input_schema: {
         type: 'object',
         properties: {

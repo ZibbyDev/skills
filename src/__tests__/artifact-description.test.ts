@@ -119,14 +119,15 @@ describe('2. artifact_update', () => {
 
 // ───────────────────────────────────────────────────────────────────────────
 describe('3. the guidance demands a self-explanatory story, not a procedure log', () => {
-  it('the prompt asks for a specific subject and a story-shaped description', () => {
-    // Anchored on single-line substrings: the fragment is hard-wrapped prose, so
-    // a phrase that reads as one sentence may span a newline in the source.
-    const p = artifactSkill.promptFragment;
-    expect(p).toMatch(/NAME IT FOR SOMEONE SCROLLING A LIST OF FIFTY/);
-    expect(p).toMatch(/Name the specific thing/);
-    expect(p).toMatch(/Then pass `description`/);
-    expect(p).toMatch(/shown UNDER the artifact on/);
+  it('the tool asks for a specific subject and a story-shaped description', () => {
+    // Was asserted on the prompt fragment. The four sentences are now read when
+    // the tool is used: the heading and the "write one" instruction in the tool
+    // description, the two rules on the fields they govern.
+    const publish = artifactSkill.tools.find((t: any) => t.name === 'artifact_publish');
+    expect(publish.description).toMatch(/NAME IT FOR SOMEONE SCROLLING A LIST OF FIFTY/);
+    expect(publish.input_schema.properties.title.description).toMatch(/Name the specific thing/);
+    expect(publish.description).toMatch(/Write a `description` for every artifact a human will open/);
+    expect(publish.input_schema.properties.description.description).toMatch(/shown UNDER the artifact on/);
   });
 
   it('the description rule requires context+goal, story, conclusion — and bans arrow-chains', () => {

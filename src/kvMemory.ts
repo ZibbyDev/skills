@@ -143,22 +143,20 @@ export const kvMemorySkill: any = {
   allowedTools: ['mcp__kv_memory__*'],
   description: 'KV memory — a private, per-agent persistent key→value store across stateless runs (auto-namespaced)',
 
+  // WHAT THIS PAGE CARRIES: what the store is, and when each tool is worth
+  // reaching for. How keys are passed (plain, namespaced for you) and the list
+  // cap are on each tool's own description below.
   promptFragment: `## KV Memory (private, per-agent, persistent key-value store)
 You have a PRIVATE per-agent key-value memory that survives across your
 stateless runs. It is automatically namespaced to YOU (this agent type) — other
-agents cannot see or collide with your entries, and you don't need to prefix
-anything. Just use plain keys.
+agents cannot see or collide with your entries.
 
 Tools:
 - kv_recall: Recall the value stored under a plain \`key\` (exact match).
   Use at the START of a run to pick up what a prior run of yours recorded.
-- kv_recall_prefix: List entries whose plain \`keyPrefix\` matches
-  (e.g. "seen#" to list everything you've marked seen). Capped at 25.
+- kv_recall_prefix: List entries whose plain \`keyPrefix\` matches.
 - kv_store: Store (overwrite) a concise value under a plain \`key\`.
-  Use to record durable facts — e.g. dedup markers, prior decisions, summaries.
-
-Your namespace is added for you automatically; pass plain keys like
-"seen#owner/repo#42" or "lastRun".`,
+  Use to record durable facts — e.g. dedup markers, prior decisions, summaries.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this

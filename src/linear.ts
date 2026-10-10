@@ -201,25 +201,11 @@ export const linearSkill: any = {
   envKeys: ['LINEAR_API_KEY', 'LINEAR_OAUTH_TOKEN'],
   description: 'Linear — issues, comments, workflow states (GraphQL API key)',
 
+  // WHAT THIS PAGE CARRIES: that the skill is there and what it covers. What a
+  // tool does and how to use it is that tool's own description below — read
+  // when the tool is reached for, not sent with every request.
   promptFragment: `## Linear
-You have direct access to the user's Linear workspace (GraphQL API). Tools:
-
-### Discovery
-- linear_list_teams: List teams (id, key, name) — needed to scope states/issues
-- linear_list_states: List a team's workflow states (id, name, type). Linear states are PER-TEAM; there is no global status list.
-- linear_list_labels: List labels (optionally scoped to a team)
-
-### Issues
-- linear_list_issues: List/poll issues filtered by team / state / label / assignee / updatedAfter cursor (for polling candidates)
-- linear_get_issue: Get one issue by identifier (e.g. ENG-123) or id — title, description, state, labels, assignee, url
-- linear_get_comments: Get an issue's comments (newest first)
-- linear_add_comment: Add a comment to an issue
-- linear_update_state: Move an issue to a different workflow state. Pass the issue + a target state NAME; the tool resolves it to the team's matching state id (exact -> type-alias -> fuzzy). There is no "transition" in Linear — you just set the state.
-- linear_link_attachment: Attach a URL (e.g. a GitHub PR) to an issue via Linear's native attachments. Use this for PR links; fall back to linear_add_comment if it fails.
-
-### Notes
-- Always resolve a team first when you need states or want to create/move issues by state name — states only make sense within their team.
-- Issue identifier (ENG-123) and internal id (uuid) are both accepted by get/update tools.`,
+You have direct access to the user's Linear workspace (GraphQL API) — discovery (teams, states, labels) and issues. Each tool's description says what it does.`,
 
   resolve() {
     // Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs), pointing it at
@@ -535,7 +521,7 @@ You have direct access to the user's Linear workspace (GraphQL API). Tools:
     },
     {
       name: 'linear_list_states',
-      description: "List a team's workflow states (id, name, type: backlog|unstarted|started|completed|canceled|triage). Linear states are PER-TEAM. Omit team to list all states across the workspace.",
+      description: "List a team's workflow states (id, name, type: backlog|unstarted|started|completed|canceled|triage). Linear states are PER-TEAM. Omit team to list all states across the workspace. Always resolve a team first (linear_list_teams) when you need states or want to create/move issues by state name — states only make sense within their team.",
       input_schema: {
         type: 'object',
         properties: {

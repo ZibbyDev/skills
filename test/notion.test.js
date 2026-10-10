@@ -42,9 +42,14 @@ describe('notionSkill structure', () => {
 
   it('promptFragment documents the write surface (no longer read-only)', () => {
     expect(notionSkill.promptFragment).not.toMatch(/read-only context\)/);
-    expect(notionSkill.promptFragment).toMatch(/notion_create_page/);
-    expect(notionSkill.promptFragment).toMatch(/notion_append_blocks/);
-    expect(notionSkill.promptFragment).toMatch(/notion_insert_image/);
+    // Was: the fragment names the three write tools. It now says what they do
+    // in one line (create pages, append blocks, insert images); the tools are
+    // documented by their own descriptions.
+    expect(notionSkill.promptFragment).toMatch(/write to Notion \(create pages, append blocks, insert images\)/);
+    const description = (name) => notionSkill.tools.find((t) => t.name === name).description;
+    expect(description('notion_create_page')).toMatch(/Create a new Notion page/);
+    expect(description('notion_append_blocks')).toMatch(/Append markdown/);
+    expect(description('notion_insert_image')).toMatch(/Append an image block/);
   });
 
   it('resolve() spawns the generic skill MCP server so the AGENT can call notion tools', () => {
