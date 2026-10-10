@@ -161,9 +161,9 @@ describe('resolve() — the MCP child env', () => {
 });
 
 describe('relation tools — the maintained relations on the same store', () => {
-  const RELATION = ['relation_add', 'relation_remove', 'relation_replace', 'relation_confirm', 'relation_adopt', 'relation_list', 'relation_dependents', 'relation_history'];
+  const RELATION = ['relation_add', 'relation_remove', 'relation_replace', 'relation_confirm', 'relation_adopt', 'relation_withdraw', 'relation_list', 'relation_dependents', 'relation_history'];
 
-  it('offers the eight tools; a tool\'s name is its op on the store route', () => {
+  it('offers the relation tools; a tool\'s name is its op on the store route', () => {
     const names = graphMemorySkill.tools.map((t: any) => t.name).filter((n: string) => n.startsWith('relation_'));
     expect(names).toEqual(RELATION);
     for (const n of RELATION) expect(TOOL_OP[n]).toBe(n);

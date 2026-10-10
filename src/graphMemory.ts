@@ -18,7 +18,8 @@
  *   POST {ZIBBY_ACCOUNT_API_URL}/datasets/stores/{storeId}/<op>
  *   op ∈ put | link | recall_many | subgraph | trace   (the ops this skill exposes)
  *      | relation_add | relation_remove | relation_replace | relation_confirm
- *      | relation_adopt | relation_list | relation_dependents | relation_history
+ *      | relation_adopt | relation_withdraw | relation_list | relation_dependents
+ *      | relation_history
  *        (maintained relations — saved by the control-plane before they are
  *        applied to the graph, so a graph that is down answers `pending` /
  *        `available: false`, never an error to retry)
@@ -218,6 +219,7 @@ export const TOOL_OP: Readonly<Record<string, string>> = Object.freeze({
   relation_replace: 'relation_replace',
   relation_confirm: 'relation_confirm',
   relation_adopt: 'relation_adopt',
+  relation_withdraw: 'relation_withdraw',
   relation_list: 'relation_list',
   relation_dependents: 'relation_dependents',
   relation_history: 'relation_history',
@@ -261,6 +263,8 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
 - relation_replace({ subject, relation, objects, why, source?, nodes? }): one source's WHOLE set (may be empty = "none").
 - relation_remove({ why, assertions | subject+relation+object(+source) }): retire; answers retired / overruled / left.
 - relation_confirm({ assertion, decision, why }) and relation_adopt({ relation, why }): maintainers only.
+- relation_withdraw({ op, why }): withdraw a write that is still WAITING (e.g. one the graph keeps failing), so the writes
+  behind it can proceed — a maintainer any, you your own. Nothing gives up on a waiting write by itself.
 - relation_list({ subjects, relations?, asOf? }): per subject and kind — coverage ('not_recorded' | 'partial' | 'known'),
   relations with every assertion, disagreements, waiting and refused writes. \`available: false\` means the graph did
   not answer: that is NOT "none".
@@ -736,8 +740,34 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
       },
     },
     {
+      name: 'relation_withdraw',
+      description: "Withdraw a write that is still WAITING (state pending) — one the graph keeps failing, say — so the writes waiting behind it on the same subject can proceed. Nothing gives up on a waiting write by itself; this is the recorded decision to: the operation stays in the history as withdrawn, with who withdrew it and why, and anything it had already put in the graph is taken back. A maintainer may withdraw any waiting write; anyone else only one their own agent made. A write that was already applied is not withdrawn — relation_remove retires what it recorded.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "description": "The operation id of the waiting write, as its answer or relation_list `pending[]` gave it."
+          },
+          "why": {
+            "type": "string",
+            "description": "Why, in plain words. Kept with the operation and shown in the history."
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "op",
+          "why"
+        ]
+      },
+    },
+    {
       name: 'relation_list',
-      description: "The relations of many subjects in one call. Per subject and per kind of relation: coverage ('not_recorded' = no source ever stated the whole set; 'partial' = a statement is under way or writes are still waiting; 'known' = a source stated its whole set — an empty one included), who established it, every relation with each assertion on it (standing, state, source, author, when, why), disagreements between sources, and writes still waiting. When the graph does not answer the result is { available: false, reason, … } with the waiting writes — an ANSWER, never an empty list: unavailable is not \"none\".",
+      description: "The relations of many subjects in one call. Per subject and per kind of relation: coverage ('not_recorded' = no source ever stated the whole set; 'partial' = a statement is under way or writes are still waiting; 'known' = a source stated its whole set — an empty one included), who established it, every relation with each assertion on it (standing, state, source, author, when, why), disagreements between sources, writes still waiting (how long, how many attempts, the graph's last words, what waits behind them) and writes that will never land (refused by the graph, or withdrawn). When the graph does not answer the result is { available: false, reason, … } with the waiting writes — an ANSWER, never an empty list: unavailable is not \"none\".",
       input_schema: {
         "type": "object",
         "properties": {
