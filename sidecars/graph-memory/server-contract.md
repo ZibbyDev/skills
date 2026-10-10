@@ -101,6 +101,20 @@ before it is applied here, and re-applied after a failure with the SAME
 server may see the same logical write attempted again; the module looks for
 the assertion id on the subject's `trace` first and does not write it twice.
 
+### The platform's own record in a graph
+
+The relation module keeps ONE node of its own in a graph it writes relations
+to: `platform:relation-log/position` (kind `platform`), written with `put`
+under the origin `platform:relation-log` with `privileged: true`, never
+embedded. Its `attrs.applied` is how many relation operations the graph holds,
+signed (`attrs.sig`) so only the control plane's word counts. A graph that
+says less than the control plane's record — restored to an older state, or
+empty — gets the missing operations carried out again, in order, each with
+its original `origin` / `trusted`. The control plane keeps this node out of
+everything the plain graph tools return and refuses a plain write that names
+an id under `platform:relation-log/`; `stats` still counts it (one node, one
+version per update).
+
 ## Data
 
 Everything durable is under `/data` (`PGDATA=/data/pg`), the ONE path every
