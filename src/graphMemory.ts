@@ -18,8 +18,8 @@
  *   POST {ZIBBY_ACCOUNT_API_URL}/datasets/stores/{storeId}/<op>
  *   op ∈ put | link | recall_many | subgraph | trace   (the ops this skill exposes)
  *      | relation_add | relation_remove | relation_replace | relation_confirm
- *      | relation_adopt | relation_withdraw | relation_rebuild | relation_list
- *      | relation_dependents | relation_history
+ *      | relation_adopt | relation_withdraw | relation_rebuild | relation_copy_record
+ *      | relation_list | relation_dependents | relation_copies | relation_history
  *        (maintained relations — saved by the control-plane before they are
  *        applied to the graph, so a graph that is down answers `pending` /
  *        `available: false`, never an error to retry)
@@ -221,8 +221,10 @@ export const TOOL_OP: Readonly<Record<string, string>> = Object.freeze({
   relation_adopt: 'relation_adopt',
   relation_withdraw: 'relation_withdraw',
   relation_rebuild: 'relation_rebuild',
+  relation_copy_record: 'relation_copy_record',
   relation_list: 'relation_list',
   relation_dependents: 'relation_dependents',
+  relation_copies: 'relation_copies',
   relation_history: 'relation_history',
 });
 
@@ -274,7 +276,12 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
   marked 'partial' are not whole yet. Every answer with a \`version\` carries \`generation\` — versions are only
   comparable inside one generation (it changes when the box is restored from a backup).
 - relation_dependents({ objects, relation }): the same, read from the other end ("what waits on this").
-- relation_history({ subject, relation?, object? }): every operation in order — who, why, standing, version.`,
+- relation_history({ subject, relation?, object? }): every operation in order — who, why, standing, version.
+- relation_copy_record({ subject, target, at: { version, generation }, digest, why? }): maintainers only — the receipt of a
+  copy of a subject's relations you published somewhere (\`target\` names the place to you; \`digest\` is your hash of
+  the text). It moves no version.
+- relation_copies({ subjects, target? }): the latest receipt per place and whether the relations moved since
+  (\`behind\`); a receipt from an earlier generation says so and is not compared by number.`,
 
   /**
    * Spawn the GENERIC skill MCP server (bin/mcp-skill.mjs) pointing at this
@@ -792,6 +799,60 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
       },
     },
     {
+      name: 'relation_copy_record',
+      description: "Record the RECEIPT of a copy of a subject's relations that you published somewhere (a text copy for people, say): where the copy lives (`target`, any string that names the place to you), which relations version and generation it was made from (`at`, as relation_list answered them), and your own hash of the exact text you wrote (`digest`). The platform keeps it in its own storage — nobody but this tool writes it — so \"is the copy behind?\" and \"was it changed since?\" are later a lookup (relation_copies) and a hash compare, never a reading of the text. Recording a receipt changes no relation and does not move the version; it is listed in the subject's history. Maintainers only.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "The node whose relations the copy shows."
+          },
+          "target": {
+            "type": "string",
+            "description": "Where the copy lives — an opaque string you choose and will ask by again. One receipt is current per subject and target."
+          },
+          "at": {
+            "type": "object",
+            "description": "{ version, generation } — the relations version the copy was made from and the generation that version belongs to, as the read you made it from answered them.",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "description": "The subject's relations version the copy shows."
+              },
+              "generation": {
+                "type": "string",
+                "description": "The id of the generation that version belongs to (`generation.id` of the read)."
+              }
+            },
+            "required": [
+              "version",
+              "generation"
+            ]
+          },
+          "digest": {
+            "type": "string",
+            "description": "Your hash of the exact text you published. Compared by you later; the platform only keeps it."
+          },
+          "why": {
+            "type": "string",
+            "description": "Why it was published, in plain words. Optional."
+          },
+          "key": {
+            "type": "string",
+            "description": "Idempotency key."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "subject",
+          "target",
+          "at",
+          "digest"
+        ]
+      },
+    },
+    {
       name: 'relation_list',
       description: "The relations of many subjects in one call. Per subject and per kind of relation: coverage ('not_recorded' = no source ever stated the whole set; 'partial' = a statement is under way or writes are still waiting; 'known' = a source stated its whole set — an empty one included), who established it, every relation with each assertion on it (standing, state, source, author, when, why), disagreements between sources, writes still waiting (how long, how many attempts, the graph's last words, what waits behind them) and writes that will never land (refused by the graph, or withdrawn). When the graph does not answer the result is { available: false, reason, … } with the waiting writes — an ANSWER, never an empty list: unavailable is not \"none\".",
       input_schema: {
@@ -848,6 +909,30 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
         "required": [
           "objects",
           "relation"
+        ]
+      },
+    },
+    {
+      name: 'relation_copies',
+      description: "For many subjects in one call: the latest receipt of each published copy of their relations (relation_copy_record) — where it lives, which version and generation it was made from, the hash of its text, when and by whom — and, as a plain fact, whether the relations have moved since: `behind: true` with the current version. A receipt from an EARLIER generation (the box was restored from a backup since) says so and is never compared by number. A subject no copy was recorded for says so. Read from the platform's own record: it answers while the graph is down.",
+      input_schema: {
+        "type": "object",
+        "properties": {
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The node ids to read."
+          },
+          "target": {
+            "type": "string",
+            "description": "Only the copy that lives here. Omit for every target."
+          },
+          "store": STORE_PARAM
+        },
+        "required": [
+          "subjects"
         ]
       },
     },

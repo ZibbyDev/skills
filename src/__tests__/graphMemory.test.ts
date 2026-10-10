@@ -161,7 +161,7 @@ describe('resolve() — the MCP child env', () => {
 });
 
 describe('relation tools — the maintained relations on the same store', () => {
-  const RELATION = ['relation_add', 'relation_remove', 'relation_replace', 'relation_confirm', 'relation_adopt', 'relation_withdraw', 'relation_rebuild', 'relation_list', 'relation_dependents', 'relation_history'];
+  const RELATION = ['relation_add', 'relation_remove', 'relation_replace', 'relation_confirm', 'relation_adopt', 'relation_withdraw', 'relation_rebuild', 'relation_copy_record', 'relation_list', 'relation_dependents', 'relation_copies', 'relation_history'];
 
   it('offers the relation tools; a tool\'s name is its op on the store route', () => {
     const names = graphMemorySkill.tools.map((t: any) => t.name).filter((n: string) => n.startsWith('relation_'));
