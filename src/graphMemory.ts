@@ -268,13 +268,18 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
 - relation_confirm({ assertion, decision, why }) and relation_adopt({ relation, why }): maintainers only.
 - relation_withdraw({ op, why }): withdraw a write that is still WAITING (e.g. one the graph keeps failing), so the writes
   behind it can proceed — a maintainer any, you your own. Nothing gives up on a waiting write by itself.
-- relation_rebuild({ why }): maintainers only — carry the platform's whole record of relation writes out again on a
-  graph that was replaced or emptied. (A graph that merely fell behind is caught up without being asked.)
+- relation_rebuild({ why }): maintainers only — carry the platform's whole record of relation writes out again and hold
+  the graph to it: what the record holds and the graph retired is put back, a live relation the record does not hold is
+  retired (never deleted); the answer lists \`restored\` and \`retired\`. For a graph that was replaced or emptied, or one
+  whose reads say \`aheadOfLog\`. (A graph that merely fell behind is caught up without being asked.)
 - relation_list({ subjects, relations?, asOf? }): per subject and kind — coverage ('not_recorded' | 'partial' | 'known'),
   relations with every assertion, disagreements, waiting and refused writes. \`available: false\` means the graph did
   not answer: that is NOT "none". \`catchingUp\` means the graph is being put back in step with the record: the kinds
-  marked 'partial' are not whole yet. Every answer with a \`version\` carries \`generation\` — versions are only
-  comparable inside one generation (it changes when the box is restored from a backup).
+  marked 'partial' are not whole yet. \`aheadOfLog\` ({ inGraph, inLog }) means the graph holds writes the record does
+  not (the platform's storage went back to a backup, the graph did not): what you read for the relations those writes
+  touched may be wrong — not settled, and NOT "none" — until a maintainer runs relation_rebuild. Every answer with a
+  \`version\` carries \`generation\` — versions are only comparable inside one generation (it changes when the box is
+  restored from a backup).
 - relation_dependents({ objects, relation }): the same, read from the other end ("what waits on this").
 - relation_history({ subject, relation?, object? }): every operation in order — who, why, standing, version.
 - relation_copy_record({ subject, target, at: { version, generation }, digest, why? }): maintainers only — the receipt of a
@@ -779,7 +784,7 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
     },
     {
       name: 'relation_rebuild',
-      description: "Put the graph back in step with the platform's own record of relation writes: every write ever applied is carried out again, in the order it first went in, as the agent that made it — nothing lands twice, and what the graph already has is left alone. For a graph that was replaced, emptied outside the platform, or cannot be trusted any more. (A graph that merely fell behind — restored to an older state — is caught up without being asked, on the next relation call.) Only relations recorded through these tools come back; whatever else the graph held is not in the record. Maintainers only.",
+      description: "Put the graph back in step with the platform's own record of relation writes. Every write ever applied is carried out again, in the order it first went in, as the agent that made it — nothing lands twice. The graph is then held to the record: a relation the record says holds and the graph has retired is put back, as its author, at its standing; a live relation the record does not hold is retired — never deleted. The answer says what was done: `changed`, `replayed`, and the relations `restored` and `retired` (each retired one with the reason). For a graph that was replaced, emptied outside the platform, or cannot be trusted any more — and for one whose reads say `aheadOfLog`: it holds writes the record does not (the platform's storage went back to a backup and the graph did not), and nothing but a rebuild repairs that. (A graph that merely fell behind — restored to an older state — is caught up without being asked, on the next relation call.) Only relations recorded through these tools come back; whatever else the graph held is not in the record. Maintainers only.",
       input_schema: {
         "type": "object",
         "properties": {
