@@ -149,6 +149,8 @@ export interface ActiveRun {
   workflowType?: string;
   workflowUuid?: string;
   parentExecutionId?: string | null;
+  /** Who started it, as the platform answers THIS run: this-run | your-agent | another-run | no-run. */
+  startedBy?: string;
   ticketKey?: string;
   status?: string;
   createdAt?: string;
@@ -210,6 +212,10 @@ export function compactRun(r: ActiveRun, nowMs = Date.now()) {
   if (r.workflowType) out.workflowType = r.workflowType;
   if (r.workflowUuid) out.workflowUuid = r.workflowUuid;
   if (r.parentExecutionId) out.parentExecutionId = r.parentExecutionId;
+  // The platform's own answer, passed on as given: a parent that has ended is
+  // in no list, so `relation` alone reads a member an EARLIER run of this same
+  // agent started as "other".
+  if (r.startedBy) out.startedBy = r.startedBy;
   if (r.ticketKey) out.ticketKey = r.ticketKey;
   if (r.status) out.status = r.status;
   if (r.currentStep) out.currentStep = r.currentStep;
@@ -933,7 +939,7 @@ refused; credentials belong on the agent's Env tab.`,
   tools: [
     {
       name: 'list_running_agents',
-      description: 'List the runs active right now that this run may reach (the agent\'s run access policy; by default its family) — teammates included. scope "project" (default) = every such run, each with relation: "child" (started by you), "sibling" (started by the same manager as you), "parent" (the run that started you), "other"; "descendants" = only runs you started (transitively). Only running runs appear: an idle manager is not listed. Each row has ageMinutes (since start) and idleMinutes (since it last reported). This run itself is never listed.',
+      description: 'List the runs active right now that this run may reach (the agent\'s run access policy; by default its family) — teammates included. scope "project" (default) = every such run, each with relation: "child" (started by you), "sibling" (started by the same manager as you), "parent" (the run that started you), "other"; "descendants" = only runs you started (transitively). Only running runs appear: an idle manager is not listed. Each row has ageMinutes (since start) and idleMinutes (since it last reported), and startedBy, the platform\'s record of who started it: "this-run" (this run of yours), "your-agent" (an earlier run of your own agent, or a run under one), "another-run" (a run that is not yours), "no-run" (a person or a trigger). This run itself is never listed.',
       input_schema: {
         type: 'object',
         properties: {

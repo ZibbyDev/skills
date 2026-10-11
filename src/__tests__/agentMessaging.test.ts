@@ -103,6 +103,20 @@ describe('descendantsOf (pure)', () => {
 });
 
 describe('list_running_agents', () => {
+  // A member an EARLIER run of this agent started has a parent that is in no
+  // list, so `relation` reads it as "other"; the platform's `startedBy` is the
+  // fact that says whose it is, and it reaches the model as given.
+  it('passes on the platform\'s record of who started each run', async () => {
+    mockDoor([['/projects/proj-1/runs/active', () => ({ json: { runs: [
+      { executionId: 'm-1', workflowType: 'code-review', parentExecutionId: 'earlier-round', startedBy: 'your-agent', status: 'running' },
+      { executionId: 'm-2', workflowType: 'code-review', status: 'running', startedBy: 'no-run' },
+    ] } })]]);
+    const out = await call('list_running_agents', {});
+    expect(out.runs.map((r: any) => [r.executionId, r.relation, r.startedBy])).toEqual([
+      ['m-1', 'other', 'your-agent'],
+      ['m-2', 'other', 'no-run'],
+    ]);
+  });
   it('descendants: only our subtree, with ageMinutes / idleMinutes computed locally', async () => {
     vi.useFakeTimers({ now: NOW });
     try {
