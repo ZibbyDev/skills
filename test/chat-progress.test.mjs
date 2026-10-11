@@ -90,6 +90,25 @@ test('records the line as the run\'s own, with the run\'s token, even with no ch
   assert.deepEqual(JSON.parse(calls[0].init.body), { statusLine: 'Ticket 42: fixing the login form focus' });
 });
 
+test('a successful reply acknowledges only the message IDs the agent explicitly supplied', async () => {
+  clearEnv(); setDoor(); stubFetch([]);
+  const r = JSON.parse(await chatProgressSkill.handleToolCall('report_progress', {
+    message: 'Yes, I have included your requirement.', answeredMessageIds: ['message-a'],
+  }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.answeredMessageIds, ['message-a']);
+  assert.equal(chatProgressSkill.tools[0].input_schema.properties.answeredMessageIds.items.type, 'string');
+});
+
+test('a failed reply cannot acknowledge a message', async () => {
+  clearEnv(); clearDoor();
+  const r = JSON.parse(await chatProgressSkill.handleToolCall('report_progress', {
+    message: 'Reply that cannot be posted.', answeredMessageIds: ['message-a'],
+  }));
+  assert.equal(r.ok, false);
+  assert.equal(r.answeredMessageIds, undefined);
+});
+
 test('records the line AND still posts to the chat when a target resolves', async () => {
   clearEnv(); setDoor();
   process.env.SLACK_BOT_TOKEN = 'xoxb-fake'; process.env.SLACK_CHANNEL = 'C123';

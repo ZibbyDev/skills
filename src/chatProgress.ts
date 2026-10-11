@@ -155,6 +155,10 @@ export const chatProgressSkill: any = {
 
   async handleToolCall(name, args) {
     if (name !== 'report_progress') return JSON.stringify({ error: `Unknown tool: ${name}` });
+    const receipt = (result: any) => {
+      if (result.ok !== true || !Array.isArray(args?.answeredMessageIds)) return JSON.stringify(result);
+      return JSON.stringify({ ...result, answeredMessageIds: args.answeredMessageIds.filter((id: unknown) => typeof id === 'string') });
+    };
     try {
       const message = String(args?.message || '').replace(/\s+/g, ' ').trim();
       if (!message) return JSON.stringify({ ok: false, skipped: 'empty message' });
@@ -166,7 +170,7 @@ export const chatProgressSkill: any = {
       // 2. Also: the chat this run came from, when one resolves.
       const { provider, chatId, mention } = resolveTarget(args);
       if (!provider || !chatId) {
-        return JSON.stringify(recorded ? { ok: true, recorded: true, posted: false } : { ok: false, recorded: false, skipped: 'no chat target' });
+        return receipt(recorded ? { ok: true, recorded: true, posted: false } : { ok: false, recorded: false, skipped: 'no chat target' });
       }
       const text = mention && provider === 'slack' ? `<@${mention}> ${message}` : message;
       let res;
@@ -178,8 +182,8 @@ export const chatProgressSkill: any = {
       // Never surface a raw provider error as a throw; report soft.
       let parsed = null;
       try { parsed = JSON.parse(res); } catch { /* provider returned non-JSON */ }
-      if (parsed && parsed.error) return JSON.stringify({ ok: recorded, recorded, skipped: `post failed: ${parsed.error}` });
-      return JSON.stringify({ ok: true, provider, posted: true, recorded });
+      if (parsed && parsed.error) return receipt({ ok: recorded, recorded, skipped: `post failed: ${parsed.error}` });
+      return receipt({ ok: true, provider, posted: true, recorded });
     } catch (e) {
       // Fire-and-forget: a progress ping never fails the node.
       return JSON.stringify({ ok: false, skipped: `error: ${e.message}` });
@@ -194,6 +198,7 @@ export const chatProgressSkill: any = {
         type: 'object',
         properties: {
           message: { type: 'string', description: `The update, at most ${PROGRESS_MAX_CHARS} characters, e.g. "Scored 60 of 188 commits, continuing…".` },
+          answeredMessageIds: { type: 'array', items: { type: 'string' }, description: 'Optional inbox message IDs answered by this reply. Omit for an unrelated progress update.' },
           provider: { type: 'string', enum: ['lark', 'slack'], description: 'Optional — the chat provider (from your notify input). Defaults from the runtime.' },
           chatId: { type: 'string', description: 'Optional — the target chat/channel id (from your notify input). Defaults from the runtime.' },
         },
