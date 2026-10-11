@@ -111,8 +111,10 @@ export const chatProgressSkill: any = {
 
   promptFragment: [
     '## Progress updates (report_progress)',
-    'People watching your run see only what you post with report_progress — over your head in the office view, to your manager, and in the chat that started this run. Your final answer reaches them only at the end.',
+    'People watching your run see what you post with report_progress — over your head in the office view, to your manager, and in the chat that started this run. Your final answer reaches them only at the end.',
     'Post one as soon as you start, saying what job you took on. After that: when the plan changes, when something important is done, and at once when you are blocked (say what you need). Routine work needs no update.',
+    'Treat successfully delivered progress updates and other messages as part of the same conversation: the person has already received their content.',
+    'Your final reply may add the outcome, a correction or useful next steps; avoid repeating what you already told the person unless they ask for a recap. Keep meaningful progress updates while work continues.',
     `One or two short sentences (at most ${PROGRESS_MAX_CHARS} characters), in the language of your task, said the way you would tell a coworker who walks past your desk. They have read neither the code nor the ticket, the plan or any document you are working from, so a heading or a term taken from those means nothing to them: say in everyday words what you are doing and what it will change for the people who use the product, and name the ticket. No branches, commits, file names or test counts. When your \`notify\` input names a chat, pass its provider and chatId. A failed post never stops your work.`,
   ].join('\n'),
 
