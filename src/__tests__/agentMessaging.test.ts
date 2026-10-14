@@ -843,6 +843,22 @@ describe('list_messages — what this agent still owes, or its history', () => {
     expect(p).toMatch(/No receipt will ever come/);
     expect(p).toMatch(/run\s+log is evidence to cite/);
   });
+  // run_log/magnum/2026-10-14-224-rounds-a-day: ~80% of members' 190 messages
+  // to the manager in a day restated a hand-back or a finish the run's own
+  // result carried, each waking the manager for a round. The rule read "every
+  // state change … BEFORE any message" — i.e. write the ticket, THEN message.
+  // The fact that replaced it: a run's end reaches its starter by itself, and a
+  // message is a doorbell that costs its reader a round. Express card:
+  // workflow-templates developer/evals/member-messaging-cost.eval.mjs.
+  it('rule 1 states that a run\'s end reaches its starter by itself, and no longer reads "then message"', () => {
+    const p = agentMessagingSkill.promptFragment as string;
+    const rule1 = p.slice(p.indexOf('1. TICKET FIRST'), p.indexOf('2. MESSAGES'));
+    expect(rule1).toMatch(/handed back,\s+done — goes on the ticket\./);
+    expect(rule1).not.toMatch(/BEFORE any message/i);
+    expect(rule1).toMatch(/A message is a doorbell; the ticket is the memory\./);
+    expect(rule1).toMatch(/A doorbell wakes\s+its reader for a round of its own\./);
+    expect(rule1).toMatch(/When your run ends, its result reaches\s+whoever started it by itself, as a completion notice\./);
+  });
   it('message_agent says on every result that no receipt will come', async () => {
     mockDoor([['/workflows/developer/inbox', () => ({ json: { ok: true, messageId: 'note-1', woke: false } })]]);
     const out = await call('message_agent', { workflowType: 'developer', text: 'please pick up ZB-7' });

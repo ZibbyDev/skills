@@ -868,12 +868,14 @@ Tools (each one's description carries its arguments):
 
 ### TAKING OVER — the rules every teammate on this project follows
 1. TICKET FIRST. Every state change or decision — took it on, blocked, handed back,
-   done — goes on the ticket BEFORE any message. Every agent writes through the SAME
+   done — goes on the ticket. Every agent writes through the SAME
    board account, so the assignee field cannot tell agents apart: the owner is the
    agent named in the newest ownership comment (this team's claim line is
    "[MAGNUM] dispatch worker=<agent> exec=<executionId>"). Taking a request on is a
    comment naming YOUR workflowType and executionId; handing it over is a comment
-   naming THEM. A message is a doorbell; the ticket is the memory.
+   naming THEM. A message is a doorbell; the ticket is the memory. A doorbell wakes
+   its reader for a round of its own. When your run ends, its result reaches
+   whoever started it by itself, as a completion notice.
 2. MESSAGES ARE SELF-SUFFICIENT: the ticket key, what is blocked, what you need, and
    where the evidence is (your executionId, for read_run_logs). The reader is a fresh
    run with no memory of you.
