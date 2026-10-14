@@ -512,7 +512,7 @@ describe('contract pin: agent-inbox.js message shape', () => {
       expect(m, `${name} must be declared in agent-inbox.js`).toBeTruthy();
       return m![1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
     };
-    expect(list('MESSAGE_FIELDS')).toEqual(['id', 'at', 'from', 'about', 'text', 'relayNote', 'personWordsCheck', 'answerTo', 'needsAck', 'notBefore', 'afterExecutionId', 'ackedAt', 'ackedBy', 'replyTo']);
+    expect(list('MESSAGE_FIELDS')).toEqual(['id', 'at', 'from', 'about', 'text', 'relayNote', 'personWordsCheck', 'answerTo', 'needsAck', 'notBefore', 'afterExecutionId', 'holdRings', 'ackedAt', 'ackedBy', 'replyTo']);
     // A person's reply to a verification card is marked with this field, and the
     // drain below leaves such a row to the person_verification call waiting for it.
     expect(src).toMatch(/const REPLY_TO_FIELD = 'replyTo';/);
