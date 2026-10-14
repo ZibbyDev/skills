@@ -2,10 +2,10 @@
  * cardActions.ts — WHAT A BUTTON ON A CARD CAN DO, AS AN AGENT IS TOLD IT.
  *
  * A card's button (`needs_you` options) is a plain choice — the person's
- * answer, which the agent reads — or it CARRIES AN ACTION: a platform call
- * whose name and arguments are RECORDED on the card when it is raised, and
- * which the platform itself runs when the project owner clicks that button.
- * Nothing typed or said runs it.
+ * answer, which the agent reads — or it CARRIES ACTIONS, one or several:
+ * platform calls whose names and arguments are RECORDED on the card when it is
+ * raised, and which the platform itself runs when the project owner clicks
+ * that button. Nothing typed or said runs them.
  *
  * THE LIST IS THE PLATFORM'S, AND CLOSED (backend
  * src/services/card-actions.js — `cardActionCatalog()` is its one
@@ -100,8 +100,8 @@ export const OPTION_ACTIONS_INPUT = Object.freeze({
     }),
     required: Object.freeze(['option', 'action', 'args']),
   }),
-  description: 'Optional: what a button DOES. A button with no entry here is a plain choice — the person\'s answer, for you to read. A button with one carries an action: when the project owner clicks it the platform itself does it, with exactly the arguments you record here, and sends you a message saying what was done or that it was not. Nothing anyone types or says does it — only that click. '
-    + 'One entry per button that does something: { `option`: that button\'s words exactly as written in options, `action`: a name from the platform\'s list, `args`: { its arguments by name, as text } }. The platform\'s list: '
+  description: 'Optional: what a button DOES. A button with no entry here is a plain choice — the person\'s answer, for you to read. A button with entries carries their actions, one or several: when the project owner clicks it the platform itself does every one of them, each with exactly the arguments you record here, and sends you a message saying, action by action, what was done and what was not and why. Before the click the card shows the owner the platform\'s own sentence for everything that button does. Nothing anyone types or says does any of it — only that click. '
+    + 'One entry per action: { `option`: the words of the button that carries it, exactly as written in options, `action`: a name from the platform\'s list, `args`: { its arguments by name, as text } }; entries that name the same button are all that button\'s. The platform\'s list: '
     + `${cardActionsSaid()} `
     + 'The platform checks each entry when the card is raised and says why it refuses one. A card whose choices are picked together (`multi`) cannot carry one.',
 });
