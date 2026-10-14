@@ -193,7 +193,7 @@ const RECALL_QUERY_SCHEMA = {
     limit: { type: 'integer', description: 'Cap on returned hits (default 50).' },
     order: { type: 'string', enum: ['cost', 'recent', 'oldest'], description: "'cost' (default) = closest first." },
     includeSeeds: { type: 'boolean', description: 'Include the seed nodes themselves as hits.' },
-    project: { type: 'string', enum: ['summary', 'full'], description: "How much of each hit to return: 'summary' (default) = id, kind, label, provenance, time and the path's relation names; 'full' = whole records including attrs." },
+    project: { type: 'string', enum: ['summary', 'full'], description: "How much of each hit to return. Omitted on every query: the brief form — each hit's node id, cost, seed and the relations walked; each node's kind and label. 'summary' = each node's id, kind, label, provenance, version and time, and each path's edges (ids, endpoints, cost, provenance, time); 'full' = whole records including attrs." },
     validAt: { type: 'integer', description: 'WORLD-time filter (ms epoch): only edges valid at this instant.' },
     asOf: { type: 'integer', description: 'KNOWLEDGE-time filter (ms epoch): what the graph knew then.' },
     recordedBetween: { type: 'array', items: { type: ['integer', 'null'] }, description: 'KNOWLEDGE-time window [from, to] (ms epoch or null).' },
@@ -254,7 +254,7 @@ Tools:
 - graph_link({ src, dst, rel, cost?, scope?, validFrom?, validTo?, attrs?, store? }): assert src →rel→ dst.
 - graph_get({ id | edgeId, store? }): one node or edge, latest version, no traversal — check before you put.
 - graph_recall({ queries: [{ seeds?, match?, rels?, kinds?, maxCost?, direction?, validAt?, asOf? }], store? }):
-  batched traversal; each hit carries its cost and the exact path of edges.
+  batched traversal; each hit carries its cost, its seed and the relations walked (project 'summary' or 'full' on a query adds each path's edges or whole records).
 - graph_subgraph({ seeds?, match?, rels?, kinds?, maxCost?, store? }): the induced subgraph (nodes + all live edges) for visualisation/hand-off.
 - graph_trace({ id, store? }): a node's full history — every version and every edge, superseded ones included.
 
@@ -408,7 +408,7 @@ FACT when the platform trusts your agent for this graph, otherwise your PROPOSAL
     },
     {
       name: 'graph_recall',
-      description: 'The main read, BATCHED: several recall queries in one call. Each starts from seeds (ids) and/or match (kind/label/attrs) and walks the graph cheapest-first within maxCost, returning every reachable node with its cost, the exact path of edges walked (origin, provenance, scope, validity) and which seed reached it. Shape the walk with rels (which hops), kinds (what to return), direction, scope, provenance; validAt = world time ("what was true then"), asOf = knowledge time ("what did the graph know then"). Results stay grouped per query; node records are in the shared `nodes` map.',
+      description: 'The main read, BATCHED: several recall queries in one call. Each starts from seeds (ids) and/or match (kind/label/attrs) and walks the graph cheapest-first within maxCost, returning every reachable node with its cost, which seed reached it and the relations walked. Shape the walk with rels (which hops), kinds (what to return), direction, scope, provenance; validAt = world time ("what was true then"), asOf = knowledge time ("what did the graph know then"). Results stay grouped per query; nodes are in the shared `nodes` map. When no query names `project` the answer is brief (ids, kinds, labels, relation names) and says how to fetch the rest: graph_get / graph_trace by id, or project \'summary\' (each path\'s edges) / \'full\' (whole records).',
       input_schema: {
         type: 'object',
         properties: {
