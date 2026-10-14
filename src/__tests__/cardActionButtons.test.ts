@@ -84,14 +84,27 @@ describe('needs_you says what a button can do — as facts, from the one list', 
   it('states what an action button is: the platform does it on the project owner\'s click, with the recorded arguments, and says what happened — words never do it', () => {
     const said = input().description;
     expect(said).toMatch(/plain choice/);
-    expect(said).toMatch(/the platform itself does it/);
+    expect(said).toMatch(/the platform itself does every one of them/);
     expect(said).toMatch(/project owner clicks/);
     expect(said).toMatch(/exactly the arguments you record/);
-    expect(said).toMatch(/message saying what was done/);
-    expect(said).toMatch(/Nothing anyone types or says does it/);
+    expect(said).toMatch(/message saying, action by action, what was done and what was not and why/);
+    expect(said).toMatch(/Nothing anyone types or says does any of it/);
     // The whole shape is in the WORDS too: bin/mcp-skill.mjs shows the model only an input's type and description.
     for (const key of ['option', 'action', 'args']) expect(said).toContain(`\`${key}\``);
     expect(said).toMatch(/`multi`\) cannot carry one/);
+  });
+
+  // A/B: before, the input said "A button with one carries an action" and "One entry per button that does
+  // something" — an agent that needed several things granted was told a button holds one.
+  it('states that a button carries ONE ACTION OR SEVERAL, all done on the one click, each reported — and never "one per button"', () => {
+    const said = input().description;
+    expect(said).toMatch(/A button with entries carries their actions, one or several/);
+    expect(said).toMatch(/One entry per action/);
+    expect(said).toMatch(/entries that name the same button are all that button's/);
+    expect(said).toMatch(/Before the click the card shows the owner the platform's own sentence for everything that button does/);
+    expect(said).not.toMatch(/One entry per button/i);
+    expect(said).not.toMatch(/carries an action:/);
+    expect(tool('needs_you').description).toMatch(/unless you give it one or several actions/);
   });
 
   it('names every entry of the list with what it is and every argument with what it means', () => {
@@ -113,14 +126,14 @@ describe('needs_you says what a button can do — as facts, from the one list', 
   it('the tool\'s own description says a choice can carry an action, and names the entries from the same list', () => {
     const said = tool('needs_you').description;
     expect(said).toContain('`optionActions`');
-    expect(said).toMatch(/the platform itself does that when the project owner clicks it/);
+    expect(said).toMatch(/the platform itself does those when the project owner clicks it/);
     for (const entry of cardActions.CARD_ACTIONS) expect(said).toContain(entry.name);
   });
 
   it('the folder-request tool no longer says a card\'s choice can never give access: one that carries the folder action does, on the owner\'s click', () => {
     const said = tool('request_local_folder').description;
     expect(cardActions.CARD_ACTIONS.map((e) => e.name)).toContain(cardActions.FOLDER_ACTION);
-    expect(said).toContain(`a needs_you button grants it only when you gave it the ${cardActions.FOLDER_ACTION} action, and then by the owner's click`);
+    expect(said).toContain(`a needs_you button grants it only when you gave it the ${cardActions.FOLDER_ACTION} action, once for each folder that click is to add, and then by the owner's click`);
     // What it said before still holds for words: nothing anyone SAYS grants access.
     expect(said).toMatch(/Nothing you or anyone says grants access — not a needs_you choice, not a chat message/);
   });
@@ -148,6 +161,14 @@ describe('needs_you records what it was given — it checks nothing of an action
     await call('needs_you', { text: TEXT, options: OPTIONS, optionActions });
     expect(seen).toHaveLength(1);
     expect(seen[0].body.data.optionActions).toEqual(optionActions);
+  });
+
+  it('several actions on ONE button are sent exactly as given, in order — one entry per action', async () => {
+    platform();
+    const three = ['agent-workflow', 'cli', 'core'].map((name) => ({ option: 'Let the team edit it', action: 'project_folder', args: { path: `/Users/sam/Projects/acme/packages/${name}`, access: 'editable' } }));
+    await call('needs_you', { text: TEXT, options: OPTIONS, optionActions: three });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].body.data.optionActions).toEqual(three);
   });
 
   it('together with `multi` it is still sent as it is: that the two do not go together is the platform\'s rule to say', async () => {
@@ -204,7 +225,7 @@ describe('contract pin: card-actions.js — the list an agent is told is the pla
   });
 
   pin('what the description says of every entry is true of each: the project owner clicks it, the platform does it', () => {
-    expect(cardActions.OPTION_ACTIONS_INPUT.description).toMatch(/project owner clicks it the platform itself does it/);
+    expect(cardActions.OPTION_ACTIONS_INPUT.description).toMatch(/project owner clicks it the platform itself does every one of them/);
     for (const entry of platformList().cardActionCatalog()) {
       expect(entry.clicker, `${entry.name} is clicked by someone else — the description says the project owner`).toBe('project-owner');
       expect(entry.runs, `${entry.name} runs somewhere else — the description says the platform does it`).toBe('platform');
@@ -217,6 +238,21 @@ describe('contract pin: card-actions.js — the list an agent is told is the pla
     const keys = /const RECORD_KEYS = Object\.freeze\(\[([^\]]*)\]\)/.exec(src);
     expect(keys, 'RECORD_KEYS must be declared in card-actions.js').toBeTruthy();
     expect(keys![1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''))).toEqual(Object.keys(cardActions.OPTION_ACTIONS_INPUT.items.properties));
+  });
+
+  // 🔗 TWO-PLACES: the description tells an agent a button carries one action or several. Against a platform that
+  // takes one per button this FAILS — the agent would be told something the platform refuses.
+  pin('several entries that name ONE button are taken by the platform as written, and its one sentence for that button says all of them', () => {
+    expect(cardActions.OPTION_ACTIONS_INPUT.description).toMatch(/entries that name the same button are all that button's/);
+    const p = platformList();
+    const capabilities = Object.fromEntries(Object.values(p._test.LIST).map((e: any) => [e.capability, true]));
+    const folders = ['agent-workflow', 'cli', 'core'].map((name) => `/Users/sam/Projects/acme/packages/${name}`);
+    const record = folders.map((path) => ({ option: 'Yes, all of it', action: 'project_folder', args: { path, access: 'editable' } }));
+    const options = ['Yes, all of it', 'Not now'];
+    expect(p.validateOptionActions(record, options, { capabilities })).toEqual({ ok: true, value: record });
+    const shown = p.describeOptionActions({ options, optionActions: record });
+    expect(shown).toHaveLength(1);
+    for (const path of folders) expect(shown[0].does).toContain(path);
   });
 
   pin('a card whose choices are picked together cannot carry an action — as the input\'s description says', () => {

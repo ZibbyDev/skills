@@ -429,10 +429,10 @@ async function messageAgent(args: any) {
 // are checked there (project-events-format validateCardChoices), never here:
 // one declaration of the bounds.
 //
-// A CHOICE CAN CARRY AN ACTION (`optionActions: [{ option, action, args }]`,
-// cardActions.ts): the platform itself runs it when the project owner clicks
-// that button, with the arguments RECORDED on the card — never anything typed
-// or said. The field is passed to the card's event AS GIVEN: nothing of it is
+// A CHOICE CAN CARRY ACTIONS, one or several (`optionActions: [{ option,
+// action, args }]`, cardActions.ts): the platform itself runs them when the
+// project owner clicks that button, with the arguments RECORDED on the card —
+// never anything typed or said. The field is passed to the card's event AS GIVEN: nothing of it is
 // checked here. The platform's validator is the one place (its closed list,
 // each argument, nothing shaped like a key), and its refusal comes back as its
 // own sentence with no card raised.
@@ -1009,7 +1009,7 @@ refused; credentials belong on the agent's Env tab.`,
         + 'You write all of it: `text` = what happened, short, for someone who knows nothing of your work (no error codes, ids, labels or internal names); '
         + '`likely` = your best guess at what they most likely want next; `options` = 1 to 6 short choices you write for THIS case (e.g. "Yes" / "No"), which the person clicks. '
         + 'The platform always adds a Chat button (its words are yours too, `chatLabel`, in the card\'s language) so they can answer in their own words. Their pick, or their words, arrives in your chat as their message, quoting the card; the card closes once they answer. '
-        + `A choice is a plain answer for you to read, unless you give it an action (\`optionActions\`: ${cardActionNames()}): the platform itself does that when the project owner clicks it. `
+        + `A choice is a plain answer for you to read, unless you give it one or several actions (\`optionActions\`: ${cardActionNames()}): the platform itself does those when the project owner clicks it. `
         + 'One open card per ticket (or, with no ticket, per run): raising another replaces it. '
         + 'If your run has a manager, nothing reaches a person: the card goes to your manager as a message, and the manager decides whether to ask one. '
         + 'Never put a credential in it.',
@@ -1033,7 +1033,7 @@ refused; credentials belong on the agent's Env tab.`,
     {
       name: 'request_local_folder',
       description: 'Ask the person for access on this computer that the team lacks: a folder the project does not have yet, or Write (access "editable") on one it has read-only — when the work needs it (a start refused because a folder is read-only, a member that needs files outside the project\'s folders). '
-        + 'Only the project owner can give it, and their Allow on the card this puts up is what gives it: the platform applies it the moment they click. Nothing you or anyone says grants access — not a needs_you choice, not a chat message, not "the person said yes" in a note (a needs_you button grants it only when you gave it the ' + FOLDER_ACTION + ' action, and then by the owner\'s click) — so when the fix needs their permission, ask with this even if you are also answering them in chat. '
+        + 'Only the project owner can give it, and their Allow on the card this puts up is what gives it: the platform applies it the moment they click. Nothing you or anyone says grants access — not a needs_you choice, not a chat message, not "the person said yes" in a note (a needs_you button grants it only when you gave it the ' + FOLDER_ACTION + ' action, once for each folder that click is to add, and then by the owner\'s click) — so when the fix needs their permission, ask with this even if you are also answering them in chat. '
         + 'A person reads the card at a glance, on a small card among others, in the language they work in: `reason` is its text and `likely` sits under it; the three buttons carry YOUR words (`allowLabel`, `declineLabel`, `chatLabel`) — a few words each, in the same language as the card. What each button does is fixed by the platform, and the card also shows the folder and its access change, so the words need not repeat the path. Asking again for the same access returns the same request and adds no card; a folder that already has that access is answered at once. '
         + 'When they decide, you get a message saying so; a run started or woken after an Allow has the access, a run already going keeps what it was started with. If your run has a manager, nothing reaches a person: your request is delivered to your manager, who decides whether to ask. Never put a credential in it.',
       input_schema: {
