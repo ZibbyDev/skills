@@ -557,9 +557,10 @@ describe('contract pin: agent-inbox.js message shape', () => {
     const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent');
     const d = tool.description as string;
     expect(d).toMatch(/delaySeconds/);
-    expect(d).toMatch(/instead of sleeping or polling/i);
-    expect(d).toMatch(/platform will NOT announce|not announce/i);
-    expect(d).toMatch(/build/i);                       // the case it is NOT for
+    // The tool states the fact (a delayed note wakes a fresh round, so a wait needs no live run);
+    // WHEN to use it — follow-ups, and that a build request is not one — is the prompt's, pinned below.
+    expect(d).toMatch(/sleeping or polling/i);
+    expect(d).toMatch(/not announce/i);
     const p = agentMessagingSkill.promptFragment as string;
     expect(p).not.toMatch(/Never sleep, never loop|END YOUR ROUND/);
     expect(p).toContain('Sending a build request does not require handing the work to a manager');
@@ -752,7 +753,8 @@ describe('history: acknowledged rows are never re-delivered, and old history is 
 describe('message_agent — the bound a sender is told is the platform\'s own', () => {
   it('the text description states MESSAGE_TEXT_MAX and that a longer message is refused, not cut', () => {
     const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent');
-    expect(tool.input_schema.properties.text.description).toContain(`up to ${MESSAGE_TEXT_MAX} characters — a longer one is refused whole, never cut`);
+    expect(tool.input_schema.properties.text.description).toContain(`up to ${MESSAGE_TEXT_MAX} characters`);
+    expect(tool.input_schema.properties.text.description).toMatch(/a longer one is refused whole/);
     expect(tool.input_schema.properties.text.description).not.toMatch(/2000 characters/);
   });
   const here = dirname(fileURLToPath(import.meta.url));
@@ -846,7 +848,7 @@ describe('list_messages — what this agent still owes, or its history', () => {
     const out = await call('message_agent', { workflowType: 'developer', text: 'please pick up ZB-7' });
     expect(out.receipt).toMatch(/store-and-ring/);
     expect(out.receipt).toMatch(/No receipt/i);
-    expect(agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent').description).toMatch(/NO receipt/);
+    expect(agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent').description).toMatch(/no receipt or reply comes back/i);
   });
 });
 
@@ -925,8 +927,9 @@ describe('the button words are the card author\'s', () => {
   it('request_local_folder requires the Allow and Not-now words; needs_you carries an optional Chat word', async () => {
     const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'request_local_folder');
     expect(tool.input_schema.required).toEqual(['path', 'access', 'reason', 'allowLabel', 'declineLabel']);
-    expect(tool.description).toMatch(/at a glance/);
-    expect(tool.description).toMatch(/in the same language as the card/);
+    // The card shows the author's three labels; each is written in the card's language.
+    expect(tool.description).toMatch(/your three button labels/);
+    for (const label of ['allowLabel', 'declineLabel']) expect(tool.input_schema.properties[label].description).toMatch(/in the card's language/);
     process.env.WORKFLOW_UUID = 'uuid-self';
     mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: 'events:1-a', routed: 'person' } })]]);
     await call('needs_you', { text: '要打开写权限吗？', options: ['好', '不要'], chatLabel: '聊聊' });

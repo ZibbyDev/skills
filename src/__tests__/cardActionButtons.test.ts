@@ -84,11 +84,10 @@ describe('needs_you says what a button can do — as facts, from the one list', 
   it('states what an action button is: the platform does it on the project owner\'s click, with the recorded arguments, and says what happened — words never do it', () => {
     const said = input().description;
     expect(said).toMatch(/plain choice/);
-    expect(said).toMatch(/the platform itself does every one of them/);
-    expect(said).toMatch(/project owner clicks/);
-    expect(said).toMatch(/exactly the arguments you record/);
-    expect(said).toMatch(/message saying, action by action, what was done and what was not and why/);
-    expect(said).toMatch(/Nothing anyone types or says does any of it/);
+    expect(said).toMatch(/project owner clicks it, the platform does each/);
+    expect(said).toMatch(/with the recorded arguments/);
+    expect(said).toMatch(/action by action, what was and was not done and why/);
+    expect(said).toMatch(/Only that click runs them/);
     // The whole shape is in the WORDS too: bin/mcp-skill.mjs shows the model only an input's type and description.
     for (const key of ['option', 'action', 'args']) expect(said).toContain(`\`${key}\``);
     expect(said).toMatch(/`multi`\) cannot carry one/);
@@ -101,10 +100,10 @@ describe('needs_you says what a button can do — as facts, from the one list', 
     expect(said).toMatch(/A button with entries carries their actions, one or several/);
     expect(said).toMatch(/One entry per action/);
     expect(said).toMatch(/entries that name the same button are all that button's/);
-    expect(said).toMatch(/Before the click the card shows the owner the platform's own sentence for everything that button does/);
+    expect(said).toMatch(/before the click the card shows the owner what the button does/i);
     expect(said).not.toMatch(/One entry per button/i);
     expect(said).not.toMatch(/carries an action:/);
-    expect(tool('needs_you').description).toMatch(/unless you give it one or several actions/);
+    expect(tool('needs_you').description).toMatch(/plain answer for you to read unless it carries actions/);
   });
 
   it('names every entry of the list with what it is and every argument with what it means', () => {
@@ -126,16 +125,16 @@ describe('needs_you says what a button can do — as facts, from the one list', 
   it('the tool\'s own description says a choice can carry an action, and names the entries from the same list', () => {
     const said = tool('needs_you').description;
     expect(said).toContain('`optionActions`');
-    expect(said).toMatch(/the platform itself does those when the project owner clicks it/);
+    expect(said).toMatch(/the platform does when the project owner clicks it/);
     for (const entry of cardActions.CARD_ACTIONS) expect(said).toContain(entry.name);
   });
 
   it('the folder-request tool no longer says a card\'s choice can never give access: one that carries the folder action does, on the owner\'s click', () => {
     const said = tool('request_local_folder').description;
     expect(cardActions.CARD_ACTIONS.map((e) => e.name)).toContain(cardActions.FOLDER_ACTION);
-    expect(said).toContain(`a needs_you button grants it only when you gave it the ${cardActions.FOLDER_ACTION} action, once for each folder that click is to add, and then by the owner's click`);
+    expect(said).toContain(`a needs_you button does only when it carries the ${cardActions.FOLDER_ACTION} action (one per folder) and the owner clicks it`);
     // What it said before still holds for words: nothing anyone SAYS grants access.
-    expect(said).toMatch(/Nothing you or anyone says grants access — not a needs_you choice, not a chat message/);
+    expect(said).toMatch(/Nothing said or written grants it/);
   });
 });
 
@@ -225,7 +224,7 @@ describe('contract pin: card-actions.js — the list an agent is told is the pla
   });
 
   pin('what the description says of every entry is true of each: the project owner clicks it, the platform does it', () => {
-    expect(cardActions.OPTION_ACTIONS_INPUT.description).toMatch(/project owner clicks it the platform itself does every one of them/);
+    expect(cardActions.OPTION_ACTIONS_INPUT.description).toMatch(/project owner clicks it, the platform does each/);
     for (const entry of platformList().cardActionCatalog()) {
       expect(entry.clicker, `${entry.name} is clicked by someone else — the description says the project owner`).toBe('project-owner');
       expect(entry.runs, `${entry.name} runs somewhere else — the description says the platform does it`).toBe('platform');

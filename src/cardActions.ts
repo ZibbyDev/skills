@@ -94,14 +94,14 @@ export const OPTION_ACTIONS_INPUT = Object.freeze({
   items: Object.freeze({
     type: 'object',
     properties: Object.freeze({
-      option: Object.freeze({ type: 'string', description: 'the button this is about: its words, exactly as written in options' }),
-      action: Object.freeze({ type: 'string', description: `the action's name on the platform's list (${cardActionNames()})` }),
-      args: Object.freeze({ type: 'object', additionalProperties: Object.freeze({ type: 'string' }), description: 'that action\'s arguments, by name' }),
+      option: Object.freeze({ type: 'string', description: 'the button\'s words, as written in options' }),
+      action: Object.freeze({ type: 'string', description: `a name from the platform's list (${cardActionNames()})` }),
+      args: Object.freeze({ type: 'object', additionalProperties: Object.freeze({ type: 'string' }), description: 'its arguments by name' }),
     }),
     required: Object.freeze(['option', 'action', 'args']),
   }),
-  description: 'Optional: what a button DOES. A button with no entry here is a plain choice — the person\'s answer, for you to read. A button with entries carries their actions, one or several: when the project owner clicks it the platform itself does every one of them, each with exactly the arguments you record here, and sends you a message saying, action by action, what was done and what was not and why. Before the click the card shows the owner the platform\'s own sentence for everything that button does. Nothing anyone types or says does any of it — only that click. '
-    + 'One entry per action: { `option`: the words of the button that carries it, exactly as written in options, `action`: a name from the platform\'s list, `args`: { its arguments by name, as text } }; entries that name the same button are all that button\'s. The platform\'s list: '
+  description: 'What a button does. A button with no entry is a plain choice. A button with entries carries their actions, one or several: when the project owner clicks it, the platform does each with the recorded arguments and messages you, action by action, what was and was not done and why; before the click the card shows the owner what the button does. Only that click runs them. '
+    + 'One entry per action: { `option`: the button\'s words as written in options, `action`: a name from the list, `args`: { argument name: text } }; entries that name the same button are all that button\'s. The list: '
     + `${cardActionsSaid()} `
-    + 'The platform checks each entry when the card is raised and says why it refuses one. A card whose choices are picked together (`multi`) cannot carry one.',
+    + 'Each entry is checked when the card is raised; a refusal says why. A card whose choices are picked together (`multi`) cannot carry one.',
 });

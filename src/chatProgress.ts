@@ -193,14 +193,14 @@ export const chatProgressSkill: any = {
   tools: [
     {
       name: 'report_progress',
-      description: 'Post a short update for the people watching this work: it becomes your run\'s own line (shown over you in an office view and read by your manager) and is posted to the chat that triggered this run when there is one. One or two plain sentences — what you are doing now and where, or what is blocking you and what you need — in everyday words a coworker who has read neither the code nor the ticket and its documents would follow. Not for every step. Never put a credential in it. Fire-and-forget — never fails the run. The chat target resolves from your notify input (provider + chatId) or the runtime; you usually just pass the message.',
+      description: 'Post a short update for the people watching this work: it becomes your run\'s own line (shown over you in an office view and read by your manager) and goes to the chat that triggered this run, when there is one. Fire-and-forget: never fails the run. Never a credential.',
       input_schema: {
         type: 'object',
         properties: {
-          message: { type: 'string', description: `The update, at most ${PROGRESS_MAX_CHARS} characters, e.g. "Scored 60 of 188 commits, continuing…".` },
-          answeredMessageIds: { type: 'array', items: { type: 'string' }, description: 'Optional inbox message IDs answered by this reply. Omit for an unrelated progress update.' },
-          provider: { type: 'string', enum: ['lark', 'slack'], description: 'Optional — the chat provider (from your notify input). Defaults from the runtime.' },
-          chatId: { type: 'string', description: 'Optional — the target chat/channel id (from your notify input). Defaults from the runtime.' },
+          message: { type: 'string', description: `The update, at most ${PROGRESS_MAX_CHARS} characters.` },
+          answeredMessageIds: { type: 'array', items: { type: 'string' }, description: 'Inbox message ids this update answers.' },
+          provider: { type: 'string', enum: ['lark', 'slack'], description: 'Chat provider (from your notify input); default from the runtime.' },
+          chatId: { type: 'string', description: 'Chat/channel id (from your notify input); default from the runtime.' },
         },
         required: ['message'],
       },
