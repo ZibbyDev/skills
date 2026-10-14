@@ -37,7 +37,7 @@ Object.assign(process.env, ENV);
 
 const {
   agentMessagingSkill, descendantsOf, compactRun, parseInboxNote, mailboxPrefix, DRAIN_MAX_PAGES, INBOX_TTL_DAYS, LIST_LIMIT_MAX,
-  logsQuery, LOG_LINES_MAX, LOG_LINE_MAX_CHARS,
+  logsQuery, LOG_LINES_MAX, LOG_LINE_MAX_CHARS, LOG_LINE_CHARS_MAX, MESSAGE_TEXT_MAX,
 } = await import('../agentMessaging.js');
 
 const call = (name: string, args: any = {}) => agentMessagingSkill.handleToolCall(name, args).then(JSON.parse);
@@ -622,8 +622,23 @@ describe('read_run_logs', () => {
     expect(out.executionId).toBe(SELF);
     expect(out.status).toBe('running');
     expect(out.lines[0]).toEqual({ line: 899, text: '[developer] running tests' });
-    expect(out.lines[1].text).toMatch(/… \[5 more chars\]$/);
+    expect(out.lines[1].text).toMatch(/… \[5 more chars — lineOffset 1000 continues this line\]$/);
     expect(out.hasOlder).toBe(true);
+  });
+
+  // A/B (cuts are told, 2026-10-14): before, a line over 1000 characters ended "… [N more chars]" and no read returned
+  // the rest of it — a member's result line was the usual casualty.
+  it('a cut line names the lineOffset that continues it, and lineChars / lineOffset read the rest', async () => {
+    const long = `${'a'.repeat(1000)}${'b'.repeat(1000)}TAIL`;
+    mockDoor([['/logs/', () => ({ json: { lines: [{ line: 7, message: long }] } })]]);
+    const first = await call('read_run_logs', { executionId: 'child-A' });
+    expect(first.lines[0].text).toBe(`${'a'.repeat(1000)}… [1004 more chars — lineOffset 1000 continues this line]`);
+    const rest = await call('read_run_logs', { executionId: 'child-A', lineOffset: 1000, lineChars: 5000 });
+    expect(rest.lines[0].text).toBe(`${'b'.repeat(1000)}TAIL`);
+    const whole = await call('read_run_logs', { executionId: 'child-A', lineChars: LOG_LINE_CHARS_MAX });
+    expect(whole.lines[0].text).toBe(long);
+    expect((await call('read_run_logs', { lineChars: LOG_LINE_CHARS_MAX + 1 })).error).toMatch(/lineChars must be/);
+    expect((await call('read_run_logs', { lineOffset: -1 })).error).toMatch(/lineOffset must be/);
   });
 
   it('head / search / lines / cursor map onto the route knobs', async () => {
@@ -732,6 +747,23 @@ describe('history: acknowledged rows are never re-delivered, and old history is 
   });
 });
 
+// A/B (cuts are told, 2026-10-14): before, the tool told a sender "up to 2000 characters" while the platform takes
+// 16000 — a member cut its own report to fit a bound that did not exist.
+describe('message_agent — the bound a sender is told is the platform\'s own', () => {
+  it('the text description states MESSAGE_TEXT_MAX and that a longer message is refused, not cut', () => {
+    const tool = agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent');
+    expect(tool.input_schema.properties.text.description).toContain(`up to ${MESSAGE_TEXT_MAX} characters — a longer one is refused whole, never cut`);
+    expect(tool.input_schema.properties.text.description).not.toMatch(/2000 characters/);
+  });
+  const here = dirname(fileURLToPath(import.meta.url));
+  const wordsFile = join(here, '..', '..', '..', '..', 'backend', 'src', 'constants', 'person-words.js');
+  it.skipIf(!existsSync(wordsFile))('🔗 TWO-PLACES: MESSAGE_TEXT_MAX equals the platform\'s PERSON_WORDS_MAX', () => {
+    const m = /const PERSON_WORDS_MAX = (\d+);/.exec(readFileSync(wordsFile, 'utf-8'));
+    expect(m).toBeTruthy();
+    expect(MESSAGE_TEXT_MAX).toBe(Number(m![1]));
+  });
+});
+
 describe('list_messages — what this agent still owes, or its history', () => {
   const LIST_URL = 'http://cp.local/projects/proj-1/workflows/project-manager/inbox';
   const listed = { ok: true, agent: 'project-manager', unacked: true, count: 1, truncated: false, messages: [
@@ -744,6 +776,13 @@ describe('list_messages — what this agent still owes, or its history', () => {
     expect(out).toMatchObject({ unacked: true, count: 1, messages: listed.messages });
     expect(out.note).toMatch(/still yours/);
     expect(out.messages[0].from).toEqual({ kind: 'member', name: 'developer', workflowType: 'developer', executionId: 'run-dev-1' });
+  });
+  it('full:true asks the platform for every text whole; without it nothing is added to the request', async () => {
+    mockDoor([[(u) => u.startsWith(LIST_URL), () => ({ json: listed })]]);
+    await call('list_messages', { full: true });
+    await call('list_messages');
+    expect(new URL(seen[0].url).searchParams.get('full')).toBe('true');
+    expect(seen[1].url).toBe(LIST_URL);
   });
   it('a pending self-reminder with a future notBefore is reported as a wake already scheduled', async () => {
     const future = new Date(Date.now() + 8 * 60000).toISOString();
