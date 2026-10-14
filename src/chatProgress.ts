@@ -193,7 +193,7 @@ export const chatProgressSkill: any = {
   tools: [
     {
       name: 'report_progress',
-      description: 'Post a short update for the people watching this work: it becomes your run\'s own line (shown over you in an office view and read by your manager) and goes to the chat that triggered this run, when there is one. Fire-and-forget: never fails the run. Never a credential.',
+      description: 'Post a short update for the people watching this work: it becomes your run\'s own line (shown over you in an office view and read by your manager) and goes to the chat that triggered this run, when there is one. It reads best as one or two plain sentences a coworker who has read neither the code nor the ticket would follow: what you are doing and where, or what blocks you and what you need. Fire-and-forget: never fails the run. Never a credential.',
       input_schema: {
         type: 'object',
         properties: {

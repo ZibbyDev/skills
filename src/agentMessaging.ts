@@ -1004,7 +1004,7 @@ refused; credentials belong on the agent's Env tab.`,
         properties: {
           executionId: { type: 'string', description: 'A running run (from list_running_agents), not your own; not with workflowType or delaySeconds.' },
           workflowType: { type: 'string', description: 'A deployed agent\'s type (e.g. "developer"), your own included; not with executionId.' },
-          text: { type: 'string', description: `Plain text, up to ${MESSAGE_TEXT_MAX} characters (a longer one is refused whole). No tokens or keys.` },
+          text: { type: 'string', description: `Plain text, up to ${MESSAGE_TEXT_MAX} characters (a longer one is refused whole). No tokens or keys. A note to yourself is read by a round with no memory of this one: it needs what you were doing, what you wait on, how to check whether it happened, and what to do either way.` },
           ticketKey: { type: 'string', description: 'The ticket it is about.' },
           delaySeconds: { type: 'integer', minimum: 10, maximum: 86400, description: 'Hold it this many seconds (10 to 86400), then wake the recipient; nobody sees it before.' },
         },
