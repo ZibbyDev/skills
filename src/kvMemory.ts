@@ -200,7 +200,9 @@ Tools:
         case 'kv_recall_prefix': {
           const keyPrefix = typeof args?.keyPrefix === 'string' ? args.keyPrefix.trim() : '';
           if (!keyPrefix) return JSON.stringify({ error: 'keyPrefix is required' });
-          const data = await kvMemoryFetch('recall-prefix', { scopePrefix: scopeFor(keyPrefix) });
+          // `cursor` — the `nextCursor` a previous page returned: the rows past the page are reachable.
+          const cursor = typeof args?.cursor === 'string' && args.cursor.trim() ? args.cursor.trim() : '';
+          const data = await kvMemoryFetch('recall-prefix', { scopePrefix: scopeFor(keyPrefix), ...(cursor ? { cursor } : {}) });
           return JSON.stringify(data);
         }
 
@@ -238,11 +240,12 @@ Tools:
     },
     {
       name: 'kv_recall_prefix',
-      description: 'List your entries whose plain key STARTS WITH a prefix (e.g. "seen#"). Your per-agent namespace is added automatically. Capped at 25.',
+      description: 'List your entries whose plain key STARTS WITH a prefix (e.g. "seen#"). Your per-agent namespace is added automatically. One page is 25 entries; when there are more the answer has truncated:true and a nextCursor, and cursor reads the next page.',
       input_schema: {
         type: 'object',
         properties: {
           keyPrefix: { type: 'string', description: 'Plain key prefix to match (no namespace prefix needed) — e.g. "seen#".' },
+          cursor: { type: 'string', description: 'Optional: the nextCursor a previous answer for the same keyPrefix returned, to read the page after it.' },
         },
         required: ['keyPrefix'],
       },
