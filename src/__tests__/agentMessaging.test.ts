@@ -676,6 +676,26 @@ describe('read_run_logs', () => {
     expect(out.error).toMatch(/not authorized/);
   });
 
+  // A/B (run_log/magnum/2026-10-16-qa-named-area-and-full-logs): before, "start" was refused as an unknown mode and
+  // what a run was started with was only in its log, whose tool-argument lines are cut. Now it is the recorded field,
+  // read in pages that say where they continue.
+  it('mode "start": the run\'s recorded start input, paged by lineChars / lineOffset, on its own route', async () => {
+    const PAGE = { executionId: 'qa-1', workflowType: 'product-qa', status: 'completed', startedByRun: 'mgr-1', title: 'Check 712',
+      handoff: 'Both areas.', recorded: true,
+      input: { text: '{"instruction":"Ver', offset: 0, chars: 19, totalChars: 40, nextOffset: 19, note: '21 more characters of the input follow; read again with offset 19 for the rest.' } };
+    mockDoor([['/start', () => ({ json: { data: PAGE } })]]);
+    const out = await call('read_run_logs', { executionId: 'qa-1', mode: 'start', lineChars: 19 });
+    const u = new URL(seen[0].url);
+    expect(u.pathname).toBe('/logs/proj-1/qa-1/start');
+    expect(Object.fromEntries(u.searchParams)).toEqual({ offset: '0', chars: '19' });
+    expect(out).toMatchObject({ executionId: 'qa-1', mode: 'start', title: 'Check 712', handoff: 'Both areas.', startedByRun: 'mgr-1', recorded: true });
+    expect(out.input).toMatchObject({ text: '{"instruction":"Ver', nextOffset: 19, totalChars: 40 });
+    expect(out.input.note).toMatch(/lineOffset 19 continues it/);
+    await call('read_run_logs', { executionId: 'qa-1', mode: 'start', lineOffset: 19 });
+    expect(Object.fromEntries(new URL(seen[1].url).searchParams)).toEqual({ offset: '19', chars: '20000' });
+    expect((await call('read_run_logs', { mode: 'start', lineChars: LOG_LINE_CHARS_MAX + 1 })).error).toMatch(/lineChars must be/);
+  });
+
   it('is declared as a tool and mentioned in the prompt', () => {
     expect(agentMessagingSkill.tools.map((t: any) => t.name)).toContain('read_run_logs');
     expect(agentMessagingSkill.promptFragment).toMatch(/read_run_logs/);

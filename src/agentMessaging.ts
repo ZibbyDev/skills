@@ -304,6 +304,37 @@ export function logsQuery(args: any): { qs: string } | { error: string } {
   return { qs: params.toString() };
 }
 
+/**
+ * WHAT A RUN WAS STARTED WITH, as the platform recorded it (`mode: "start"`):
+ * its start input — one JSON text, read `lineChars` characters from
+ * `lineOffset`, the page saying how many are left and which offset continues —
+ * plus the starter's title and hand-over words. A recorded field, not the log:
+ * the log's argument lines are cut (backend handlers/workflow-logs.js
+ * getRunStartRecord; run_log/magnum/2026-10-16-qa-named-area-and-full-logs).
+ */
+export const START_INPUT_CHARS_DEFAULT = 20000;
+/** The query string for one start-record read. PURE, exported for tests. */
+export function startQuery(args: any): { qs: string } | { error: string } {
+  const chars = args?.lineChars == null ? START_INPUT_CHARS_DEFAULT : Number(args.lineChars);
+  if (!Number.isInteger(chars) || chars < 1 || chars > LOG_LINE_CHARS_MAX) return { error: `lineChars must be a whole number from 1 to ${LOG_LINE_CHARS_MAX}` };
+  const offset = args?.lineOffset == null ? 0 : Number(args.lineOffset);
+  if (!Number.isInteger(offset) || offset < 0) return { error: 'lineOffset must be a whole number, 0 or more' };
+  return { qs: new URLSearchParams({ offset: String(offset), chars: String(chars) }).toString() };
+}
+/** The platform's start-record page → what the model reads (its own words, nothing added). PURE. */
+export function compactStartPage(page: any, executionId: string) {
+  const out: Record<string, any> = { executionId, mode: 'start' };
+  for (const k of ['workflowType', 'status', 'startedByRun', 'title', 'handoff', 'recorded', 'note']) {
+    if (page?.[k] != null) out[k] = page[k];
+  }
+  if (page?.input && typeof page.input === 'object') {
+    const i = page.input;
+    out.input = { text: typeof i.text === 'string' ? i.text : '', offset: i.offset, chars: i.chars, totalChars: i.totalChars,
+      ...(i.nextOffset != null ? { nextOffset: i.nextOffset, note: `${i.note || ''} (lineOffset ${i.nextOffset} continues it)`.trim() } : {}) };
+  }
+  return out;
+}
+
 /** The platform's log page → what the model reads. PURE, exported for tests. */
 export function compactLogPage(page: any, executionId: string, mode: string, window: { chars: number; offset: number } = { chars: LOG_LINE_MAX_CHARS, offset: 0 }) {
   const out: Record<string, any> = { executionId, mode };
@@ -330,14 +361,24 @@ async function readRunLogs(args: any) {
   if (!projectId) return { error: 'PROJECT_ID is not set — this run does not know which project it belongs to.' };
   const executionId = (typeof args?.executionId === 'string' && args.executionId.trim()) || selfExecutionId();
   if (!executionId) return { error: 'give executionId (from list_running_agents); this run has no EXECUTION_ID of its own to default to' };
+  // Cloud serves /logs on the workflows-subdomain API and injects RUN_LOGS_API_URL;
+  // a box / dev tunnel serve it on the account API and leave it unset.
+  const logsBase = (process.env.RUN_LOGS_API_URL || '').trim().replace(/\/$/, '') || getAccountApiUrl();
+  if (args?.mode === 'start') {
+    const sq = startQuery(args);
+    if ('error' in sq) return sq;
+    const url = `${logsBase}/logs/${encodeURIComponent(projectId)}/${encodeURIComponent(executionId)}/start?${sq.qs}`;
+    const res = await fetchWithDeadline(url, { headers: authHeaders(token) }, { kind: 'api', what: 'agent-messaging GET run start record' });
+    if (!res.ok) return { error: await errorTextOf(res, `reading what run ${executionId} was started with`) };
+    const json: any = await res.json();
+    const page = json?.data && typeof json.data === 'object' ? json.data : json;
+    return compactStartPage(page, executionId);
+  }
   const q = logsQuery(args);
   if ('error' in q) return q;
   const window = logLineWindow(args);
   if ('error' in window) return window;
-  // Cloud serves /logs on the workflows-subdomain API and injects RUN_LOGS_API_URL;
-  // a box / dev tunnel serve it on the account API and leave it unset.
-  const base = (process.env.RUN_LOGS_API_URL || '').trim().replace(/\/$/, '') || getAccountApiUrl();
-  const url = `${base}/logs/${encodeURIComponent(projectId)}/${encodeURIComponent(executionId)}?${q.qs}`;
+  const url = `${logsBase}/logs/${encodeURIComponent(projectId)}/${encodeURIComponent(executionId)}?${q.qs}`;
   const res = await fetchWithDeadline(url, { headers: authHeaders(token) }, { kind: 'api', what: 'agent-messaging GET run logs' });
   if (!res.ok) return { error: await errorTextOf(res, `reading the log of run ${executionId}`) };
   const json: any = await res.json();
@@ -986,7 +1027,7 @@ refused; credentials belong on the agent's Env tab.`,
         type: 'object',
         properties: {
           executionId: { type: 'string', description: 'The run (from list_running_agents); omitted: this run.' },
-          mode: { type: 'string', enum: ['head', 'tail', 'search'], description: '"head": first lines (what it started with); "tail" (default): latest lines, live; "search": lines containing query, oldest first.' },
+          mode: { type: 'string', enum: ['head', 'tail', 'search', 'start'], description: '"head": first lines (what it started with); "tail" (default): latest lines, live; "search": lines containing query, oldest first; "start": the start input as the platform recorded it (with its title and hand-over), lineChars of it from lineOffset.' },
           lines: { type: 'integer', description: 'How many lines (default 100, max 500).' },
           query: { type: 'string', description: 'mode "search": exact text, case-sensitive, up to 200 characters.' },
           cursor: { type: 'string', description: 'Cursor from a previous read.' },
