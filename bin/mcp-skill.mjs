@@ -113,7 +113,14 @@ const server = new McpServer(
   { capabilities: { tools: {} } },
 );
 
-for (const tool of skill.tools) {
+// A skill whose prompt carries only its intro has its full page travel with
+// its tools (agent-workflow skill-registry `skillToolGuide` / `withToolGuide`).
+// An older engine without them: the prompt still carries the page, nothing to add.
+const { skillToolGuide, withToolGuide } = await import('@zibby/agent-workflow').catch(() => ({}));
+const servedTools = typeof skillToolGuide === 'function' && typeof withToolGuide === 'function'
+  ? withToolGuide(skill.tools, skillToolGuide(skill)) : skill.tools;
+
+for (const tool of servedTools) {
   if (!tool || !tool.name) continue;
   const config = {
     description: tool.description || tool.name,

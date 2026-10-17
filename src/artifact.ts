@@ -838,6 +838,12 @@ export const artifactSkill: any = {
   allowedTools: ['mcp__artifact__*'],
   description: 'Artifacts — publish a self-contained, shareable HTML/Markdown page to Zibby and get back a URL; the index of what you published is your memory.',
 
+  // WHAT A NODE THAT REACHES THESE TOOLS THROUGH THE TOOL SEARCH IS TOLD in
+  // place of the page below (its `searchSkills`; agent-workflow skill-registry
+  // `skillPromptText`). The page then travels with the tools.
+  intro: `## Artifacts
+The \`artifact\` tools publish a standalone page (a report, plan, comparison or diagram) at a shareable URL, and fetch, revise and share the pages you published; they are found with the tool search, and each one's description carries this group's full guide.`,
+
   // WHAT THIS PAGE CARRIES: what the skill is for and one line per tool. HOW a
   // page is written, named, checked and shared lives in each tool's own
   // description below (and in its fields), which the model reads when it
