@@ -793,6 +793,25 @@ describe('artifact_publish rn passthrough', () => {
     expect(out.rn).toBe(RN);
   });
 
+  // 743 (run_log/magnum/2026-10-16-743-version-report-login-browser): a developer
+  // handed QA the url as "the readable report"; QA's browser landed on /login.
+  // The write result now says, beside the rn, who the url opens for and how
+  // another agent reads the page. A fact only: the url is unchanged.
+  it('743: beside the rn, the result says the url is for signed-in members and agents read the page by rn or id', async () => {
+    for (const tool of ['artifact_publish', 'artifact_update']) {
+      global.fetch = mockFetch([
+        ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '<h1>hi</h1>', format: 'html' } })],
+        ['/artifacts', () => ({ json: { id: ID, url: `http://box/a/${ID}`, rn: RN, createdAt: '2026-07-17T00:00:00Z' } })],
+        ['/credits/review-memory', () => ({ json: { stored: true } })],
+      ]);
+      const out = JSON.parse(await artifactSkill.handleToolCall(tool, { ...(tool === 'artifact_update' ? { id: ID } : {}), title: 'Report', html: '<h1>hi</h1>' }));
+      expect(out.url, tool).toBe(`http://box/a/${ID}`);
+      expect(out.rn, tool).toBe(RN);
+      expect(out.urlOpensFor, tool).toMatch(/signed in to Zibby as members of this project[\s\S]*login page/);
+      expect(out.urlOpensFor, tool).toMatch(/Another agent reads this page by its rn[\s\S]*artifact_get/);
+    }
+  });
+
   it('a pre-30f3e620 backend (no rn in the response) still yields exactly { id, url } — no undefined key, no error', async () => {
     global.fetch = mockFetch([
       ['/credits/artifacts/', () => ({ json: { metadata: { id: ID }, content: '<h1>hi</h1>', format: 'html' } })],

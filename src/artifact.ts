@@ -812,6 +812,20 @@ function pickPreflight(args, picked) {
   return { preflight: { html: picked.content, data } };
 }
 
+/**
+ * WHO THE `url` OPENS FOR — a fact on the write result, beside the `rn` it
+ * points to. The url is a dashboard route: reading it always goes through the
+ * Zibby login for members of the owning project (backend handlers/artifacts.js
+ * `artifactUrl`: "there is NO unauthenticated path to artifact content"). An
+ * agent handed it as "the readable report" opens a login page (2026-10-16,
+ * ticket 743: QA's browser landed on /login —
+ * run_log/magnum/2026-10-16-743-version-report-login-browser). Stated only when
+ * the backend minted an `rn`, the handle other agents read the page by.
+ */
+export const URL_OPENS_FOR = 'people signed in to Zibby as members of this project; anyone else, including another agent\'s browser, gets the login page. '
+  + 'Another agent reads this page by its rn (any reference-taking parameter, e.g. browser_set_content\'s htmlRef) or by id with artifact_get. '
+  + 'For readers without a Zibby login, artifact_share gives a link that opens with a password.';
+
 export const artifactSkill: any = {
   id: 'artifact',
   // Backend-calling: the MCP child talks to Zibby's own backend — the
@@ -927,7 +941,7 @@ Tools:
           // via artifact_get just to learn its rn — which would pull the whole
           // content back into context, the exact waste references exist to kill.
           // Passthrough only: minted server-side, never composed here.
-          if (typeof written.rn === 'string' && written.rn) out.rn = written.rn;
+          if (typeof written.rn === 'string' && written.rn) { out.rn = written.rn; out.urlOpensFor = URL_OPENS_FOR; }
           // The password comes back from the write ONCE and is never readable
           // again; surface it here or `share: true` accomplishes nothing.
           if (written.shared) {
@@ -1009,7 +1023,7 @@ Tools:
           const out: any = { id, url };
           // Same passthrough as artifact_publish: the handle the model needs to
           // reference the (now-updated) document without re-emitting it.
-          if (typeof written.rn === 'string' && written.rn) out.rn = written.rn;
+          if (typeof written.rn === 'string' && written.rn) { out.rn = written.rn; out.urlOpensFor = URL_OPENS_FOR; }
           if (written.__preflightNote) out.preflight = written.__preflightNote;
           if (picked) {
             const readBack = await verifyStoredSource(id, picked.content);
