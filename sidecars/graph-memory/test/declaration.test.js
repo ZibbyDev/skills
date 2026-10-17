@@ -80,6 +80,21 @@ test('the engine dependency is the registry package pinned to EXACTLY engineVers
   assert.match(dockerfile, /node_modules\/@zibby\/agent-graph-memory\/package\.json/);
 });
 
+test('an existing /data volume still opens: same Postgres major, same owner ids, same stop signal', () => {
+  // Every /data/pg written by 0.1.1 (Debian `pgvector/pgvector:pg16` base) is a
+  // Postgres 16 cluster owned by uid/gid 999. Postgres refuses a data dir it
+  // does not own, and Alpine's package would create `postgres` as uid 70.
+  assert.match(dockerfile, /addgroup -S -g 999 postgres/);
+  assert.match(dockerfile, /adduser -S -D -u 999 -G postgres /);
+  assert.match(dockerfile, /apk add --no-cache postgresql16 /);
+  // The build asks the server itself for its major and the pgvector version.
+  assert.match(dockerfile, /^ARG PGVECTOR_VERSION=\d+\.\d+\.\d+$/m);
+  assert.match(dockerfile, /\[ "\$got" = "16 \$\{PGVECTOR_VERSION\}" \]/);
+  // The old base's stop signal; the entrypoint's trap handles it.
+  assert.match(dockerfile, /^STOPSIGNAL SIGINT$/m);
+  assert.match(entrypoint, /^trap stop_all TERM INT EXIT$/m);
+});
+
 test('the entrypoint runs the server on the postgres driver and forwards the platform bearer', () => {
   assert.match(entrypoint, /agent-graph-server --driver postgres/);
   // The engine defaults to 127.0.0.1; the control-plane dials the container over
