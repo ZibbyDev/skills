@@ -69,9 +69,9 @@ describe('fetch → verify → unpack → cache', () => {
     // The rpath sibling MUST land next to the binary, not under a wrapper dir.
     expect(existsSync(join(p1, '..', 'libs', 'libfake.so'))).toBe(true);
     expect(phases).toEqual(['downloading', 'verifying', 'unpacking', 'ready']);
-    // The sha is in the cache path, so a re-pin can never be served from a warm
-    // cache entry built from the old bytes.
-    expect(p1).toContain(a.sha256.slice(0, 12));
+    // The entry records the pin it was verified against, so a re-pin can never
+    // be served from a warm cache entry built from the old bytes.
+    expect(readFileSync(join(p1, '..', '.sha256'), 'utf8').trim()).toBe(a.sha256);
 
     // Second call = pure cache hit: no download phase at all.
     const phases2: string[] = [];
@@ -175,7 +175,7 @@ describe('concurrency + partial state', () => {
     const d = resolveDelivery(registryFor(a.sha256, a.url), 'tool', 'test-plat')!;
     d.url = a.url;
     const root = join(work, 'cache');
-    const dest = join(root, 'tool', '1.169.0', `test-plat-${a.sha256.slice(0, 12)}`);
+    const dest = join(root, 'tool', '1.169.0', 'test-plat');
     mkdirSync(`${dest}.lock`, { recursive: true });   // a previous run died holding it
     process.env.BIN_LOCK_STALE_MS = '0';              // it is, by definition, stale
     process.env.BIN_LOCK_WAIT_MS = '2000';            // if reclaim regresses, FAIL fast
@@ -192,8 +192,8 @@ describe('concurrency + partial state', () => {
     d.url = a.url;
     const root = join(work, 'cache');
     const parent = join(root, 'tool', '1.169.0');
-    mkdirSync(join(parent, `test-plat-${a.sha256.slice(0, 12)}.incoming-999`), { recursive: true });
-    writeFileSync(join(parent, `test-plat-${a.sha256.slice(0, 12)}.incoming-999`, 'tool'), 'HALF WRITTEN');
+    mkdirSync(join(parent, 'test-plat.incoming-999'), { recursive: true });
+    writeFileSync(join(parent, 'test-plat.incoming-999', 'tool'), 'HALF WRITTEN');
     const p = await ensureBinary(d, { root });
     expect(readFileSync(p, 'utf8')).toContain('fake-engine');   // the real one, not the corpse
   });
