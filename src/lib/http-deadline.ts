@@ -83,6 +83,10 @@
  * sign, an empty string, or a `0` (the value most APIs spell "no timeout")
  * cannot quietly restore the unbounded behaviour this file exists to remove.
  */
+import http from 'node:http';
+import https from 'node:https';
+import { pipeline } from 'node:stream/promises';
+
 export const SKILL_API_TIMEOUT_MS = 30_000;
 export const SKILL_TRANSFER_TIMEOUT_MS = 120_000;
 export const SKILL_JOB_TIMEOUT_MS = 300_000;
@@ -114,6 +118,30 @@ export function timeoutMsFrom(knob: string, fallback: number, env: any = process
 export function timeoutMsForKind(kind: DoorKind = 'api', env: any = process.env): number {
   const k = KINDS[kind] || KINDS.api;
   return timeoutMsFrom(k.knob, k.fallback, env);
+}
+
+/**
+ * The slowest steady rate a healthy transfer is assumed to keep up, used only
+ * to SIZE a transfer's budget. A flat 'transfer' budget is right for the
+ * attachment-sized bodies most doors move, and wrong for a multi-GB file
+ * streamed from a run's disk: at any honest rate it cannot finish in 120s.
+ * At 10 MiB/s a 5 GiB object (the largest single object either store takes)
+ * needs ~512s, which still fits under the 600s ceiling.
+ */
+export const TRANSFER_FLOOR_BYTES_PER_SECOND = 10 * 1024 * 1024;
+
+/**
+ * The budget for moving `bytes` in one request: the 'transfer' budget (env
+ * override included), raised to what `bytes` needs at the floor rate, and
+ * clamped to the ceiling like every other budget. An unknown size gets the
+ * ceiling: the caller is moving something it cannot measure, and the longest
+ * budget the door allows is the honest bound for that.
+ */
+export function timeoutMsForTransfer(bytes?: number | null, env: any = process.env): number {
+  const base = timeoutMsForKind('transfer', env);
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return TIMEOUT_CEILING_MS;
+  const needed = Math.ceil((bytes / TRANSFER_FLOOR_BYTES_PER_SECOND) * 1000);
+  return Math.min(TIMEOUT_CEILING_MS, Math.max(base, needed));
 }
 
 /**
@@ -283,4 +311,79 @@ export function describeTimeout(
   const knob = (KINDS[kind] || KINDS.api).knob;
   const ms = timeoutMs || timeoutMsForKind(kind);
   return `${what || 'request'}${body ? ' body read' : ''} TIMED OUT after ${ms}ms against ${hostOf(url)} (${knob})`;
+}
+
+/* ── THE STREAMING UPLOAD DOOR ───────────────────────────────────────────────
+ * A request whose BODY is a stream too big to hold — a file of any size read
+ * from a run's disk — goes through `uploadWithDeadline`, not `fetch`. MEASURED
+ * on the agent image (Node 22.23): `fetch` reads a streamed request body as
+ * fast as the source yields, whatever the socket's pace — a 300 MB upload held
+ * ~301 MB of buffers in the process, Node read stream, `Readable.toWeb` of one
+ * and a hand-pulled web stream alike — while `node:http` piping the same file
+ * peaked at ~5 MB. So the one body shape fetch cannot carry gets its own door,
+ * here beside the other, under the same budgets and the same worded timeout.
+ */
+
+/** What `uploadWithDeadline` answers: the status, and the response text. */
+export interface UploadResponse {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+}
+
+/**
+ * Send `body` (a Node readable stream) as the request body to `url`, piped at
+ * the socket's pace. `headers` must carry the Content-Length (an S3 presigned
+ * PUT refuses a body without one). Bounded like `fetchWithDeadline`: one budget
+ * for the whole exchange, and a timeout that names the call and the host. A
+ * response that arrives before the body is fully sent (a refusal) stops the
+ * upload and is returned as the answer. `body` is destroyed when the exchange
+ * ends either way.
+ */
+export function uploadWithDeadline(
+  url: any,
+  { method = 'PUT', headers = {}, body }: { method?: string; headers?: Record<string, string>; body: any },
+  opts: DoorOptions = {},
+): Promise<UploadResponse> {
+  const kind: DoorKind = opts.kind || 'transfer';
+  const knob = (KINDS[kind] || KINDS.api).knob;
+  const ms = opts.timeoutMs
+    ? Math.min(TIMEOUT_CEILING_MS, Math.max(TIMEOUT_FLOOR_MS, Math.floor(opts.timeoutMs)))
+    : timeoutMsForKind(kind);
+  const what = opts.what || 'upload';
+  const target = new URL(String(url));
+  const lib = target.protocol === 'https:' ? https : target.protocol === 'http:' ? http : null;
+  if (!lib) return Promise.reject(new Error(`${what}: unsupported URL scheme ${target.protocol}`));
+  const signal = AbortSignal.timeout(ms);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let answered = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (typeof body?.destroy === 'function' && !body.destroyed) body.destroy();
+      fn();
+    };
+    const fail = (err: any) => finish(() => reject(
+      signal.aborted && isTimeoutError(err)
+        ? new Error(`${what} TIMED OUT after ${ms}ms against ${hostOf(target)} (${knob})`)
+        : err,
+    ));
+    const req = lib.request(target, { method, headers, signal });
+    req.on('error', (err) => { if (!answered) fail(err); });
+    req.on('response', (res) => {
+      answered = true;
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(Buffer.from(c)));
+      res.on('error', fail);
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        const status = res.statusCode || 0;
+        finish(() => resolve({ ok: status >= 200 && status < 300, status, text: async () => text }));
+      });
+    });
+    // A pipe broken by an early answer is that answer's business, not a failure.
+    pipeline(body, req).catch((err) => { if (!answered) fail(err); });
+  });
 }

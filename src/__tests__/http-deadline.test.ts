@@ -21,6 +21,9 @@ import {
   isTimeoutError,
   timeoutMsFrom,
   timeoutMsForKind,
+  timeoutMsForTransfer,
+  TRANSFER_FLOOR_BYTES_PER_SECOND,
+  uploadWithDeadline,
   hostOf,
   SKILL_API_TIMEOUT_MS,
   SKILL_TRANSFER_TIMEOUT_MS,
@@ -215,5 +218,94 @@ describe('describeTimeout — the body half, in the same voice', () => {
     expect(isTimeoutError({ name: 'AbortError' })).toBe(true);
     expect(isTimeoutError(new TypeError('fetch failed'))).toBe(false);
     expect(isTimeoutError(undefined)).toBe(false);
+  });
+});
+
+describe('timeoutMsForTransfer — a transfer\'s budget grows with its size', () => {
+  it('small bodies keep the flat transfer budget', () => {
+    expect(timeoutMsForTransfer(1024, {})).toBe(SKILL_TRANSFER_TIMEOUT_MS);
+    expect(timeoutMsForTransfer(0, {})).toBe(SKILL_TRANSFER_TIMEOUT_MS);
+  });
+  it('a multi-GB body gets what it needs at the floor rate, up to the ceiling', () => {
+    const gib = 1024 ** 3;
+    expect(timeoutMsForTransfer(2 * gib, {})).toBe(Math.ceil((2 * gib / TRANSFER_FLOOR_BYTES_PER_SECOND) * 1000));
+    expect(timeoutMsForTransfer(2 * gib, {})).toBeGreaterThan(SKILL_TRANSFER_TIMEOUT_MS);
+    expect(timeoutMsForTransfer(5 * gib, {})).toBeLessThanOrEqual(TIMEOUT_CEILING_MS);
+    expect(timeoutMsForTransfer(50 * gib, {})).toBe(TIMEOUT_CEILING_MS);
+  });
+  it('an unknown size gets the ceiling; the env override still raises the floor budget', () => {
+    expect(timeoutMsForTransfer(undefined, {})).toBe(TIMEOUT_CEILING_MS);
+    expect(timeoutMsForTransfer(null, {})).toBe(TIMEOUT_CEILING_MS);
+    expect(timeoutMsForTransfer(1024, { SKILL_TRANSFER_TIMEOUT_MS: '300000' })).toBe(300_000);
+  });
+});
+
+describe('uploadWithDeadline — a streamed body goes at the socket\'s pace, bounded', () => {
+  const http = require('node:http');
+  const { Readable } = require('node:stream');
+
+  /** A source that makes 64 KiB chunks only when asked, counting what it made. */
+  function countingSource(total) {
+    const src = { made: 0 };
+    src.stream = new Readable({
+      read() {
+        if (src.made >= total) { this.push(null); return; }
+        const n = Math.min(64 * 1024, total - src.made);
+        src.made += n;
+        this.push(Buffer.alloc(n, 1));
+      },
+    });
+    return src;
+  }
+
+  it('does not read the source ahead of a receiver that is not reading (the whole point of this door)', async () => {
+    const total = 64 * 1024 * 1024;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const server = http.createServer(async (req, res) => {
+      await gate; // the receiver stalls before reading a byte
+      let n = 0;
+      for await (const c of req) n += c.length;
+      res.end(String(n));
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    try {
+      const src = countingSource(total);
+      const done = uploadWithDeadline(`http://127.0.0.1:${server.address().port}/`, {
+        headers: { 'Content-Length': String(total) }, body: src.stream,
+      }, { what: 'test upload', timeoutMs: 30_000 });
+      await new Promise((r) => setTimeout(r, 400));
+      // Socket buffers + stream high-water marks only — a few MiB, never the file.
+      expect(src.made).toBeLessThan(16 * 1024 * 1024);
+      release();
+      const res = await done;
+      expect(res).toMatchObject({ ok: true, status: 200 });
+      expect(await res.text()).toBe(String(total));
+    } finally { server.closeAllConnections?.(); await new Promise((r) => server.close(r)); }
+  });
+
+  it('a receiver that never answers becomes a worded timeout naming the call and the host', async () => {
+    const server = http.createServer(() => { /* never reads, never answers */ });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const host = `127.0.0.1:${server.address().port}`;
+    try {
+      const src = countingSource(1024);
+      await expect(uploadWithDeadline(`http://${host}/x?sig=secret`, { headers: { 'Content-Length': '1024' }, body: src.stream }, { what: 'test upload', timeoutMs: 1000 }))
+        .rejects.toThrow(`test upload TIMED OUT after 1000ms against ${host} (SKILL_TRANSFER_TIMEOUT_MS)`);
+      expect(src.stream.destroyed).toBe(true);
+    } finally { server.closeAllConnections?.(); await new Promise((r) => server.close(r)); }
+  });
+
+  it('an answer before the body is sent stops the upload and is the result', async () => {
+    const server = http.createServer((req, res) => { res.writeHead(507); res.end('disk full'); });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    try {
+      const total = 256 * 1024 * 1024;
+      const src = countingSource(total);
+      const res = await uploadWithDeadline(`http://127.0.0.1:${server.address().port}/`, { headers: { 'Content-Length': String(total) }, body: src.stream }, { what: 'test upload', timeoutMs: 30_000 });
+      expect(res).toMatchObject({ ok: false, status: 507 });
+      expect(await res.text()).toBe('disk full');
+      expect(src.made).toBeLessThan(total);
+    } finally { server.closeAllConnections?.(); await new Promise((r) => server.close(r)); }
   });
 });

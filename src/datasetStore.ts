@@ -49,11 +49,14 @@
  * importing a non-existent helper, so the auth model stays identical.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, createWriteStream, promises as fsp } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname, resolve as resolvePath } from 'node:path';
+import { join, dirname, basename, resolve as resolvePath } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { fetchWithDeadline } from './lib/http-deadline.js';
+import { fetchWithDeadline, uploadWithDeadline, describeTimeout, timeoutMsForTransfer } from './lib/http-deadline.js';
 
 /**
  * Resolve the generic skill MCP server binary — identical rationale to
@@ -222,10 +225,12 @@ async function storeFetch(storeId, action, payload) {
 // short-lived presigned S3 URL (put-url/get-url) and transfer the object
 // DIRECTLY to/from the store, bypassing the JSON/Lambda envelope entirely. The
 // server derives the tenant-scoped S3 key from the resolved storeId + validated
-// path, so a presigned URL can only ever touch THIS tenant's file. On self-host
-// the backend signs against S3_PUBLIC_ENDPOINT so the URL is reachable outside
-// the docker network; on cloud it's a normal S3 presign. Transparent to the
-// agent — file_put/file_get just no longer fail at 4 MiB.
+// path, so a presigned URL can only ever touch THIS tenant's file. On cloud it
+// is a normal S3 presign; on a box that keeps objects on local disk it is a
+// signed link served by the control plane itself, addressed at the origin this
+// run used to reach the API (backend storage/objects/link-route.js). Transparent
+// to the agent — file_put/file_get just no longer fail at 4 MiB. `fromPath` /
+// `toPath` ride the same path, streaming between the run's disk and the store.
 
 // Cut over to the presigned path above this many RAW bytes. Kept safely under
 // the 4 MiB base64 cap (a bit of JSON-envelope headroom) so a base64 put never
@@ -233,47 +238,116 @@ async function storeFetch(storeId, action, payload) {
 const LARGE_FILE_THRESHOLD = Math.floor(3.5 * 1024 * 1024); // 3.5 MiB
 
 /**
- * Upload raw bytes to a file store via a presigned PUT (direct to S3/MinIO).
- * Requests a put-url (server-derived tenant key), then PUTs the bytes with the
- * EXACT Content-Type the server signed (SigV4 covers that header). Returns a
- * result shaped like the small-file put ({ ok, path, size, contentType }).
+ * Upload to a file store via a presigned PUT (direct to the object store).
+ * Requests a put-url (server-derived tenant key), then PUTs the body with the
+ * EXACT Content-Type the server signed (SigV4 covers that header). `body` is
+ * either the bytes in memory or a stream read from a file on the run's disk;
+ * either way `size` is sent as Content-Length (an S3 presigned PUT refuses a
+ * body without one) and sizes the transfer's budget. Returns a result shaped
+ * like the small-file put ({ ok, path, size, contentType }).
  */
-async function putViaPresign(storeId, path, bytes, contentType) {
+async function putViaPresign(storeId, path, body, size, contentType) {
   const meta: any = await storeFetch(storeId, 'put-url', { path, contentType });
   if (!meta?.url) throw new Error('put-url did not return an upload URL');
-  const res = await fetchWithDeadline(meta.url, {
-    method: meta.method || 'PUT',
-    headers: meta.headers || { 'Content-Type': contentType },
-    body: bytes,
-  }, { kind: 'transfer', what: `dataset store presigned upload of ${path}` });
+  const method = meta.method || 'PUT';
+  const headers = { ...(meta.headers || { 'Content-Type': contentType }), 'Content-Length': String(size) };
+  const what = `dataset store presigned upload of ${path}`;
+  const timeoutMs = timeoutMsForTransfer(size);
+  // Bytes in memory ride fetch; a file streamed from disk rides the upload
+  // door, which sends it at the socket's pace (fetch would read it all into
+  // memory first — see uploadWithDeadline).
+  const res = Buffer.isBuffer(body)
+    ? await fetchWithDeadline(meta.url, { method, headers, body }, { kind: 'transfer', what: what, timeoutMs })
+    : await uploadWithDeadline(meta.url, { method, headers, body }, { kind: 'transfer', what: what, timeoutMs });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    throw new Error(`direct upload failed (${res.status}): ${t.slice(0, 200)}`);
+    throw new Error(`direct upload failed (${res.status}): ${t.slice(0, 300)}`);
   }
   return {
     ok: true,
     path: meta.path || path,
-    size: bytes.length,
+    size,
     contentType: meta.contentType || contentType,
     via: 'presign',
   };
 }
 
 /**
- * Download a file store object via a presigned GET (direct from S3/MinIO).
+ * Open a presigned GET for a file store object (direct from the object store).
+ * get-url answers `size` when the server knows it (it HEADs the object first);
+ * that sizes the budget, and an older server that does not say gets the
+ * ceiling. Returns the Response, whose body the caller reads under the same
+ * deadline.
+ */
+async function openPresignedGet(storeId, path) {
+  const meta: any = await storeFetch(storeId, 'get-url', { path });
+  if (!meta?.url) throw new Error('get-url did not return a download URL');
+  const timeoutMs = timeoutMsForTransfer(typeof meta.size === 'number' ? meta.size : null);
+  const doorName = `dataset store presigned download of ${path}`;
+  const res = await fetchWithDeadline(meta.url, { method: meta.method || 'GET' }, { kind: 'transfer', what: doorName, timeoutMs });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`direct download failed (${res.status}): ${t.slice(0, 300)}`);
+  }
+  return { res, meta, what: doorName, timeoutMs };
+}
+
+/**
+ * Download a file store object via a presigned GET into memory.
  * Used as the fallback when the inline base64 get hits the 4 MiB read cap (413).
  * Returns the raw bytes + the object's Content-Type.
  */
 async function getViaPresign(storeId, path) {
-  const meta: any = await storeFetch(storeId, 'get-url', { path });
-  if (!meta?.url) throw new Error('get-url did not return a download URL');
-  const res = await fetchWithDeadline(meta.url, { method: meta.method || 'GET' }, { kind: 'transfer', what: `dataset store presigned download of ${path}` });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    throw new Error(`direct download failed (${res.status}): ${t.slice(0, 200)}`);
+  const { res, meta, what, timeoutMs } = await openPresignedGet(storeId, path);
+  let ab;
+  try {
+    ab = await res.arrayBuffer();
+  } catch (err) {
+    const worded = describeTimeout(err, { what, url: meta.url, kind: 'transfer', timeoutMs, body: true });
+    if (worded) throw new Error(worded);
+    throw err;
   }
-  const ab = await res.arrayBuffer();
   return { buf: Buffer.from(ab), contentType: res.headers.get('content-type') || 'application/octet-stream' };
+}
+
+/**
+ * Stream a file store object straight to a file on the run's disk. The bytes
+ * go from the object store to the file; nothing is held in memory and nothing
+ * comes back through the tool result. Written to a sibling temp file and
+ * renamed into place, so a download that fails part-way leaves no half file
+ * under the name the agent asked for. An existing directory at `target` gets
+ * the file inside it under the stored file's own name (as `cp` would).
+ * Returns { toPath, size, contentType }.
+ */
+async function downloadToPath(storeId, path, target) {
+  const { res, meta, what, timeoutMs } = await openPresignedGet(storeId, path);
+  let dest = target;
+  const existing = await fsp.stat(dest).catch(() => null);
+  if (existing?.isDirectory()) dest = join(dest, basename(path));
+  try {
+    await fsp.mkdir(dirname(dest), { recursive: true });
+  } catch (err) {
+    await res.body?.cancel().catch(() => {});
+    throw err;
+  }
+  const tmp = `${dest}.part-${process.pid}-${randomBytes(4).toString('hex')}`;
+  try {
+    if (res.body) await pipeline(Readable.fromWeb(res.body as any), createWriteStream(tmp));
+    else await fsp.writeFile(tmp, Buffer.alloc(0));
+    await fsp.rename(tmp, dest);
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+    const worded = describeTimeout(err, { what, url: meta.url, kind: 'transfer', timeoutMs, body: true });
+    if (worded) throw new Error(worded);
+    throw err;
+  }
+  const { size } = await fsp.stat(dest);
+  return { toPath: dest, size, contentType: res.headers.get('content-type') || 'application/octet-stream' };
+}
+
+/** A path on the run's disk, as the agent gave it, made absolute against this tool's working directory. */
+function runDiskPath(raw) {
+  return resolvePath(String(raw).trim());
 }
 
 export const datasetStoreSkill: any = {
@@ -324,14 +398,20 @@ Tools:
   NOT EXISTS. Returns { rowsModified, wrote }.
 - sqlite_query: (sqlite stores) Run a SELECT (optionally with \`params\` for safe
   binding). Returns { columns, rows }. Read-only — never changes data.
-- file_put: (file stores) Write/overwrite ONE file at a relative path (text or
-  base64 binary). Large files are supported — they upload directly to storage,
-  no size limit you need to worry about.
+- file_put: (file stores) Write/overwrite ONE file at a relative path — from
+  text, base64 binary, or \`fromPath\`: a file on this run's own disk, which the
+  tool uploads itself (the bytes never pass through this conversation, so a
+  multi-GB file costs one short call). Large files upload directly to storage.
 - file_get: (file stores) Read a file back (text returned as text, binary as
-  base64). Large files download directly from storage; the content still comes
-  back inline.
+  base64), or with \`toPath\` write it straight to a file on this run's disk
+  and get back only its path and size.
 - file_list: (file stores) List stored files (optionally by path prefix).
 - file_delete: (file stores) Delete ONE file by path.
+A file store lives in the box's own storage and outlives the run; a run's own
+working space does not. You choose what to keep, how to name and organise it,
+and when to delete it. People see every store on the dashboard's Storage page
+and can delete files there too. When the box's disk is full a write is refused
+with a message saying so; reads and deletes still work.
 Pick the tool that matches the store's TYPE; using a dataset tool on a sqlite
 store (or a file tool on either, etc.) is rejected.`,
 
@@ -427,22 +507,67 @@ store (or a file tool on either, etc.) is rejected.`,
           if (typeof args?.path !== 'string' || !args.path.trim()) {
             return JSON.stringify({ error: 'path is required (a relative file path like "reports/2026-07.json")' });
           }
-          const hasText = typeof args?.content === 'string';
+          // Three ways to say what the file holds; exactly one per call. An
+          // empty `content` next to another input is a schema-filled blank,
+          // not a second input — alone it still writes an empty text file.
           const hasB64 = typeof args?.contentBase64 === 'string' && args.contentBase64.length > 0;
-          if (!hasText && !hasB64) {
-            return JSON.stringify({ error: 'content (text) or contentBase64 (base64 bytes) is required' });
+          const hasFrom = typeof args?.fromPath === 'string' && args.fromPath.trim().length > 0;
+          const hasText = typeof args?.content === 'string' && (args.content.length > 0 || (!hasB64 && !hasFrom));
+          const given = [hasText, hasB64, hasFrom].filter(Boolean).length;
+          if (given === 0) {
+            return JSON.stringify({ error: 'content (text) or contentBase64 (base64 bytes) or fromPath (a file on this run\'s disk) is required — pass exactly one' });
+          }
+          if (given > 1) {
+            return JSON.stringify({ error: `pass exactly one of content, contentBase64 or fromPath (got ${[hasText && 'content', hasB64 && 'contentBase64', hasFrom && 'fromPath'].filter(Boolean).join(' + ')})` });
           }
           const putPath = args.path.trim();
           const explicitCt = (typeof args?.contentType === 'string' && args.contentType.trim()) ? args.contentType.trim() : '';
+
+          if (hasFrom) {
+            // A file on the run's own disk. Over the threshold it is streamed
+            // from the file to the object store, so a multi-GB file never
+            // passes through memory, the model, or a JSON body; under it, the
+            // bytes take the same small-file request as contentBase64.
+            const fromPath = runDiskPath(args.fromPath);
+            let handle;
+            try {
+              handle = await fsp.open(fromPath, 'r');
+            } catch (e: any) {
+              if (e?.code === 'ENOENT') return JSON.stringify({ error: `fromPath ${fromPath} does not exist on this run's disk` });
+              return JSON.stringify({ error: `fromPath ${fromPath} cannot be read: ${e?.code || e?.message}` });
+            }
+            // The open handle is the file from here on: what is measured is
+            // what is sent, even if the name is replaced meanwhile.
+            try {
+              const st = await handle.stat();
+              if (!st.isFile()) {
+                return JSON.stringify({ error: `fromPath ${fromPath} is a ${st.isDirectory() ? 'directory' : 'special file'}, not a regular file; file_put stores one file per path` });
+              }
+              const contentType = explicitCt || 'application/octet-stream';
+              if (st.size > LARGE_FILE_THRESHOLD) {
+                // Read through the handle, up to the size just measured (the
+                // Content-Length declared); the handle is closed below.
+                const stream = handle.createReadStream({ start: 0, end: st.size - 1, autoClose: false });
+                const data = await putViaPresign(target.storeId, putPath, stream, st.size, contentType);
+                return JSON.stringify({ ...data, fromPath, store: target.name, storeId: target.storeId });
+              }
+              const bytes = await handle.readFile();
+              const data = await storeFetch(target.storeId, 'put', { path: putPath, contentBase64: bytes.toString('base64'), contentType });
+              return JSON.stringify({ ...data, fromPath, store: target.name, storeId: target.storeId });
+            } finally {
+              await handle.close().catch(() => {});
+            }
+          }
+
           // Size the raw payload: files over LARGE_FILE_THRESHOLD go via a
-          // presigned PUT DIRECTLY to S3/MinIO (no 4 MiB envelope cap); smaller
-          // ones keep the byte-identical base64-in-JSON request below.
+          // presigned PUT DIRECTLY to the object store (no 4 MiB envelope cap);
+          // smaller ones keep the byte-identical base64-in-JSON request below.
           const bytes = hasText
             ? Buffer.from(args.content, 'utf8')
             : Buffer.from(String(args.contentBase64).replace(/\s+/g, ''), 'base64');
           if (bytes.length > LARGE_FILE_THRESHOLD) {
             const contentType = explicitCt || (hasText ? 'text/plain; charset=utf-8' : 'application/octet-stream');
-            const data = await putViaPresign(target.storeId, putPath, bytes, contentType);
+            const data = await putViaPresign(target.storeId, putPath, bytes, bytes.length, contentType);
             return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
           }
           const payload: any = { path: putPath };
@@ -459,6 +584,15 @@ store (or a file tool on either, etc.) is rejected.`,
             return JSON.stringify({ error: 'path is required' });
           }
           const getPath = args.path.trim();
+          if (typeof args?.toPath === 'string' && args.toPath.trim()) {
+            // Straight to a file on the run's disk: streamed, never inline, so
+            // a file of any size costs the conversation one short line.
+            const dl = await downloadToPath(target.storeId, getPath, runDiskPath(args.toPath));
+            return JSON.stringify({
+              ok: true, store: target.name, storeId: target.storeId,
+              path: getPath, toPath: dl.toPath, size: dl.size, contentType: dl.contentType,
+            });
+          }
           // Try the inline base64 path first (byte-identical for small files). If
           // the object exceeds the 4 MiB read cap the backend returns 413 — fall
           // back to a presigned GET and download the bytes DIRECTLY. Either way
@@ -632,7 +766,7 @@ store (or a file tool on either, etc.) is rejected.`,
     },
     {
       name: 'file_put',
-      description: 'For FILE-type stores: write (or overwrite) ONE file at a relative path — raw JSON dumps, CSVs, images, snapshots, any blob you want to keep across your stateless runs. Text goes in `content`; binary goes base64-encoded in `contentBase64` (pass exactly one). SIZE: there is no practical limit — anything over ~3.5 MiB is streamed straight to object storage via a presigned URL automatically, so do NOT gzip, base64-wrap, chunk or split a file just to make it fit. Non-ASCII paths (e.g. 个人报告.html) are fine — do not transliterate. Overwriting the same path UPDATES the file. Returns { ok, path, size }.',
+      description: 'For FILE-type stores: write (or overwrite) ONE file at a relative path — raw JSON dumps, CSVs, images, snapshots, archives, any file you want to keep across your stateless runs. Say what the file holds in exactly one of: `content` (text), `contentBase64` (binary, base64-encoded), or `fromPath` (a file already on this run\'s disk — the tool reads and uploads it itself, so its bytes never pass through this conversation). SIZE: there is no practical limit — anything over ~3.5 MiB is streamed straight to object storage via a presigned URL automatically, so do NOT gzip, base64-wrap, chunk or split a file just to make it fit. Non-ASCII paths (e.g. 个人报告.html) are fine — do not transliterate. Overwriting the same path UPDATES the file. Returns { ok, path, size } (plus `fromPath`, made absolute, when given).',
       input_schema: {
         type: 'object',
         properties: {
@@ -640,6 +774,7 @@ store (or a file tool on either, etc.) is rejected.`,
           path: { type: 'string', description: 'Relative file path, e.g. "dumps/run-42.json" or "img/chart.png". Letters, digits, ".", "_", "-" and "/" only; no "..", no leading "/".' },
           content: { type: 'string', description: 'Text content (UTF-8). Use for JSON/CSV/text files.' },
           contentBase64: { type: 'string', description: 'Base64-encoded binary content (images etc.). Alternative to `content`.' },
+          fromPath: { type: 'string', description: 'A file on this run\'s own disk to upload, e.g. "/workspace/out/evidence.tar.gz". Alternative to `content` / `contentBase64`. An absolute path is unambiguous; a relative one is resolved against this tool\'s working directory (the result reports the absolute path it used). One regular file per call.' },
           contentType: { type: 'string', description: 'Optional MIME type (e.g. "application/json", "image/png"). Defaults sensibly.' },
         },
         required: ['path'],
@@ -647,12 +782,13 @@ store (or a file tool on either, etc.) is rejected.`,
     },
     {
       name: 'file_get',
-      description: 'For FILE-type stores: read ONE stored file back by its relative path. Text files come back as `content` (encoding "utf8"); binary files come back as `contentBase64` (encoding "base64"). Returns { path, size, contentType, lastModified, content|contentBase64, encoding }.',
+      description: 'For FILE-type stores: read ONE stored file back by its relative path. Text files come back as `content` (encoding "utf8"); binary files come back as `contentBase64` (encoding "base64"). Returns { path, size, contentType, lastModified, content|contentBase64, encoding }. With `toPath`, the file is instead written straight to that path on this run\'s disk (streamed, any size) and the result is only { path, toPath, size, contentType } — no content.',
       input_schema: {
         type: 'object',
         properties: {
           store: { type: 'string', description: 'The logical store NAME (a file-type store from AVAILABLE STORES). If exactly one store is bound you may omit this.' },
           path: { type: 'string', description: 'The relative file path to fetch (as listed by file_list / used in file_put).' },
+          toPath: { type: 'string', description: 'Optional: a path on this run\'s own disk to write the file to instead of returning its content, e.g. "/workspace/restore/evidence.tar.gz". Missing parent folders are created; an existing file there is replaced; an existing folder receives the file under its stored name. A relative path is resolved against this tool\'s working directory (the result reports the absolute path).' },
         },
         required: ['path'],
       },
