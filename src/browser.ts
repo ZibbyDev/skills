@@ -58,13 +58,22 @@ DO NOT return success: true unless you ACTUALLY called browser tools.`;
  * THIS function rather than restating the recipe. Env-var NAMES only —
  * the token value itself never goes into a persisted prompt (security
  * invariant #4); the model materializes it via Bash at use time.
+ *
+ * TWO-PLACES: the recipe's first two sentences (the browser's localhost is not
+ * the run's; a run's own page opens through its preview address) are the
+ * browser sidecar's own reachability facts, word for word
+ * (sidecars/browser/src/reachability-facts.js — what every member connecting
+ * the browser reads on its tool descriptions). That sidecar's
+ * reachability-facts.test.js fails when the two differ. They replaced
+ * "NEVER navigate to http://localhost:<port>" (2026-08-18), which stopped being
+ * true once a project's own apps on localhost became reachable (2026-09-26).
  */
 export function devServerPreviewRecipe(): string {
   if (!process.env.PREVIEW_BASE_URL || !process.env.PREVIEW_TOKEN) return '';
   return `
 
 ## Previewing a server YOU start in this container (dev-server preview)
-The browser runs in an ISOLATED container: localhost/private URLs are unreachable from it — NEVER navigate to http://localhost:<port>. To let the browser view a server you start in this run (npm run dev, vite, a mock API — anything HTTP):
+The browser runs in its own container, not in the run's: localhost there is not the run's machine, so http://localhost:<port> never reaches a server the run started. A page a run started itself opens through that run's preview address: a run given one has PREVIEW_BASE_URL and PREVIEW_TOKEN in its environment, and "$PREVIEW_BASE_URL/<port>/?pvt=$PREVIEW_TOKEN" opens the server listening on that port on 0.0.0.0 in the run's own container. This run has both. To let the browser view a server you start in this run (npm run dev, vite, a mock API — anything HTTP):
 1. Start the server bound to 0.0.0.0 (e.g. \`npm run dev -- --host\` or \`HOST=0.0.0.0\`); a localhost-only bind is unreachable from outside this container.
 2. Build the preview URL from this run's injected env (Bash): \`echo "$PREVIEW_BASE_URL/<port>/?pvt=$PREVIEW_TOKEN"\` — substitute your server's actual port.
 3. Serve your app at its own ROOT and leave the URL prefix alone — do NOT set a base path for the preview (Vite \`base\`, Next.js \`basePath\`, CRA \`PUBLIC_URL\`). The platform routes this page's root-absolute requests (\`/assets/…\`, \`/@vite/client\`, XHR) back to your server for you. Setting a base to the preview prefix makes the dev server redirect to it in a LOOP, and re-adding the prefix by hand is never needed.

@@ -46,11 +46,21 @@ describe('browser skill preview prompt fragment', () => {
     process.env.PREVIEW_BASE_URL = 'http://control-plane:3002/preview/exec-1';
     process.env.PREVIEW_TOKEN = 'pv1.exec-1.999.aabb';
     const f = fragment();
-    // the recipe's three load-bearing facts: the env names, the 0.0.0.0 bind,
-    // and the never-localhost warning
+    // the recipe's load-bearing facts: the env names, the 0.0.0.0 bind, and
+    // that the browser's localhost is not this run's machine (measured
+    // 2026-08-18: an agent navigated to localhost first). Stated as a FACT,
+    // never as "NEVER navigate to localhost" — a project's own apps on
+    // localhost ARE reachable for members granted them (episode
+    // run_log/magnum/2026-10-19-qa-frozen-clock-screenshot-timeout). The same
+    // sentences, word for word, are the browser sidecar's reachability facts;
+    // its reachability-facts.test.js pins that pair.
     expect(f).toContain('$PREVIEW_BASE_URL/<port>/?pvt=$PREVIEW_TOKEN');
     expect(f).toContain('0.0.0.0');
-    expect(f).toMatch(/NEVER navigate to http:\/\/localhost/);
+    expect(f).toContain("localhost there is not the run's machine, so http://localhost:<port> never reaches a server the run started.");
+    expect(f).toContain("A page a run started itself opens through that run's preview address");
+    expect(f).toContain('This run has both.');
+    expect(f).not.toMatch(/NEVER navigate to http:\/\/localhost/);
+    expect(f).not.toMatch(/localhost\/private URLs are unreachable/);
     // the DON'T-set-a-base fact. The platform routes root-absolute assets back
     // itself (preview-server.js ROOT_COOKIE); an agent that "fixes" the blank
     // page by pointing Vite's `base` at the preview prefix instead lands in a
