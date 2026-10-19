@@ -696,6 +696,44 @@ describe('read_run_logs', () => {
     expect((await call('read_run_logs', { mode: 'start', lineChars: LOG_LINE_CHARS_MAX + 1 })).error).toMatch(/lineChars must be/);
   });
 
+  // A/B (run_log/magnum/2026-10-19-members-cannot-read-platform-history, item C): members of 778/793 asked many
+  // rounds for the source records of runs 3f137ac5 / 775b0415, which stopped before preparing any. Before, "sources"
+  // was refused as an unknown mode and nothing could say "this run prepared no sources". Now it reads the platform's
+  // record of what a run prepared, through the same project + run-access gates as every run read.
+  it('mode "sources": what the run prepared, from the platform\'s record, listed fields only', async () => {
+    const RECORD = { recorded: true, status: 'ready', preparedAt: '2026-10-18T10:00:00.000Z', hostPath: '/home/x', preparationDigest: 'd'.repeat(64),
+      dispatchArgsEncrypted: { ct: 'CIPHERTEXT' }, token: 'secret-value',
+      workAreas: [{ id: 'a1', name: 'app', stableName: '1-app', kind: 'worktree', access: 'editable', preparedRevision: 'c'.repeat(40),
+        branch: 'agent/work-a1', released: false, hostPath: '/home/x/app', originalPath: '/home/x/app', commonDir: '/home/x/app/.git', pathDigest: 'e'.repeat(64) },
+      { id: 'b2', name: 'lib', kind: 'direct', access: 'read-only', branch: '', released: true, saved: false, savedIdentity: null, savedAt: null }] };
+    mockDoor([['/local-changes/', () => ({ json: RECORD })]]);
+    process.env.RUN_LOGS_API_URL = 'https://logs.example.test/';
+    let out: any;
+    try { out = await call('read_run_logs', { executionId: 'run-9', mode: 'sources' }); } finally { delete process.env.RUN_LOGS_API_URL; }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ method: 'GET', url: 'http://cp.local/local-changes/proj-1/run-9' });
+    expect(out).toEqual({ executionId: 'run-9', mode: 'sources', recorded: true, status: 'ready', preparedAt: '2026-10-18T10:00:00.000Z', sources: [
+      { id: 'a1', name: 'app', stableName: '1-app', kind: 'worktree', access: 'editable', revision: 'c'.repeat(40), branch: 'agent/work-a1', released: false },
+      { id: 'b2', name: 'lib', kind: 'direct', access: 'read-only', branch: '', released: true, saved: false } ] });
+    const text = JSON.stringify(out);
+    for (const leak of ['/home/x', 'CIPHERTEXT', 'secret-value', 'dispatchArgsEncrypted', 'd'.repeat(64), 'e'.repeat(64)]) expect(text).not.toContain(leak);
+  });
+
+  it('mode "sources": a run with no source record says it prepared no sources', async () => {
+    mockDoor([['/local-changes/', () => ({ json: { recorded: false, status: null, workAreas: [],
+      note: 'This run prepared no sources: the platform holds no source record for it.' } })]]);
+    const out = await call('read_run_logs', { executionId: '3f137ac5-0000-4000-8000-000000000000', mode: 'sources' });
+    expect(out).toEqual({ executionId: '3f137ac5-0000-4000-8000-000000000000', mode: 'sources', recorded: false, status: null, sources: [],
+      note: 'This run prepared no sources: the platform holds no source record for it.' });
+  });
+
+  it('mode "sources": a run outside the caller\'s run access is refused as a log read is', async () => {
+    mockDoor([['/local-changes/', () => ({ ok: false, status: 403, json: { code: 'LOCAL_CANDIDATE_FORBIDDEN', error: 'That run is outside this run\'s family' } })]]);
+    const out = await call('read_run_logs', { executionId: 'stranger', mode: 'sources' });
+    expect(Object.keys(out)).toEqual(['error']);
+    expect(out.error).toMatch(/outside this run's family/);
+  });
+
   it('is declared as a tool and mentioned in the prompt', () => {
     expect(agentMessagingSkill.tools.map((t: any) => t.name)).toContain('read_run_logs');
     expect(agentMessagingSkill.promptFragment).toMatch(/read_run_logs/);

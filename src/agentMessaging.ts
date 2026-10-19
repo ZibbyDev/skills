@@ -354,6 +354,38 @@ export function compactLogPage(page: any, executionId: string, mode: string, win
   return out;
 }
 
+/**
+ * WHAT SOURCES A RUN PREPARED (`mode: "sources"`): the platform's own record of
+ * the folders and repositories it prepared for that run — their kind, access,
+ * revision, branch — or the plain fact that it prepared none. Members of
+ * 778/793 asked many rounds for the source records of runs that stopped before
+ * preparing any, and nothing could tell them none existed
+ * (run_log/magnum/2026-10-19-members-cannot-read-platform-history, item C).
+ *
+ * The box's `GET /local-changes/:projectId/:executionId` (selfhosted
+ * local-projects/candidate-routes.js createWorkAreasHandler) answers it behind
+ * the same gates as a log read: the token names this project, the run is one of
+ * this project, the caller agent's runAccess reaches it, values scrubbed. Only
+ * the fields listed here reach the model — never a host path, a digest, or the
+ * run's dispatch envelope, which the door does not return either.
+ */
+const SOURCE_FIELDS = ['id', 'name', 'stableName', 'kind', 'access', 'branch', 'released', 'saved'] as const;
+/** The platform's source record → what the model reads (listed fields only). PURE, exported for tests. */
+export function compactSourcesPage(page: any, executionId: string) {
+  const out: Record<string, any> = { executionId, mode: 'sources' };
+  if (typeof page?.recorded === 'boolean') out.recorded = page.recorded;
+  if (typeof page?.status === 'string' || page?.status === null) out.status = page.status;
+  if (typeof page?.preparedAt === 'string') out.preparedAt = page.preparedAt;
+  out.sources = (Array.isArray(page?.workAreas) ? page.workAreas : []).filter((a: any) => a && typeof a === 'object').map((a: any) => {
+    const s: Record<string, any> = {};
+    for (const k of SOURCE_FIELDS) if (typeof a[k] === 'string' || typeof a[k] === 'boolean') s[k] = a[k];
+    if (typeof a.preparedRevision === 'string' && a.preparedRevision) s.revision = a.preparedRevision;
+    return s;
+  });
+  if (typeof page?.note === 'string' && page.note) out.note = page.note;
+  return out;
+}
+
 async function readRunLogs(args: any) {
   const token = getSessionToken();
   if (!token) return { error: 'No backend credential (PROJECT_API_TOKEN). Agent messaging is only available inside a Zibby run.' };
@@ -364,6 +396,13 @@ async function readRunLogs(args: any) {
   // Cloud serves /logs on the workflows-subdomain API and injects RUN_LOGS_API_URL;
   // a box / dev tunnel serve it on the account API and leave it unset.
   const logsBase = (process.env.RUN_LOGS_API_URL || '').trim().replace(/\/$/, '') || getAccountApiUrl();
+  if (args?.mode === 'sources') {
+    // The record lives with the box's local projects (account API), not with the cloud log service.
+    const url = `${getAccountApiUrl()}/local-changes/${encodeURIComponent(projectId)}/${encodeURIComponent(executionId)}`;
+    const res = await fetchWithDeadline(url, { headers: authHeaders(token) }, { kind: 'api', what: 'agent-messaging GET run sources' });
+    if (!res.ok) return { error: await errorTextOf(res, `reading what sources run ${executionId} prepared`) };
+    return compactSourcesPage(await res.json(), executionId);
+  }
   if (args?.mode === 'start') {
     const sq = startQuery(args);
     if ('error' in sq) return sq;
@@ -1027,7 +1066,7 @@ refused; credentials belong on the agent's Env tab.`,
         type: 'object',
         properties: {
           executionId: { type: 'string', description: 'The run (from list_running_agents); omitted: this run.' },
-          mode: { type: 'string', enum: ['head', 'tail', 'search', 'start'], description: '"head": first lines (what it started with); "tail" (default): latest lines, live; "search": lines containing query, oldest first; "start": the start input as the platform recorded it (with its title and hand-over), lineChars of it from lineOffset.' },
+          mode: { type: 'string', enum: ['head', 'tail', 'search', 'start', 'sources'], description: '"head": first lines (what it started with); "tail" (default): latest lines, live; "search": lines containing query, oldest first; "start": the start input as the platform recorded it (with its title and hand-over), lineChars of it from lineOffset; "sources": the folders and repositories the platform prepared for the run, as recorded — { recorded, status, preparedAt?, sources: [{ id, name, stableName?, kind, access, revision?, branch, released, saved? }], note? }. recorded false: the run prepared no sources (a record is written when sources are prepared).' },
           lines: { type: 'integer', description: 'How many lines (default 100, max 500).' },
           query: { type: 'string', description: 'mode "search": exact text, case-sensitive, up to 200 characters.' },
           cursor: { type: 'string', description: 'Cursor from a previous read.' },
