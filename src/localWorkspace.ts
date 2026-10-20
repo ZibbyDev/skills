@@ -25,12 +25,21 @@ const EXECUTION_DIRECTORY = /^\/workspace\/local-project\/[a-zA-Z0-9-]+(?:\/(?!\
 // handed one such folder beside its repo, and the tool told the model "do not
 // infer directories" — a code review on 542 stopped there, inconclusive,
 // while the same files were readable with plain shell tools (2026-10-01).
+// The same holds for an entry with no files prepared YET (`deferred`, until
+// prepare_workspaces cuts it) and one listed only for choosing (`catalog`).
+// A READ-ONLY folder cut from its checkout's commit is `direct` WITH that
+// commit (host-targets.js readOnlyCutTarget, 2026-10-15): refusing it made the
+// whole manifest invalid for every run handed a read-only Git folder.
 const EXECUTION_REVISION = /^[a-f0-9]{40,64}$/;
+const NO_REVISION_YET = new Set(['direct', 'deferred', 'catalog']);
 function validExecutionRevision(item: any) {
-  return item.kind === 'direct'
-    ? item.revision === ''
-    : typeof item.revision === 'string' && EXECUTION_REVISION.test(item.revision);
+  return typeof item.revision === 'string'
+    && (EXECUTION_REVISION.test(item.revision) || (NO_REVISION_YET.has(item.kind) && item.revision === ''));
 }
+// THE PERSON'S FOLDER AS IT IS ON DISK, with the folder's access, beside the run's work
+// (selfhosted live-view.js; backend local-project-input.js liveViewDirectories):
+// an entry's `liveDirectory`, the run's `liveViews`. Same shape rule as a work directory.
+const validLiveDirectory = (value: unknown) => value === undefined || (typeof value === 'string' && EXECUTION_DIRECTORY.test(value));
 
 function executionWorkspaces(value?: string | object, expectedExecutionId?: string) {
   const raw = value === undefined ? process.env.LOCAL_PROJECT_CONTEXT : value;
@@ -42,11 +51,18 @@ function executionWorkspaces(value?: string | object, expectedExecutionId?: stri
     directory: context.path, revision: context.revision, branch: context.branch, status: 'ready' }];
   if (!Array.isArray(workspaces) || !workspaces.length || workspaces.length > 16
     || workspaces.some(item => !EXECUTION_DIRECTORY.test(item.directory || '')
-      || !validExecutionRevision(item))) throw new Error('Invalid execution workspace context');
+      || !validExecutionRevision(item) || !validLiveDirectory(item.liveDirectory))) throw new Error('Invalid execution workspace context');
+  const liveViews = Array.isArray(context.liveViews) ? context.liveViews : [];
+  if (liveViews.some((view: any) => !view || !validLiveDirectory(view.directory) || typeof view.directory !== 'string'))
+    throw new Error('Invalid execution workspace context');
   return { workspaces, executionId: context.executionId, accessMode: 'native-tools',
     // A fact the platform tells the agent about this run's list (e.g. more repositories exist than are listed).
     ...(typeof context.notice === 'string' && context.notice ? { notice: context.notice } : {}),
-    instruction: 'These directories are already in YOUR execution container. Use your existing file, search and command tools directly. No additional clone, remote sandbox or model delegation is needed.' };
+    ...(liveViews.length ? { liveViews } : {}),
+    instruction: 'These directories are already in YOUR execution container. Use your existing file, search and command tools directly. No additional clone, remote sandbox or model delegation is needed.'
+      + (liveViews.length || workspaces.some((item: any) => item.liveDirectory)
+        ? ' A folder\'s `directory` is where this run works: cut from the commit named by `revision` (or, with `inPlace`, the person\'s folder itself, which has no commit). Its `liveDirectory` is the person\'s folder as it is on disk now, in this same container, with the folder\'s `access`: it includes files not in that commit (`uncommittedOnDisk` lists them, as they were when the work area was cut), which may be another person\'s unfinished edits; it can change while you read it; in a read-only folder its secret files (`maskedFiles`, e.g. .env) read as empty; and what you deliver from your work area is built from your `directory`, never from it. A file you need from it can be copied into your directory with ordinary shell tools (cp, cat).'
+        : '') };
 }
 
 export const localWorkspaceSkill: any = {

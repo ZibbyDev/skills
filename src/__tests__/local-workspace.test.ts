@@ -87,7 +87,7 @@ test('a read-only folder with no Git (revision "") beside the repo does not inva
   for (const entry of [
     { kind: 'worktree', revision: '' },
     { kind: 'worktree' },
-    { kind: 'direct', revision: 'a'.repeat(40) },
+    { kind: 'direct', revision: 'not-a-commit' },
   ]) {
     vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', workspaces: [
       { id: 'one', directory: '/workspace/local-project/tree/backend', branch: 'HEAD', ...entry },
@@ -95,6 +95,41 @@ test('a read-only folder with no Git (revision "") beside the repo does not inva
     expect(JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces')))
       .toMatchObject({ ok: false, error: expect.stringContaining('manifest is invalid') });
   }
+});
+// run_log/magnum/2026-10-20-folder-files-outside-checkout-dropped. A/B: on the
+// code before, the read-only cut, the pending and the choosing-only entries
+// each made the WHOLE manifest invalid, and nothing named the live view.
+test('every entry a run is really handed is valid, and each folder names its live view beside its work', async () => {
+  vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', content: 'local-files', workspaces: [
+    { id: 'one', name: 'bug-workflow-mockup', kind: 'deferred', directory: '/workspace/local-project/tree/bug-workflow-mockup', revision: '', branch: 'agent/work-one', status: 'pending',
+      liveDirectory: '/workspace/local-project/live/bug-workflow-mockup' },
+    { id: 'two', name: 'bifang', kind: 'direct', inPlace: true, directory: '/workspace/local-project/tree', revision: '', branch: '', status: 'ready',
+      liveDirectory: '/workspace/local-project/live' },
+    { id: 'three', name: 'backend', kind: 'direct', access: 'read-only', directory: '/workspace/local-project/tree/backend', revision: 'c'.repeat(40), branch: 'main', status: 'ready',
+      readOnlyCut: { revision: 'c'.repeat(40), branch: 'main' }, liveDirectory: '/workspace/local-project/live/backend',
+      uncommittedOnDisk: { count: 1, paths: [{ status: '??', path: 'prd.md' }], truncated: false } },
+    { id: 'four', name: 'library', kind: 'catalog', directory: '/workspace/local-project/tree/library', revision: '', branch: 'HEAD', status: 'selectable',
+      liveDirectory: '/workspace/local-project/live/library' },
+  ], liveViews: [{ folderPath: '/Users/me/bifang', directory: '/workspace/local-project/live', maskedFiles: ['.env'], fullyChecked: true }] }));
+  const list = JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces'));
+  expect(list).toMatchObject({ ok: true, accessMode: 'native-tools' });
+  expect(list.workspaces.map((w: any) => w.liveDirectory)).toEqual(['/workspace/local-project/live/bug-workflow-mockup',
+    '/workspace/local-project/live', '/workspace/local-project/live/backend', '/workspace/local-project/live/library']);
+  expect(list.workspaces[2].uncommittedOnDisk.paths).toEqual([{ status: '??', path: 'prd.md' }]);
+  expect(list.liveViews).toEqual([expect.objectContaining({ directory: '/workspace/local-project/live', maskedFiles: ['.env'] })]);
+  expect(list.instruction).toMatch(/liveDirectory` is the person's folder as it is on disk now, in this same container, with the folder's `access`/);
+  expect(list.instruction).toMatch(/in a read-only folder its secret files \(`maskedFiles`, e.g. .env\) read as empty/);
+  expect(list.instruction).toMatch(/may be another person's unfinished edits/);
+  expect(list.instruction).toMatch(/what you deliver from your work area is built from your `directory`, never from it/);
+  expect(list.instruction).toMatch(/cp, cat/);
+  // A live directory outside the run's local-project tree is refused like any other.
+  vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', workspaces: [
+    { id: 'one', kind: 'direct', directory: '/workspace/local-project/tree', revision: '', liveDirectory: '/etc' }] }));
+  expect(JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces'))).toMatchObject({ ok: false, error: expect.stringContaining('manifest is invalid') });
+  // A run with no live view is told exactly what it was told before.
+  vi.stubEnv('LOCAL_PROJECT_CONTEXT', JSON.stringify({ executionId: 'execution', workspaces: [
+    { id: 'one', directory: '/workspace/local-project/one', revision: 'a'.repeat(40), branch: 'HEAD' }] }));
+  expect(JSON.parse(await localWorkspaceSkill.handleToolCall('list_workspaces')).instruction).toBe('These directories are already in YOUR execution container. Use your existing file, search and command tools directly. No additional clone, remote sandbox or model delegation is needed.');
 });
 test('ordinary declared skill, backend-session env derived through the shared wrapper', () => {
   expect(localWorkspaceSkill.id).toBe(SKILL_IDS.LOCAL_WORKSPACE);
