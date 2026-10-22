@@ -7,8 +7,8 @@
 # isolated tenants: every request names its graph by a SERVER-DERIVED
 # `graphId` (backend/src/handlers/graph-memory-store.js), never a client one.
 #
-# BASE: Alpine with its own Postgres 16 + Node 22 packages, pgvector compiled in
-# a throw-away stage so no compiler ships. Until 0.1.1 the base was the Debian
+# BASE: Alpine with its own Postgres 16 package + the official Node 22 binary
+# (see NODE below), pgvector compiled in a throw-away stage so no compiler ships. Until 0.1.1 the base was the Debian
 # `pgvector/pgvector:pg16` image + NodeSource Node (~690 MB unpacked, ~220 MB
 # download); the same Postgres 16 / Node 22 / pgvector here is a fraction of
 # that, chiefly by leaving out what this container never uses: the LLVM JIT
@@ -31,8 +31,21 @@
 #     collation version, but a version was recorded` per connection — a WARNING
 #     only. `REFRESH COLLATION VERSION` refuses that change on musl, and editing
 #     the catalog by hand is not worth silencing a log line.
-ARG ALPINE_VERSION=3.22
+ARG ALPINE_VERSION=3.23
 ARG PGVECTOR_VERSION=0.8.6
+# NODE (2026-10-22): the runtime's Node is the OFFICIAL node:<v>-alpine<alpine>
+# binary at an EXACT release, not Alpine's `nodejs` apk — Alpine's package
+# lagged the 2026-10-21 Node security release (CVE-2026-111497 Brotli decoder
+# OOB write, TLS hostname-validation bypasses; fixed in 22.23.4) while the
+# distro still served 22.23.2. Same Alpine release as every other stage, so the
+# binary's musl/libstdc++ ABI is the one it was built against. The runtime
+# stage asserts `node --version` == NODE_VERSION (a pin without an assert is a
+# wish). Alpine 3.22 → 3.23 moved with it (no node:22.23.4-alpine3.22 exists);
+# Postgres stays on the 16 series — asserted below against a live server.
+ARG NODE_VERSION=22.23.4
+
+# ── the official Node binary at the pinned release ───────────────────────────
+FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS node
 
 # ── pgvector, built against the SAME postgresql16 the runtime installs ───────
 FROM alpine:${ALPINE_VERSION} AS pgvector
@@ -49,8 +62,7 @@ RUN make PG_CONFIG=/usr/libexec/postgresql16/pg_config OPTFLAGS="" with_llvm=no 
     && make PG_CONFIG=/usr/libexec/postgresql16/pg_config OPTFLAGS="" with_llvm=no install DESTDIR=/out
 
 # ── the engine's node_modules (npm stays in this stage) ──────────────────────
-FROM alpine:${ALPINE_VERSION} AS deps
-RUN apk add --no-cache nodejs npm
+FROM node AS deps
 WORKDIR /app
 # The engine, installed from the npm REGISTRY: `package.json` pins
 # `@zibby/agent-graph-memory` to an EXACT version (no ^/~) — the same number as
@@ -65,6 +77,7 @@ RUN npm install --omit=dev --no-audit --no-fund --no-package-lock
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM alpine:${ALPINE_VERSION}
 ARG PGVECTOR_VERSION
+ARG NODE_VERSION
 
 # uid/gid 999 BEFORE the package install (its pre-install script keeps an
 # existing user) — see DATA-DIR COMPATIBILITY above. Alpine's base gives gid 999
@@ -74,9 +87,14 @@ RUN delgroup ping \
     && adduser -S -D -u 999 -G postgres -h /var/lib/postgresql -s /bin/sh postgres
 
 # bash: the entrypoint's shell. ca-certificates: outbound HTTPS to the embedding
-# provider. Node is Alpine's own build (same 22.x line the engine requires,
-# >=22.13); Postgres is the 16 series.
-RUN apk add --no-cache postgresql16 nodejs bash ca-certificates
+# provider. libstdc++/libgcc: the official Node binary's only shared libraries
+# beyond musl (it bundles OpenSSL, ICU, zlib, brotli, c-ares itself). Postgres
+# is the 16 series. Node = the binary alone (no npm/corepack/yarn ship).
+RUN apk add --no-cache postgresql16 libstdc++ libgcc bash ca-certificates
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+RUN got="$(node --version)"; [ "$got" = "v${NODE_VERSION}" ] \
+      || { echo "NODE PIN MISMATCH: image runs Node $got, NODE_VERSION says v${NODE_VERSION}" >&2; exit 1; }; \
+    echo "node $got ok"
 
 COPY --from=pgvector /out/usr/lib/postgresql16/ /usr/lib/postgresql16/
 COPY --from=pgvector /out/usr/share/postgresql16/extension/ /usr/share/postgresql16/extension/
