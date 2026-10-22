@@ -64,15 +64,31 @@ RUN make PG_CONFIG=/usr/libexec/postgresql16/pg_config OPTFLAGS="" with_llvm=no 
 # ── the engine's node_modules (npm stays in this stage) ──────────────────────
 FROM node AS deps
 WORKDIR /app
-# The engine, installed from the npm REGISTRY: `package.json` pins
-# `@zibby/agent-graph-memory` to an EXACT version (no ^/~) — the same number as
-# its `engineVersion` field, which test/declaration.test.js asserts and the
-# build-time check below re-verifies against what npm actually RESOLVED. The
-# package is public (`npm view @zibby/agent-graph-memory`), so no vendored
-# tarball and no registry credential are needed to build this image. Both the
-# engine and `pg` are pure JavaScript (no native addon), so musl is no concern.
+# The engine is `@zibby/agent-graph-memory` at EXACTLY `engineVersion` (asserted
+# again below and by test/declaration.test.js), installed from the package feed;
+# `pg` comes from npm. Both are pure JavaScript (no native addon), so musl is no
+# concern.
 COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund --no-package-lock
+# @zibby/* is never fetched from npm (founder, 2026-10-17 — it is not published
+# there any more). The sidecar's package.json names the @zibby packages it ships
+# in `packageFeed`; the publisher packs them from committed source into
+# .packed/ (selfhosted/dist/sidecar-source-dir.sh → packages/scripts/pack-tree.mjs
+# --release), .packed/tools/serve-packages.mjs serves that feed on 127.0.0.1 and
+# the WHOLE @zibby scope points there, so nothing of ours can come from the
+# registry. assert-package-sources.mjs then fails the build unless every
+# @zibby/* dir installed is byte-identical to a feed package.
+COPY .packed /tmp/feed
+RUN set -e; \
+    [ -f /tmp/feed/manifest.json ] || { echo "no package feed in the build context (.packed/manifest.json) — publish with selfhosted/dist/publish-sidecar.sh, which packs it from the tree; @zibby/* is never fetched from npm" >&2; exit 1; }; \
+    node /tmp/feed/tools/serve-packages.mjs /tmp/feed --port-file /tmp/feed.port > /tmp/feed.log 2>&1 & FEED_PID=$!; \
+    for i in $(seq 100); do [ -s /tmp/feed.port ] && break; sleep 0.1; done; \
+    [ -s /tmp/feed.port ] || { cat /tmp/feed.log >&2; exit 1; }; \
+    SPECS="$(node -e 'const p=require("./package.json"),m=require("/tmp/feed/manifest.json");console.log((p.packageFeed||[]).map(n=>n+"@"+(p.engineVersion&&n===p.engineOf?p.engineVersion:m.packages[n].version)).join(" "))')"; \
+    [ -n "$SPECS" ] || { echo "package.json declares no packageFeed" >&2; exit 1; }; \
+    npm install --omit=dev --no-audit --no-fund --no-save --no-package-lock "--@zibby:registry=http://127.0.0.1:$(cat /tmp/feed.port)/" $SPECS; \
+    kill "$FEED_PID"; \
+    node /tmp/feed/tools/assert-package-sources.mjs /tmp/feed/manifest.json /app/node_modules; \
+    rm -rf /tmp/feed /tmp/feed.port /tmp/feed.log; npm cache clean --force
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM alpine:${ALPINE_VERSION}

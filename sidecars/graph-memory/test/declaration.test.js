@@ -13,10 +13,11 @@
  *   3. version — package.json `version` is what publish-sidecar.sh publishes
  *      under; the template spec pins the same number (its updateChannel is
  *      null, so a mismatch means every deploy installs the OLD image forever).
- *   4. engine — `engineVersion` names the agent-graph the image ships, and the
- *      `@zibby/agent-graph-memory` dependency must be the REGISTRY package
- *      pinned to EXACTLY that version (no range: a `^`/`~` would let npm
- *      resolve a newer engine than the one this image claims to ship).
+ *   4. engine — `engineVersion` names the agent-graph the image ships. It is
+ *      built from the tree (packages/agent-graph) into the sidecar's package
+ *      feed, never fetched from npm (founder, 2026-10-17: @zibby/* is not
+ *      published there any more), so engineVersion must equal the tree's
+ *      version, and the package must not be a registry `dependency`.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,18 +65,26 @@ test('one version — package.json is what gets published, the spec pins it', ()
   }
 });
 
-test('the engine dependency is the registry package pinned to EXACTLY engineVersion', () => {
-  const dep = pkg.dependencies['@zibby/agent-graph-memory'];
+test('the engine comes from the package feed at EXACTLY engineVersion, never from npm', () => {
   assert.match(pkg.engineVersion, /^\d+\.\d+\.\d+$/);
-  assert.match(dep ?? '', /^\d+\.\d+\.\d+$/,
-    `@zibby/agent-graph-memory must be an exact semver from the npm registry — no ^/~, no file:/link: (got '${dep}')`);
-  assert.equal(dep, pkg.engineVersion,
-    'dependencies["@zibby/agent-graph-memory"] and engineVersion must move together');
-  // No leftover of the pre-publish vendored-tarball path anywhere in the image.
+  assert.equal(pkg.engineOf, '@zibby/agent-graph-memory');
+  assert.deepEqual(pkg.packageFeed, ['@zibby/agent-graph-memory']);
+  assert.equal(pkg.dependencies?.['@zibby/agent-graph-memory'], undefined,
+    'a registry dependency would make npm fetch the engine — it comes from the package feed (packageFeed)');
+  for (const name of Object.keys(pkg.dependencies || {})) assert.doesNotMatch(name, /^@zibby\//, `${name} would come from npm`);
+  // The tree's engine version, when the tree is checked out beside this repo.
+  const tree = resolve(ROOT, '..', '..', '..', 'agent-graph', 'package.json');
+  if (existsSync(tree)) {
+    assert.equal(pkg.engineVersion, JSON.parse(readFileSync(tree, 'utf8')).version,
+      'engineVersion must be the version packages/agent-graph builds — the feed holds that one only');
+  }
+  // The Dockerfile installs from the feed through the scoped registry and checks
+  // every @zibby/* dir against it; its build-time assert reads the SAME field.
+  assert.match(dockerfile, /^COPY \.packed \/tmp\/feed$/m);
+  assert.match(dockerfile, /--@zibby:registry=http:\/\/127\.0\.0\.1:/);
+  assert.match(dockerfile, /assert-package-sources\.mjs \/tmp\/feed\/manifest\.json \/app\/node_modules/);
   assert.doesNotMatch(dockerfile, /COPY vendor\//);
-  assert.equal(pkg.scripts?.vendor, undefined, 'the vendor script is gone — the engine comes from npm');
-  // …and the Dockerfile's build-time assert reads the SAME field and the SCOPED
-  // install path, so a bump that forgets one of the two fails the build, not a box.
+  assert.equal(pkg.scripts?.vendor, undefined);
   assert.match(dockerfile, /require\("\.\/package\.json"\)\.engineVersion/);
   assert.match(dockerfile, /node_modules\/@zibby\/agent-graph-memory\/package\.json/);
 });
