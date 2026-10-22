@@ -1,6 +1,6 @@
 {
   "name": "@zibby/skills",
-  "version": "2.0.28",
+  "version": "2.0.29",
   "description": "Built-in skill definitions for the Zibby agent-workflow framework",
   "type": "module",
   "main": "dist/index.js",
@@ -125,11 +125,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@resvg/resvg-js": "^2.6.2",
-    "@zibby/agent-workflow": "2.0.28",
+    "@zibby/agent-workflow": "2.0.29",
     "@zibby/bin-registry": "1.0.5",
     "@zibby/bin-oxlint": "^1.73.0",
     "@zibby/bin-semgrep": "^1.169.0",
-    "@zibby/skill-ids": "2.0.28",
+    "@zibby/skill-ids": "2.0.29",
     "echarts": "^6.1.0",
     "mem0ai": "npm:@zibby/mem0ai@^3.0.5",
     "zod": "^3.23.0 || ^4.0.0"
@@ -145,7 +145,7 @@
   },
   "optionalDependencies": {
     "@modelcontextprotocol/server": "2.2.0",
-    "@zibby/mcp-browser": "2.0.28",
+    "@zibby/mcp-browser": "2.0.29",
     "@zibby/mcp-memory": "*"
   },
   "devDependencies": {
