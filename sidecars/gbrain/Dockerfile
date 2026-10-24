@@ -4,7 +4,10 @@
 # dependency (see package.json + VENDOR.md); `bun install` fetches that exact
 # commit and its deps into node_modules, which this image redistributes along
 # with GBrain's MIT LICENSE.
-FROM oven/bun:1
+ARG BUN_VERSION=1.4.4
+FROM oven/bun:${BUN_VERSION}
+ARG BUN_VERSION
+RUN test "$(bun --version)" = "$BUN_VERSION"
 
 WORKDIR /app
 
@@ -13,8 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
     && rm -rf /var/lib/apt/lists/*
 
 # Install the pinned gbrain (+ its deps) first for better layer caching.
-COPY package.json ./
-RUN bun install
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
 
 # Make the vendored gbrain CLI resolvable on PATH.
 ENV PATH="/app/node_modules/.bin:${PATH}"

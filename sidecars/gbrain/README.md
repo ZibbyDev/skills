@@ -18,6 +18,11 @@ vendors GBrain as a **commit-pinned** dependency (`package.json` →
 `github:garrytan/gbrain#<sha>`; see `VENDOR.md` + `GBRAIN_LICENSE`). A thin
 adapter (`brain.js`) translates each REST call into a real GBrain CLI operation:
 
+Sidecar 0.4.3 pins Bun 1.4.4 (the 2026-10-22 security release) and verifies its
+version during the image build. `bun.lock` preserves the dependency graph from
+the running 0.4.2 image; `bun install --frozen-lockfile` prevents a runtime-only
+rebuild from silently upgrading the application dependencies.
+
 | REST route | GBrain operation | GBrain command |
 |---|---|---|
 | `POST /ingest` (upsert) | `put_page` (chunk + embed + index) | `gbrain capture --file <md> --slug <slug>` |
