@@ -184,6 +184,10 @@ Tools:
       description: this.description,
       // NO `alwaysLoad`: the SDK defers MCP tools behind ToolSearch by design and
       // ToolSearch reaches them — measured, see MCP_TOOL_LOADING.md.
+      // On a CHAT CALL, though, memory is one of the few things every chat turn
+      // needs in front (founder, 2026-10-25), while everything else sits behind
+      // the search (@zibby/core mcp-server-config.js CHAT_PINNED).
+      chatAlwaysLoad: true,
     };
   },
 

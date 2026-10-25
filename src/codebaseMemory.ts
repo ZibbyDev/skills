@@ -36,6 +36,9 @@
  * per-repo marker under CBM_CACHE_DIR) indexes the checked-out repo with the imperative
  * `cli index_repository` path BEFORE the node's agent runs. Delivery and index
  * failures are written to the run log and the graph is never claimed ready.
+ * When nothing is checked out yet and the platform serves this run's MCP, the
+ * artifact is not prepared here at all: the first tool call prepares it
+ * (handleToolCall), so a run that never uses these tools never pays for them.
  *
  * It only helps agents whose repo is ALREADY checked out when the node starts.
  * An agent that clones INSIDE its own run has nothing to index at hook time —
@@ -100,6 +103,35 @@ function repoDirToIndex() {
     }
   } catch { /* nothing checked out we can trust */ }
   return null;
+}
+
+/**
+ * Does the platform serve this run's MCP, so nothing in this process will
+ * start the stdio server? The CLI writes exactly '1' after its run-start
+ * preflight confirmed it (@zibby/cli workflows/run.js; @zibby/core
+ * strategies/shared-platform-mcp.js reads the same variable). Then the binary
+ * is needed only by a tool call (handleToolCall, a one-shot in this run's
+ * container) or to index a checkout — never to list the tools, which are
+ * declared below. Strictly '1': any other value keeps the old, eager
+ * preparation, so a drift in that contract costs time, never a tool.
+ */
+function platformServesMcp(): boolean {
+  return String(process.env.MCP_SHARED_PLATFORM || '').trim() === '1';
+}
+
+/**
+ * The binary, prepared now if this run does not have it yet. Concurrent and
+ * cross-process calls share one unpack (@zibby/bin-registry coalesces them).
+ */
+async function preparedBinary(): Promise<string | null> {
+  const bin = binPath();
+  if (bin && existsSync(bin)) return bin;
+  return ensureTool('codebase-memory', {
+    onEvent: ({ phase, version }) => {
+      if (phase === 'downloading') process.stderr.write(`[codebase-memory] downloading pinned v${version} artifact\n`);
+      if (phase === 'shared-cache-hit') process.stderr.write(`[codebase-memory] verified shared v${version} archive\n`);
+    },
+  });
 }
 
 /** Stable short hash of an absolute path, for the idempotency marker filename. */
@@ -169,11 +201,17 @@ unavailable, continue with file reads and search and state that limitation.`,
     };
   },
 
-  handleToolCall(name: string, args: Record<string, unknown> = {}) {
+  async handleToolCall(name: string, args: Record<string, unknown> = {}) {
     if (!CODEBASE_MEMORY_TOOLS.some((tool) => tool.name === name)) {
       return { content: [{ type: 'text', text: `Unknown codebase-memory tool: ${name}` }], isError: true };
     }
-    const bin = binPath();
+    // PREPARED ON FIRST USE. A run that never calls these tools never unpacks
+    // the binary (~2.4 s of a run's start, measured: run_log/product-owner/
+    // 2026-10-25-chat-turn-tool-startup-latency); the first call pays it once.
+    let bin: string | null = null;
+    try { bin = await preparedBinary(); } catch (error: any) {
+      return { content: [{ type: 'text', text: `Codebase-memory binary is unavailable in this run (${error?.reason || 'unknown'}): ${error?.message || error}` }], isError: true };
+    }
     if (!bin || !existsSync(bin)) {
       return { content: [{ type: 'text', text: 'Codebase-memory binary is unavailable in this run.' }], isError: true };
     }
@@ -215,23 +253,21 @@ unavailable, continue with file reads and search and state that limitation.`,
    */
   async invokeAgentOptions() {
     try {
+      const repoDir = repoDirToIndex();
+      // Nothing checked out to index, and no stdio server to start in this
+      // process: the binary waits for the first tool call (handleToolCall).
+      if (!repoDir && platformServesMcp()) return {};
       let bin = binPath();
-      if (!bin) {
+      if (!bin || !existsSync(bin)) {
         try {
-          bin = await ensureTool('codebase-memory', {
-            onEvent: ({ phase, version }) => {
-              if (phase === 'downloading') process.stderr.write(`[codebase-memory] downloading pinned v${version} artifact\n`);
-              if (phase === 'shared-cache-hit') process.stderr.write(`[codebase-memory] verified shared v${version} archive\n`);
-            },
-          });
+          bin = await preparedBinary();
         } catch (error: any) {
           process.stderr.write(`[codebase-memory] binary unavailable (${error?.reason || 'unknown'}): ${error?.message || error}. `
             + 'Code-graph tools are unavailable; review with file reads and search.\n');
           return {};
         }
       }
-      const repoDir = repoDirToIndex();
-      if (!repoDir) return {};
+      if (!repoDir || !bin) return {};
       const dir = cacheDir();
       try { mkdirSync(dir, { recursive: true }); } catch { /* non-fatal */ }
       const marker = join(dir, `.cbm-indexed-${pathHash(repoDir)}`);

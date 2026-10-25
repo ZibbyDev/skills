@@ -150,6 +150,10 @@ export const chatProgressSkill: any = {
       // does not reach for (live, 2026-10-07: codex members searched the toolbox
       // for report_progress and never called it). One tool, a few hundred tokens.
       alwaysLoad: true,
+      // …and on a CHAT CALL, where everything else sits behind the search, it
+      // is one of the few things every chat turn needs in front (@zibby/core
+      // mcp-server-config.js CHAT_PINNED).
+      chatAlwaysLoad: true,
     };
   },
 

@@ -7,7 +7,7 @@ import { CODEBASE_MEMORY_TOOL_SCHEMA_VERSION } from '../codebaseMemoryTools.js';
 import { entryFor } from '@zibby/bin-registry';
 
 describe('codebase-memory exact-run one-shot worker', () => {
-  it('declares every tool from the pinned binary and preserves stdout/stderr JSON results', () => {
+  it('declares every tool from the pinned binary and preserves stdout/stderr JSON results', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cbm-worker-'));
     const bin = join(dir, 'fake-cbm');
     writeFileSync(bin, `#!/bin/sh
@@ -35,14 +35,14 @@ exit 1
       expect(codebaseMemorySkill.tools.find((tool: { name: string }) => tool.name === 'index_repository')
         .input_schema.required).toContain('repo_path');
 
-      expect(codebaseMemorySkill.handleToolCall('list_projects', {})).toEqual({
+      expect(await codebaseMemorySkill.handleToolCall('list_projects', {})).toEqual({
         content: [{ type: 'text', text: '{"projects":[]}' }],
       });
-      expect(codebaseMemorySkill.handleToolCall('index_status', {})).toEqual({
+      expect(await codebaseMemorySkill.handleToolCall('index_status', {})).toEqual({
         content: [{ type: 'text', text: '{"error":"missing required argument: project"}' }],
         isError: true,
       });
-      expect(codebaseMemorySkill.handleToolCall('not_in_binary', {}).isError).toBe(true);
+      expect((await codebaseMemorySkill.handleToolCall('not_in_binary', {})).isError).toBe(true);
     } finally {
       if (oldBin === undefined) delete process.env.CBM_BIN; else process.env.CBM_BIN = oldBin;
       if (oldCache === undefined) delete process.env.CBM_CACHE_DIR; else process.env.CBM_CACHE_DIR = oldCache;
