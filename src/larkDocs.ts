@@ -846,6 +846,12 @@ export const larkDocsSkill: any = {
   // list. Deliberately an ALLOWLIST: no ANTHROPIC_API_KEY / AWS creds reach it.
   envKeys: ['PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', ...LARK_DOCS_APP_ENV_KEYS],
 
+  // WHAT A NODE THAT REACHES THESE TOOLS THROUGH THE TOOL SEARCH IS TOLD in
+  // place of the page below (its `searchSkills`; agent-workflow skill-registry
+  // `skillPromptText`). The page then travels with the tools.
+  intro: `## Lark Docs
+The \`larkdoc_*\`, \`larkwiki_*\` and \`larkbitable_*\` tools read, create and comment on Lark/Feishu documents and read Lark Bases (多维表格); they are found with the tool search, and each one's description carries this group's full guide (which links are Bases, and how to answer what changed).`,
+
   promptFragment: `## Lark Docs
 You can read, create, and append Lark/Feishu documents (docx), read/post/reply to their comments, and READ Lark Bases (多维表格 / bitable). This runs on the connected Lark Docs app (the chat app is used when no separate docs app is connected). Each \`larkdoc_*\` / \`larkwiki_*\` / \`larkbitable_*\` tool documents its own params and return shape in its tool description — they are not restated here.
 A Lark link is not always a document: a \`/base/…\` link, or a \`/wiki/…\` link carrying \`?table=tbl…\`, is a Base — read it with \`larkbitable_read_records\`, NOT \`larkdoc_get\` (which refuses it, since a Base has no document body). Base reads need the \`bitable:app:readonly\` scope on the connected app.

@@ -348,6 +348,12 @@ export const chartRenderSkill: any = {
   envKeys: ['ZIBBY_NODE_SESSION_PATH', 'ZIBBY_SESSION_PATH'],
   description: 'Chart render — local server-side chart rendering (Apache ECharts SVG SSR + resvg PNG); data never leaves the box',
 
+  // WHAT A NODE THAT REACHES THESE TOOLS THROUGH THE TOOL SEARCH IS TOLD in
+  // place of the page below (its `searchSkills`; agent-workflow skill-registry
+  // `skillPromptText`). The page then travels with the tools.
+  intro: `## Chart Render
+The \`chart_render\` tool draws a chart on this machine from an Apache ECharts option, as inline SVG for a page or as a file; it is found with the tool search, and its description carries the full guide.`,
+
   promptFragment: `## Chart Render (local, no external service)
 You can render charts LOCALLY with the chart_render tool — pass a standard
 Apache ECharts option object as \`spec\` (any chart type: bar, line, pie,

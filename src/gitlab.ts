@@ -1313,6 +1313,12 @@ export const gitlabSkill: any = {
   // project / merge request is addressed (every tool takes those two). What a
   // tool does and how to use it is that tool's own description below — read
   // when the tool is reached for, not sent with every request.
+  // WHAT A NODE THAT REACHES THESE TOOLS THROUGH THE TOOL SEARCH IS TOLD in
+  // place of the page below (its `searchSkills`; agent-workflow skill-registry
+  // `skillPromptText`). The page then travels with the tools.
+  intro: `## GitLab
+The \`gitlab_*\` tools reach the user's GitLab projects (gitlab.com or self-hosted) — discovery and clone, merge requests, issues; they are found with the tool search, and each one's description carries this group's full guide (how a project and a merge request are addressed).`,
+
   promptFragment: `## GitLab
 You have access to the user's GitLab projects via the REST API (cloud gitlab.com OR self-hosted) — discovery and clone, merge requests, issues. A "merge request" (MR) is GitLab's pull request. An MR is addressed by a PROJECT (numeric id OR full path like "group/repo") and an \`iid\` (the per-project MR number shown in the URL). For projects, prefer the full path form ("group/subgroup/repo") — it's what users have. Each tool's description says what it does.`,
 
