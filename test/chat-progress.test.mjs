@@ -138,3 +138,73 @@ test('the tool is pinned in front of the model (alwaysLoad), not left behind a t
   const r = chatProgressSkill.resolve();
   if (r.command) assert.equal(r.alwaysLoad, true);
 });
+
+// ── a reply that names what it answered marks it read in the run's own mailbox ──
+// (run_log/product-owner/2026-10-25-handled-mail-stays-unread: the product owner
+// answered "hey (latency check)" with answeredMessageIds, and the mail stayed unread.)
+const MAILBOX = { PROJECT_ID: 'proj-1', WORKFLOW_TYPE: 'product-owner' };
+function stubDoors(calls, ackBody = { ok: true, found: true }) {
+  vi.stubGlobal('fetch', async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    const body = String(url).includes('/inbox/') ? ackBody : { ok: true };
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+}
+
+test('[A/B] a successful reply acknowledges each named message in the run\'s OWN mailbox, with the run\'s token', async () => {
+  clearEnv(); setDoor(); Object.assign(process.env, MAILBOX);
+  const calls = []; stubDoors(calls);
+  try {
+    const r = JSON.parse(await chatProgressSkill.handleToolCall('report_progress', {
+      message: 'Hi — I am reviewing #40 and #47 now.', answeredMessageIds: ['1792892876844-d71311d3'],
+    }));
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.answeredMessageIds, ['1792892876844-d71311d3']); // the ledger receipt is unchanged
+    assert.deepEqual(r.acknowledged, ['1792892876844-d71311d3']);
+    const ack = calls.find((c) => c.url.includes('/inbox/'));
+    assert.ok(ack, 'before the fix no acknowledgement was ever sent');
+    assert.equal(ack.url, 'http://cp:3001/projects/proj-1/workflows/product-owner/inbox/1792892876844-d71311d3/ack');
+    assert.equal(ack.init.method, 'POST');
+    assert.equal(new Headers(ack.init.headers).get('authorization'), 'Bearer run-token');
+  } finally { for (const k of Object.keys(MAILBOX)) delete process.env[k]; }
+});
+
+test('a reply that names nothing, or fails, acknowledges nothing', async () => {
+  clearEnv(); setDoor(); Object.assign(process.env, MAILBOX);
+  const calls = []; stubDoors(calls);
+  try {
+    const plain = JSON.parse(await chatProgressSkill.handleToolCall('report_progress', { message: 'Still working on #40.' }));
+    assert.equal(plain.ok, true); assert.equal(plain.acknowledged, undefined);
+    const tooLong = JSON.parse(await chatProgressSkill.handleToolCall('report_progress', { message: 'x'.repeat(281), answeredMessageIds: ['m-1'] }));
+    assert.equal(tooLong.ok, false);
+    assert.equal(calls.filter((c) => c.url.includes('/inbox/')).length, 0);
+  } finally { for (const k of Object.keys(MAILBOX)) delete process.env[k]; }
+});
+
+test('an id that is not in the mailbox is reported, never fails the reply', async () => {
+  clearEnv(); setDoor(); Object.assign(process.env, MAILBOX);
+  stubDoors([], { ok: true, found: false });
+  try {
+    const r = JSON.parse(await chatProgressSkill.handleToolCall('report_progress', { message: 'Answered.', answeredMessageIds: ['m-x'] }));
+    assert.equal(r.ok, true);
+    assert.equal(r.acknowledged, undefined);
+    assert.deepEqual(r.notAcknowledged, [{ id: 'm-x', reason: 'no such message in your mailbox' }]);
+  } finally { for (const k of Object.keys(MAILBOX)) delete process.env[k]; }
+});
+
+test('served from the platform, the run\'s identity comes from the verified call context', async () => {
+  clearEnv(); setDoor();
+  const calls = []; stubDoors(calls);
+  const r = JSON.parse(await chatProgressSkill.handleToolCall('report_progress', { message: 'Answered.', answeredMessageIds: ['m-2'] },
+    { executionId: 'exec-1', projectId: 'proj-9', workflowType: 'designer', apiBase: 'http://127.0.0.1:3001' }));
+  assert.deepEqual(r.acknowledged, ['m-2']);
+  assert.equal(calls.find((c) => c.url.includes('/inbox/')).url, 'http://127.0.0.1:3001/projects/proj-9/workflows/designer/inbox/m-2/ack');
+});
+
+test('the run\'s mailbox identity reaches the spawned server', () => {
+  setDoor(); Object.assign(process.env, MAILBOX);
+  try {
+    const r = chatProgressSkill.resolve();
+    if (r.command) for (const k of Object.keys(MAILBOX)) assert.equal(r.env[k], MAILBOX[k]);
+  } finally { for (const k of Object.keys(MAILBOX)) delete process.env[k]; }
+});

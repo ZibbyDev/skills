@@ -34,6 +34,18 @@
  *
  * POSTING reuses the slack/lark skills' own handleToolCall (their auth via
  * resolveIntegrationToken, their message APIs) — zero duplication.
+ *
+ * A REPLY THAT NAMES WHAT IT ANSWERED MARKS IT READ (2026-10-25, run_log/
+ * product-owner/2026-10-25-handled-mail-stays-unread). `answeredMessageIds` is
+ * the agent's own explicit receipt. It used to reach only the run's in-memory
+ * ledger, so a mailbox message the agent had answered stayed "unread" in its
+ * mailbox for good — nobody else acknowledges a person's words. A successful
+ * reply now acknowledges each named id through the platform's inbox door
+ * (`POST …/workflows/<own type>/inbox/<id>/ack`, with the run's own token: the
+ * door lets a run mark only its own agent's mail and records who did). The
+ * ledger receipt (`answeredMessageIds` in the result) is unchanged.
+ * WHAT IT RESTRICTS: nothing — a failed acknowledgement is reported in the
+ * result and never fails the reply.
  */
 
 import { existsSync } from 'fs';
@@ -70,6 +82,43 @@ async function recordRunLine(message: string, env: any = process.env): Promise<b
   } catch {
     return false;
   }
+}
+
+/** At most this many ids are acknowledged per reply (a bound, not a judgement). */
+export const ANSWERED_ACK_MAX = 20;
+
+/**
+ * Acknowledge the mailbox messages a successful reply names, in THIS run's
+ * own agent's mailbox. Identity comes from the shared-serving context when
+ * there is one, else the run's env. Never throws.
+ */
+export async function acknowledgeAnswered(ids: unknown[], context: any = {}, env: any = process.env) {
+  const out: { acknowledged: string[]; notAcknowledged: Array<{ id: string; reason: string }> } = { acknowledged: [], notAcknowledged: [] };
+  const list = [...new Set((Array.isArray(ids) ? ids : []).filter((id): id is string => typeof id === 'string' && !!id.trim()).map((id) => id.trim()))].slice(0, ANSWERED_ACK_MAX);
+  if (!list.length) return out;
+  const fromDoor = String(env.PROGRESS_API_URL || '').replace(/\/+$/, '').replace(/\/executions$/, '');
+  const base = String(context?.apiBase || fromDoor || '').replace(/\/+$/, '');
+  const token = String(env.PROJECT_API_TOKEN || context?.bearerToken || '');
+  const projectId = String(context?.projectId || env.PROJECT_ID || '').trim();
+  const workflowType = String(context?.workflowType || env.WORKFLOW_TYPE || '').trim();
+  for (const id of list) {
+    if (!base || !token || !projectId || !workflowType) { out.notAcknowledged.push({ id, reason: 'this run has no platform address, credential or agent name for its mailbox' }); continue; }
+    try {
+      const res: any = await fetchWithDeadline(`${base}/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowType)}/inbox/${encodeURIComponent(id)}/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: '{}',
+      }, { kind: 'api', what: 'chat-progress POST mailbox ack' });
+      let body: any = null;
+      try { body = await res.json(); } catch { /* no body */ }
+      if (!res?.ok) out.notAcknowledged.push({ id, reason: `HTTP ${res?.status}${body?.error ? `: ${String(body.error).slice(0, 160)}` : ''}` });
+      else if (body?.found === false) out.notAcknowledged.push({ id, reason: 'no such message in your mailbox' });
+      else out.acknowledged.push(id);
+    } catch (e: any) {
+      out.notAcknowledged.push({ id, reason: String(e?.message || e).slice(0, 160) });
+    }
+  }
+  return out;
 }
 
 function resolveSkillBin() {
@@ -130,6 +179,8 @@ export const chatProgressSkill: any = {
       'PROJECT_API_TOKEN', 'ZIBBY_ACCOUNT_API_URL', 'ZIBBY_ENV', 'ZIBBY_PROD_ACCOUNT_API_URL', 'ZIBBY_USER_TOKEN',
       // the run's own line (recordRunLine)
       'PROGRESS_API_URL', 'EXECUTION_ID',
+      // the run's own mailbox (acknowledgeAnswered)
+      'PROJECT_ID', 'WORKFLOW_TYPE',
       'SLACK_BOT_TOKEN', 'SLACK_TEAM_ID',
       // progress target
       'ZIBBY_PROGRESS_PROVIDER', 'ZIBBY_PROGRESS_CHAT_ID', 'ZIBBY_PROGRESS_MENTION',
@@ -157,11 +208,18 @@ export const chatProgressSkill: any = {
     };
   },
 
-  async handleToolCall(name, args) {
+  async handleToolCall(name, args, context?: any) {
     if (name !== 'report_progress') return JSON.stringify({ error: `Unknown tool: ${name}` });
-    const receipt = (result: any) => {
+    const receipt = async (result: any) => {
       if (result.ok !== true || !Array.isArray(args?.answeredMessageIds)) return JSON.stringify(result);
-      return JSON.stringify({ ...result, answeredMessageIds: args.answeredMessageIds.filter((id: unknown) => typeof id === 'string') });
+      const answered = args.answeredMessageIds.filter((id: unknown) => typeof id === 'string');
+      const acks = await acknowledgeAnswered(answered, context);
+      return JSON.stringify({
+        ...result,
+        answeredMessageIds: answered,
+        ...(acks.acknowledged.length ? { acknowledged: acks.acknowledged } : {}),
+        ...(acks.notAcknowledged.length ? { notAcknowledged: acks.notAcknowledged } : {}),
+      });
     };
     try {
       const message = String(args?.message || '').replace(/\s+/g, ' ').trim();
