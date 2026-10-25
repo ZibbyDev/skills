@@ -145,8 +145,7 @@
   },
   "optionalDependencies": {
     "@modelcontextprotocol/server": "2.2.0",
-    "@zibby/mcp-browser": "2.0.29",
-    "@zibby/mcp-memory": "*"
+    "@zibby/mcp-browser": "2.0.29"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
