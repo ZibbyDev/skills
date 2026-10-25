@@ -55,28 +55,26 @@ Every op body:
 
 | door / caller | origin | trusted |
 |---|---|---|
-| `/mcp/agent/<uuid>` graph tools reached THROUGH THE BROKER by a run whose agent holds the `requires` link DIRECTLY (its own `{ ref: 'endpoint:graph-memory/mcp', as: 'memory', use: 'code' }` — the fleet manager's reconcile recording what it observed) | `run:<executionId>` | `true` |
-| `/mcp/agent/<uuid>` graph tools reached THROUGH THE BROKER by a run whose agent INHERITS the link (`inherit: 'parent'` — a fleet member writing its own judgement) | `run:<executionId>` (its own run, not the owner's name) | `false` |
-| the same, when the link HOLDER's own declaration names that member (`requires[].trust: ['workflow:<slug>']` on the holder's entry; the broker decides it from the holder's row and its `childBindings`, and signs `granted` into the caller stamp — a member's own declaration is never read) | `run:<executionId>` | `true` |
+| `/mcp/agent/<uuid>` graph tools reached THROUGH THE BROKER by ANY run of the project — the link's holder or an agent that uses it (`inherit: 'parent'`), however the run was started (the broker serves a run only a row of its own project) | `run:<executionId>` (its own run, not the owner's name) | `true` |
 | `/mcp/agent/<uuid>` graph tools from a PAT / the endpoint's own bearer (a model's editor, a human), or any broker hop that is not a run | `agent:<owning workflowType>` | `false` |
-| `/datasets/stores/:id/<op>` from a RUN OF THE OWNING AGENT (its run-scoped token carries a signed `executionId`; the execution row is read under the caller's project and matched to the owner row by deployment uuid) | `run:<executionId>` | `true` |
-| `/datasets/stores/:id/<op>` from anyone else (another agent's run, a project/console token that names no run) | `agent:<owning workflowType>` (resolved from the store's owner row) | `false` |
+| `/datasets/stores/:id/<op>` from ANY run of the project (its run-scoped token carries a signed `executionId`; the execution row is read under the caller's project) | `run:<executionId>` | `true` |
+| `/datasets/stores/:id/<op>` from a caller that names no run (a project/console token) | `agent:<owning workflowType>` (resolved from the store's owner row) | `false` |
 | a run whose identity does not resolve to an agent row in its project | — | refused (403 `RUN_IDENTITY_UNRESOLVED`) before anything is forwarded |
 
 The decision is ONE pure function, `writerIdentity()` in
 `backend/src/handlers/graph-memory-store.js`, fed by both doors: `datasets.js`
 (`resolveTenant` → `executionId`, `resolveGraphWriter` → the execution row +
 the owner) and `mcp-agent-store.js` (`dispatchGraphToolCall` → the broker's
-SIGNED caller stamp, `services/caller-agent-stamp.js` `run: { executionId,
-inherited }`, which the broker mints from the SAME identity chain that computes
-the inherited-link tool allowlist — `services/inherited-links.js
+SIGNED caller stamp, `services/caller-agent-stamp.js` `run: { executionId }`,
+which the broker mints from the SAME identity chain that computes the
+inherited-link tool allowlist — `services/inherited-links.js
 resolveCallerLink`: run token → executionId → execution row → workflowUuid →
-that agent's `requires` entry for the entry's alias). So a model-facing call,
-and every member's write over an inherited link, can only write `provenance:
-'claimed'` — an `observed` claim from it is refused by the engine with a `403
-PermissionError` naming the fix — while the owning agent's own runtime and the
-direct link holder (the fleet manager's reconcile recording what it saw) may
-write `observed`.
+that agent's `requires` entry for the entry's alias). So every run of the
+project may write `observed` (founder, 2026-10-25: "All agents should be able
+to write to the team memory graph"), while a caller that is not a run (a
+model's editor on a PAT, a person's console token) can only write
+`provenance: 'claimed'` — an `observed` claim from it is refused by the engine
+with a `403 PermissionError` naming the fix.
 
 ## `privileged`, and the relation tools
 
