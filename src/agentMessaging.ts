@@ -156,6 +156,8 @@ export interface ActiveRun {
   createdAt?: string;
   updatedAt?: string;
   currentStep?: string;
+  /** The project repositories it has its own editable work area in now (self-host). */
+  repositories?: string[];
 }
 
 /** GET the project's in-flight runs. Envelope-tolerant (`{runs}` or `{data:{runs}}`). */
@@ -219,6 +221,7 @@ export function compactRun(r: ActiveRun, nowMs = Date.now()) {
   if (r.ticketKey) out.ticketKey = r.ticketKey;
   if (r.status) out.status = r.status;
   if (r.currentStep) out.currentStep = r.currentStep;
+  if (Array.isArray(r.repositories) && r.repositories.length) out.repositories = r.repositories.filter((x) => typeof x === 'string');
   out.ageMinutes = minutesSince(r.createdAt, nowMs);
   out.idleMinutes = minutesSince(r.updatedAt, nowMs);
   return out;
