@@ -54,7 +54,8 @@ describe('file_put', () => {
   it('rejects an unbound store name locally', async () => {
     const out = await call('file_put', { store: 'nope', path: 'a.txt', content: 'x' });
     expect(out.error).toMatch(/unknown store 'nope'/);
-    expect(fetchMock).not.toHaveBeenCalled();
+    // only the project's store list is read; nothing is written
+    expect(fetchMock.mock.calls.map(([url, opts]) => `${opts.method} ${url}`)).toEqual(['GET http://cp.local/datasets/stores']);
   });
 });
 
@@ -293,7 +294,13 @@ describe('the store boundary still holds for the disk paths', () => {
     writeFileSync(src, 'x');
     expect((await call('file_put', { store: 'someone-elses', path: 'a', fromPath: src })).error).toMatch(/unknown store 'someone-elses'/);
     expect((await call('file_get', { store: 'someone-elses', path: 'a', toPath: join(dir, 'out') })).error).toMatch(/unknown store 'someone-elses'/);
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The only request is the read of the project's store list (does a store of
+    // that name exist? — datasetStore-teammate.test.ts); nothing reaches a store.
+    for (const [url, opts] of fetchMock.mock.calls) {
+      expect(url).toBe('http://cp.local/datasets/stores');
+      expect(opts.method).toBe('GET');
+      expect(opts.body).toBeUndefined();
+    }
     expect(existsSync(join(dir, 'out'))).toBe(false);
   });
 

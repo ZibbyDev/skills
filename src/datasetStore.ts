@@ -168,6 +168,78 @@ function resolveStore(store) {
 }
 
 /**
+ * A name this run has not bound can still be a store that EXISTS in the
+ * project: one this agent made with ensure_store in an earlier run, or one a
+ * teammate made the same way (`key: agent:<workflowType>:<name>`). The run's
+ * token already reaches every store of its project (tenancy is the project,
+ * server-side); "private to an agent" was only this skill's naming. Before,
+ * such a name answered "unknown store" with no way through: a QA could not
+ * read the evidence a developer filed, and a developer's next run could not
+ * find its own store without re-running ensure_store
+ * (run_log/magnum/2026-10-29-teammate-store-unreachable: 12 runs hit it on
+ * 870/871/873/876/884, three extra runs only to hand files across).
+ *
+ * Found by a read of the project's store list, never by creating one:
+ *   - `<agent>:<name>` (or `<agent>/<name>`) names one agent's store — any tool;
+ *   - a bare name that is this agent's own store binds it, as ensure_store would;
+ *   - a bare name that exactly one teammate made resolves for the READ tools;
+ *     a write by a bare name stays on this agent's own stores and the answer
+ *     names the teammate's store, so a write never lands somewhere unasked.
+ * Otherwise the original refusal, plus the on-demand stores that exist.
+ * One extra list call, only on a call that would otherwise fail.
+ */
+async function listProjectStores() {
+  const session = getSessionToken();
+  if (!session) return null;
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/datasets/stores`, {
+    method: 'GET', headers: { Authorization: `Bearer ${session}` },
+  }, { kind: 'api', what: 'dataset store list' });
+  if (!res.ok) return null;
+  const data: any = await res.json().catch(() => null);
+  return Array.isArray(data?.stores) ? data.stores : null;
+}
+
+function onDemandStore(row) {
+  const m = /^agent:([^:]+):(.+)$/.exec(typeof row?.key === 'string' ? row.key : '');
+  if (!m || !row.storeId || row.status === 'deleted') return null;
+  return { owner: m[1], name: m[2], storeId: row.storeId };
+}
+
+async function findStore(store, { read = false } = {}) {
+  const bound = resolveStore(store);
+  if (!bound.error) return bound;
+  const requested = typeof store === 'string' ? store.trim() : '';
+  if (!requested) return bound;
+  let rows = null;
+  try { rows = await listProjectStores(); } catch { rows = null; }
+  if (!rows) return bound;
+  const made = rows.map(onDemandStore).filter(Boolean);
+  const qualified = /^([A-Za-z0-9_-]+)[:/]([A-Za-z0-9_-]+)$/.exec(requested);
+  if (qualified) {
+    const hit = made.find(s => s.owner === qualified[1] && s.name === qualified[2]);
+    if (hit) return { storeId: hit.storeId, name: requested, owner: hit.owner };
+  } else {
+    const own = agentNamespace();
+    const mine = made.find(s => s.owner === own && s.name === requested);
+    if (mine) {
+      ensuredStores[requested] = mine.storeId;
+      return { storeId: mine.storeId, name: requested };
+    }
+    const theirs = made.filter(s => s.name === requested);
+    if (theirs.length === 1 && read) return { storeId: theirs[0].storeId, name: requested, owner: theirs[0].owner };
+    if (theirs.length) {
+      return { error: `${bound.error}. Made with ensure_store by a teammate: ${theirs.map(s => `${s.owner}:${s.name}`).join(', ')} — pass that as \`store\` to use it; ensure_store makes a store of your own` };
+    }
+  }
+  const listed = made.map(s => `${s.owner}:${s.name}`);
+  if (!listed.length) return bound;
+  const shown = listed.slice(0, 40).join(', ') + (listed.length > 40 ? `, … (${listed.length - 40} more)` : '');
+  return { error: `${bound.error}. Stores agents of this project made with ensure_store (pass one as \`store\`, written <agent>:<name>): ${shown}` };
+}
+
+const ownerOf = (target) => (target?.owner ? { owner: target.owner } : {});
+
+/**
  * POST {base}/datasets/stores/{storeId}/{action} with `payload`. Addresses the
  * live store backend by the storeId resolved from a bound store name
  * (resolveStore). Tenancy is derived server-side from the Bearer token (the
@@ -462,7 +534,7 @@ store (or a file tool on either, etc.) is rejected.`,
           }
           // Resolve the logical store NAME → storeId via the bound env map. The
           // map is the allowlist: an unbound name is rejected BEFORE any call.
-          const target = resolveStore(args?.store);
+          const target = await findStore(args?.store);
           if (target.error) return JSON.stringify({ error: target.error });
           const agent = typeof args?.agent === 'string' && args.agent.trim() ? args.agent.trim() : agentNamespace();
           const payload: any = { record: args.record, agent };
@@ -472,11 +544,11 @@ store (or a file tool on either, etc.) is rejected.`,
             payload.description = args.description.trim();
           }
           const data = await storeFetch(target.storeId, 'append', payload);
-          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId, ...ownerOf(target) });
         }
 
         case 'dataset_query': {
-          const target = resolveStore(args?.store);
+          const target = await findStore(args?.store, { read: true });
           if (target.error) return JSON.stringify({ error: target.error });
           // Pass the DSL straight through; the backend validates it. Only
           // forward keys that were actually provided.
@@ -485,7 +557,7 @@ store (or a file tool on either, etc.) is rejected.`,
             if (args?.[key] != null) payload[key] = args[key];
           }
           const data = await storeFetch(target.storeId, 'query', payload);
-          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId, ...ownerOf(target) });
         }
 
         case 'ensure_store': {
@@ -502,7 +574,7 @@ store (or a file tool on either, etc.) is rejected.`,
         }
 
         case 'file_put': {
-          const target = resolveStore(args?.store);
+          const target = await findStore(args?.store);
           if (target.error) return JSON.stringify({ error: target.error });
           if (typeof args?.path !== 'string' || !args.path.trim()) {
             return JSON.stringify({ error: 'path is required (a relative file path like "reports/2026-07.json")' });
@@ -549,11 +621,11 @@ store (or a file tool on either, etc.) is rejected.`,
                 // Content-Length declared); the handle is closed below.
                 const stream = handle.createReadStream({ start: 0, end: st.size - 1, autoClose: false });
                 const data = await putViaPresign(target.storeId, putPath, stream, st.size, contentType);
-                return JSON.stringify({ ...data, fromPath, store: target.name, storeId: target.storeId });
+                return JSON.stringify({ ...data, fromPath, store: target.name, storeId: target.storeId, ...ownerOf(target) });
               }
               const bytes = await handle.readFile();
               const data = await storeFetch(target.storeId, 'put', { path: putPath, contentBase64: bytes.toString('base64'), contentType });
-              return JSON.stringify({ ...data, fromPath, store: target.name, storeId: target.storeId });
+              return JSON.stringify({ ...data, fromPath, store: target.name, storeId: target.storeId, ...ownerOf(target) });
             } finally {
               await handle.close().catch(() => {});
             }
@@ -568,17 +640,17 @@ store (or a file tool on either, etc.) is rejected.`,
           if (bytes.length > LARGE_FILE_THRESHOLD) {
             const contentType = explicitCt || (hasText ? 'text/plain; charset=utf-8' : 'application/octet-stream');
             const data = await putViaPresign(target.storeId, putPath, bytes, bytes.length, contentType);
-            return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+            return JSON.stringify({ ...data, store: target.name, storeId: target.storeId, ...ownerOf(target) });
           }
           const payload: any = { path: putPath };
           if (hasText) payload.content = args.content; else payload.contentBase64 = args.contentBase64;
           if (explicitCt) payload.contentType = explicitCt;
           const data = await storeFetch(target.storeId, 'put', payload);
-          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId, ...ownerOf(target) });
         }
 
         case 'file_get': {
-          const target = resolveStore(args?.store);
+          const target = await findStore(args?.store, { read: true });
           if (target.error) return JSON.stringify({ error: target.error });
           if (typeof args?.path !== 'string' || !args.path.trim()) {
             return JSON.stringify({ error: 'path is required' });
@@ -589,7 +661,7 @@ store (or a file tool on either, etc.) is rejected.`,
             // a file of any size costs the conversation one short line.
             const dl = await downloadToPath(target.storeId, getPath, runDiskPath(args.toPath));
             return JSON.stringify({
-              ok: true, store: target.name, storeId: target.storeId,
+              ok: true, store: target.name, storeId: target.storeId, ...ownerOf(target),
               path: getPath, toPath: dl.toPath, size: dl.size, contentType: dl.contentType,
             });
           }
@@ -612,7 +684,7 @@ store (or a file tool on either, etc.) is rejected.`,
           // (`content`); anything else stays base64 (`contentBase64`) with an
           // `encoding` marker so the agent knows what it got.
           const out: any = {
-            ok: true, store: target.name, storeId: target.storeId,
+            ok: true, store: target.name, storeId: target.storeId, ...ownerOf(target),
             path: data.path, size: data.size, contentType: data.contentType, lastModified: data.lastModified,
           };
           const buf = Buffer.from(data.contentBase64 || '', 'base64');
@@ -626,24 +698,24 @@ store (or a file tool on either, etc.) is rejected.`,
         }
 
         case 'file_list': {
-          const target = resolveStore(args?.store);
+          const target = await findStore(args?.store, { read: true });
           if (target.error) return JSON.stringify({ error: target.error });
           const payload: any = {};
           if (typeof args?.prefix === 'string' && args.prefix.trim()) payload.prefix = args.prefix.trim();
           if (args?.limit != null) payload.limit = args.limit;
           if (typeof args?.cursor === 'string' && args.cursor) payload.cursor = args.cursor;
           const data = await storeFetch(target.storeId, 'list', payload);
-          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId, ...ownerOf(target) });
         }
 
         case 'file_delete': {
-          const target = resolveStore(args?.store);
+          const target = await findStore(args?.store);
           if (target.error) return JSON.stringify({ error: target.error });
           if (typeof args?.path !== 'string' || !args.path.trim()) {
             return JSON.stringify({ error: 'path is required' });
           }
           const data = await storeFetch(target.storeId, 'delete', { path: args.path.trim() });
-          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId, ...ownerOf(target) });
         }
 
         case 'sqlite_exec':
@@ -659,7 +731,7 @@ store (or a file tool on either, etc.) is rejected.`,
           // read could DROP a table — and an agent driven by untrusted content
           // (invariant #5) is exactly who would be talked into doing it.
           // sqlite_exec keeps write access, which is its stated purpose.
-          const target = resolveStore(args?.store);
+          const target = await findStore(args?.store, { read: name === 'sqlite_query' });
           if (target.error) return JSON.stringify({ error: target.error });
           if (typeof args?.sql !== 'string' || !args.sql.trim()) {
             return JSON.stringify({ error: 'sql is required (a non-empty SQL string)' });
@@ -668,7 +740,7 @@ store (or a file tool on either, etc.) is rejected.`,
           if (name === 'sqlite_query') payload.readOnly = true;
           if (Array.isArray(args?.params)) payload.params = args.params;
           const data = await storeFetch(target.storeId, 'sql', payload);
-          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId });
+          return JSON.stringify({ ...data, store: target.name, storeId: target.storeId, ...ownerOf(target) });
         }
 
         default:
