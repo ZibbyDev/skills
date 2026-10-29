@@ -559,6 +559,9 @@ async function needsYou(args: any = {}) {
   const workflowUuid = selfWorkflowUuid();
   if (!workflowUuid) return { error: 'WORKFLOW_UUID is not set — this run does not know which agent it is.' };
   const data: Record<string, any> = { question: text, options: args.options };
+  // Backend owns normalization and run-family authorization. Preserve every
+  // explicit reference, including invalid values so its refusal is observable.
+  if (args.recoveryRefs !== undefined) data.recoveryRefs = args.recoveryRefs;
   if (typeof args.chatLabel === 'string' && args.chatLabel.trim()) data.chatLabel = args.chatLabel.trim();
   if (typeof args.likely === 'string' && args.likely.trim()) data.likely = args.likely;
   if (typeof args.multi === 'boolean') data.multi = args.multi;
@@ -1130,6 +1133,15 @@ refused; credentials belong on the agent's Env tab.`,
           chatLabel: { type: 'string', description: 'Chat button words, in the card\'s language (up to 16 characters; default "Chat").' },
           ticketKey: { type: 'string', description: 'The ticket, as the board keys it.' },
           ticketNumber: { type: 'string', description: 'The ticket as a person reads it (e.g. "#40").' },
+          recoveryRefs: {
+            type: 'array', minItems: 1,
+            description: 'Explicit local source resources this question is waiting on. Omit when unknown; the platform verifies ownership and recovery, never guesses from the question.',
+            items: { type: 'object', additionalProperties: false,
+              properties: { kind: { type: 'string', enum: ['local-source'] },
+                executionId: { type: 'string', pattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$' },
+                sourceId: { type: 'string', pattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$' } },
+              required: ['kind', 'executionId', 'sourceId'] },
+          },
           address: { type: 'string', description: 'An address of an app running on their computer that this asks them to approve (e.g. http://localhost:5173); recorded on the card, and the app can be added only against it.' },
           approve: { type: 'string', description: 'With address: the option that means yes, as written in options.' },
           [OPTION_ACTIONS_FIELD]: OPTION_ACTIONS_INPUT,
