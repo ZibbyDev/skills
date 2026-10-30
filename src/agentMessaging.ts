@@ -602,6 +602,47 @@ async function needsYou(args: any = {}) {
   };
 }
 
+// ── withdraw_card ───────────────────────────────────────────────────────────
+//
+// TAKING BACK A QUESTION NOBODY NEEDS ANSWERED ANY MORE. A card stays in front
+// of the person until something recorded closes it; only its agent knows when
+// the question became moot (the ticket left its board, the problem went away,
+// the work stopped), and before this it had no way to say so — six of magnum's
+// cards about boards it had left asked the founder for 9–11 days
+// (run_log/magnum/2026-10-30-stale-person-questions). The platform checks the
+// rest at the one door (backend handlers/project-events.js withdrawCard): the
+// card is this agent's and open, the reason is one plain sentence. The card
+// leaves the deck and stays in its history with the reason.
+
+async function withdrawCard(args: any = {}) {
+  const cardId = typeof args.cardId === 'string' ? args.cardId.trim() : '';
+  const why = typeof args.why === 'string' ? args.why.trim() : '';
+  if (!cardId) return { error: 'cardId is required: the id of your card (needs_you returned it; your read of the person\'s deck shows it)' };
+  if (!why) return { error: 'why is required: one sentence for the person — why nobody needs to answer it now' };
+  const token = getSessionToken();
+  if (!token) return { error: 'No backend credential (PROJECT_API_TOKEN). A card can only be withdrawn inside a Zibby run.' };
+  const projectId = selfProjectId();
+  if (!projectId) return { error: 'PROJECT_ID is not set — this run does not know which project it belongs to.' };
+  const workflowUuid = selfWorkflowUuid();
+  if (!workflowUuid) return { error: 'WORKFLOW_UUID is not set — this run does not know which agent it is.' };
+  const res = await fetchWithDeadline(`${getAccountApiUrl()}/projects/${encodeURIComponent(projectId)}/events`, {
+    method: 'POST',
+    headers: authHeaders(token, true),
+    body: JSON.stringify({
+      kind: 'card_withdrawn',
+      workflowUuid,
+      ...(selfWorkflowType() ? { workflowType: selfWorkflowType() } : {}),
+      ...(selfExecutionId() ? { executionId: selfExecutionId() } : {}),
+      data: { cardId, why },
+    }),
+  }, { kind: 'api', what: 'agent-messaging POST card withdrawal' });
+  if (!res.ok) return { error: await errorTextOf(res, 'withdrawing the card') };
+  const json: any = await res.json().catch(() => ({}));
+  const body = json?.data && typeof json.data === 'object' ? json.data : json;
+  if (body?.withdrawn !== true) return { error: 'The platform did not confirm the withdrawal — the card may still be in front of the person.' };
+  return { ok: true, cardId, note: 'The card is off the person\'s NEEDS YOU deck; it stays in its history with your reason.' };
+}
+
 // ── request_local_folder ────────────────────────────────────────────────────
 //
 // ASKING THE PERSON FOR ACCESS THE TEAM LACKS on this computer (founder,
@@ -1045,6 +1086,8 @@ refused; credentials belong on the agent's Env tab.`,
           return JSON.stringify(await needsYou(args));
         case 'request_local_folder':
           return JSON.stringify(await requestLocalFolder(args));
+        case 'withdraw_card':
+          return JSON.stringify(await withdrawCard(args));
         default:
           return JSON.stringify({ error: `Unknown tool: ${name}` });
       }
@@ -1147,6 +1190,18 @@ refused; credentials belong on the agent's Env tab.`,
           [OPTION_ACTIONS_FIELD]: OPTION_ACTIONS_INPUT,
         },
         required: ['text', 'options'],
+      },
+    },
+    {
+      name: 'withdraw_card',
+      description: 'Take back one of your cards that is still in front of a person when nobody needs its answer any more. It leaves their NEEDS YOU deck and stays in its history with your reason.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          cardId: { type: 'string', description: 'The card\'s id, as needs_you returned it or your read of the person\'s deck shows it.' },
+          why: { type: 'string', description: 'One sentence for the person: why nobody needs to answer it now (up to 500 characters).' },
+        },
+        required: ['cardId', 'why'],
       },
     },
     {

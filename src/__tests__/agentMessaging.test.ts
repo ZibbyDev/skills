@@ -474,7 +474,7 @@ describe('the skill object', () => {
     }
     expect(agentMessagingSkill.serverName).toBe('agent_messaging');
     expect(agentMessagingSkill.allowedTools).toEqual(['mcp__agent_messaging__*']);
-    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages', 'list_messages', 'needs_you', 'request_local_folder']);
+    expect(agentMessagingSkill.tools.map((t: any) => t.name)).toEqual(['list_running_agents', 'read_run_logs', 'message_agent', 'check_messages', 'list_messages', 'needs_you', 'withdraw_card', 'request_local_folder']);
   });
 
   it('unknown tool → {error}', async () => {
@@ -923,6 +923,33 @@ describe('list_messages — what this agent still owes, or its history', () => {
     expect(out.receipt).toMatch(/store-and-ring/);
     expect(out.receipt).toMatch(/No receipt/i);
     expect(agentMessagingSkill.tools.find((t: any) => t.name === 'message_agent').description).toMatch(/no receipt or reply comes back/i);
+  });
+});
+
+describe('withdraw_card — the agent takes back a question nobody needs answered (run_log/magnum/2026-10-30-stale-person-questions)', () => {
+  beforeEach(() => { process.env.WORKFLOW_UUID = 'uuid-self'; });
+  afterEach(() => { delete process.env.WORKFLOW_UUID; });
+
+  it('posts ONE card_withdrawn event naming the card and the reason, from this run', async () => {
+    mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: 'events:2-a', cardId: 'events:1-a', withdrawn: true } })]]);
+    const out = await call('withdraw_card', { cardId: ' events:1-a ', why: ' The ticket moved to a board this team no longer works. ' });
+    expect(out).toMatchObject({ ok: true, cardId: 'events:1-a' });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      url: 'http://cp.local/projects/proj-1/events', method: 'POST',
+      body: { kind: 'card_withdrawn', workflowUuid: 'uuid-self', workflowType: 'project-manager', executionId: SELF,
+        data: { cardId: 'events:1-a', why: 'The ticket moved to a board this team no longer works.' } },
+    });
+  });
+  it('the platform\'s refusal comes back as its sentence; an unconfirmed write is not called done; missing fields never reach it', async () => {
+    mockDoor([['/projects/proj-1/events', () => ({ ok: false, status: 409, json: { error: 'That card is no longer open — a person answered it, it was withdrawn, or the work moved past it' } })]]);
+    expect((await call('withdraw_card', { cardId: 'events:1-a', why: 'moot' })).error).toMatch(/no longer open/);
+    mockDoor([['/projects/proj-1/events', () => ({ status: 201, json: { ok: true, id: 'events:2-b' } })]]);
+    expect((await call('withdraw_card', { cardId: 'events:1-a', why: 'moot' })).error).toMatch(/did not confirm/);
+    seen = [];
+    expect((await call('withdraw_card', { why: 'moot' })).error).toMatch(/cardId is required/);
+    expect((await call('withdraw_card', { cardId: 'events:1-a' })).error).toMatch(/why is required/);
+    expect(seen).toHaveLength(0);
   });
 });
 
